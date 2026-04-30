@@ -363,13 +363,23 @@ async fn handle_claude_hook(
         }
     };
 
-    // Touch the session and stash permission_mode (every hook carries it).
-    if let Some(ref sid) = event.session_id {
+    // Touch the session and stash permission_mode (every hook carries
+    // it). When the hook is for the *active* session and the mode
+    // actually changed, push it to the device's mode LED right after.
+    let mode_changed_for_active = if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
         let s = claude.touch_session(sid);
+        let prev = s.permission_mode.clone();
         if event.permission_mode.is_some() {
             s.permission_mode = event.permission_mode.clone();
         }
+        let is_active = claude.active_session_id.as_deref() == Some(sid.as_str());
+        is_active && prev != event.permission_mode
+    } else {
+        false
+    };
+    if mode_changed_for_active {
+        crate::wrapper::sync_active_mode_to_device(state).await;
     }
 
     // Stale-alert cleanup. Two flavours of "Claude has progressed":
@@ -510,10 +520,10 @@ fn now_unix() -> u64 {
 }
 
 /// Hard cap on the rendered task line, in characters (not bytes). The
-/// device's TFT row fits ~28 glyphs at the current font; the firmware's
+/// device's TFT row fits 30 glyphs at the current font; the firmware's
 /// 128-byte field is a separate, looser cap. We budget the whole
 /// "{name}: {detail}" string against this so the prefix is accounted for.
-const MAX_TASK_LINE_CHARS: usize = 28;
+const MAX_TASK_LINE_CHARS: usize = 30;
 
 /// Extract a short task description from tool_name + tool_input for HID display.
 fn extract_task_text(tool_name: Option<&str>, tool_input: Option<&serde_json::Value>) -> String {

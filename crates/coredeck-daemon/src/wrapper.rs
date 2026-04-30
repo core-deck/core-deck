@@ -27,8 +27,8 @@ use axum::{
     Json,
 };
 use coredeck_protocol::{
-    encode_ws_frame, DaemonToWrapper, DisplayUpdate, WrapperRegisterSession, WrapperTab,
-    WrapperTabList, WrapperToDaemon, WsEventTag, TAB_STATE_STARTED, TAB_STATE_WORKING,
+    encode_ws_frame, DaemonToWrapper, DeviceMode, DisplayUpdate, WrapperRegisterSession,
+    WrapperTab, WrapperTabList, WrapperToDaemon, WsEventTag, TAB_STATE_STARTED, TAB_STATE_WORKING,
     TAB_STATE_INACTIVE,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -208,14 +208,20 @@ pub async fn wrapper_register_session(
         // wrappers wait for an OSC 1004 focus-in or tray click; we don't
         // want a new wrapper to steal the device while the user is
         // looking at something else.
-        {
+        let became_active = {
             let mut claude = state.claude_state.write().await;
             claude.touch_session(&req.session_id);
             if claude.active_session_id.is_none() {
                 claude.set_active_session(&req.session_id);
+                true
+            } else {
+                false
             }
-        }
+        };
         emit_tab_list(&state).await;
+        if became_active {
+            sync_active_mode_to_device(&state).await;
+        }
         StatusCode::OK
     } else {
         warn!(wrapper_id = %req.wrapper_id, "register-session for unknown wrapper");
@@ -497,6 +503,68 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
     }
 }
 
+/// Push the active session's `permission_mode` to the device's LED.
+/// Reads only state we already have on hand — never waits for a new
+/// hook. Safe to call from anywhere; short-circuits when the device is
+/// already in the target mode (so it's also safe to call on every
+/// active-session change without spamming HID writes).
+///
+/// Updates `device_status.mode` eagerly *before* the HID write so the
+/// echo `StateReport` we'll get back doesn't get mistaken for a fresh
+/// mode-button tap and trigger a Shift+Tab injection.
+pub async fn sync_active_mode_to_device(state: &DaemonState) {
+    let target_mode = {
+        let claude = state.claude_state.read().await;
+        let pm = claude
+            .active_session_id
+            .as_deref()
+            .and_then(|sid| claude.sessions.get(sid))
+            .and_then(|s| s.permission_mode.as_deref())
+            .map(map_permission_mode);
+        // No active session, or it has no permission_mode yet — leave
+        // the device alone. Pushing Default here would fight whatever
+        // the user just set with the mode button.
+        match pm {
+            Some(m) => m,
+            None => return,
+        }
+    };
+
+    let need_write = {
+        let mut status = state.device_status.write().await;
+        if status.mode == target_mode {
+            false
+        } else {
+            status.mode = target_mode;
+            true
+        }
+    };
+    if !need_write {
+        return;
+    }
+
+    let hid = state.hid.lock().await;
+    if !hid.is_connected() {
+        return;
+    }
+    if let Err(e) = hid.set_mode(target_mode) {
+        debug!(error = %e, "set_mode failed");
+    }
+}
+
+/// Map Claude Code's `permission_mode` string to the firmware's three
+/// `DeviceMode` slots. `bypassPermissions` collapses to `Default` —
+/// the device has no fourth color and "default" is the closest in
+/// behaviour ("permissions are off but unlike acceptEdits we're not
+/// committing to a specific posture").
+fn map_permission_mode(pm: &str) -> DeviceMode {
+    match pm {
+        "plan" => DeviceMode::Plan,
+        "acceptEdits" => DeviceMode::Accept,
+        _ => DeviceMode::Default,
+    }
+}
+
 /// Resolve a `wrapper_id` (empty = active) and queue a `Write { bytes }`.
 pub async fn write_to_target(
     state: &Arc<DaemonState>,
@@ -637,6 +705,7 @@ pub async fn set_active_wrapper(state: &Arc<DaemonState>, wrapper_id: &str) -> R
         // event will set it.
     }
     emit_tab_list(state).await;
+    sync_active_mode_to_device(state).await;
     Ok(())
 }
 

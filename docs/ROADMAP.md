@@ -236,7 +236,7 @@ Statusline currently deserializes `context_window`, `cost`, `model`,
 Available but ignored: `rate_limits.{five_hour,seven_day}`,
 `agent.name`, `worktree.*`, `exceeds_200k_tokens`.
 
-Display constraint: each task line on the device is ~28 chars, so
+Display constraint: each task line on the device is 30 chars, so
 the device can't usefully accommodate more text fields. Best fit is
 non-task surfaces — tray menu rows (rate-limit countdown), an alert
 when `exceeds_200k_tokens` flips, or the browser settings page for
@@ -274,16 +274,15 @@ Cosmetic but pleasant.
 
 ## Backlog / not yet committed
 
-- **Mode button: LED reflects current session mode**: daemon tracks
-  `s.permission_mode` from hooks (hooks.rs) but never pushes it back
-  to the device. Firmware's mode LED reads `current_mode_state`
-  (firmware `keymap.c`'s `rgb_matrix_indicators_advanced_user`), which
-  is updated by the daemon's `HidCommand::SetMode (0x07)` — exposed
-  as `hid.set_mode(DeviceMode)` in `device.rs:778`. Wire it: when
-  `permission_mode` changes in a hook handler, map
-  `"default"`/`"plan"`/`"acceptEdits"`/`"bypassPermissions"` →
-  `DeviceMode::{Default,Plan,Accept,Default}` and call set_mode.
-  Small, self-contained.
+- ~~**Mode button: LED reflects current session mode**~~ — done.
+  `wrapper::sync_active_mode_to_device` reads the active session's
+  `permission_mode` from claude state and calls `hid.set_mode` with
+  the mapped `DeviceMode`. Hooked into the hook handler (when an
+  active-session hook changes `permission_mode`) and into every
+  active-session-change path (`set_active_wrapper`, the
+  `wrapper_register_session` bootstrap). Updates `device_status.mode`
+  eagerly before the HID write so the firmware's echo state report
+  doesn't get treated as a fresh mode-button tap.
 - ~~**Mode button: tap should cycle modes regardless of focus**~~ —
   done. Firmware's `rev1.c:103` already swallows the tap and just
   emits a state report; the daemon now injects `\x1b[Z` into the
