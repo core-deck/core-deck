@@ -509,32 +509,132 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+/// Soft cap on the detail portion of `extract_task_text` output. The
+/// firmware's hard cap is 128 bytes for the whole `task` field; this
+/// targets readability on the TFT row.
+const MAX_DETAIL_BYTES: usize = 40;
+
 /// Extract a short task description from tool_name + tool_input for HID display.
 fn extract_task_text(tool_name: Option<&str>, tool_input: Option<&serde_json::Value>) -> String {
     let name = tool_name.unwrap_or("Working");
-    let detail = tool_input
-        .and_then(|v| {
-            // Try common fields that give useful context
-            v.get("command")
-                .or_else(|| v.get("file_path"))
-                .or_else(|| v.get("pattern"))
-                .or_else(|| v.get("query"))
-                .or_else(|| v.get("description"))
-                .and_then(|f| f.as_str())
-        })
-        .unwrap_or("");
-
+    let detail = tool_input.and_then(|v| pick_detail(name, v)).unwrap_or_default();
     if detail.is_empty() {
-        name.to_string()
-    } else {
-        // Truncate for HID display (device has limited width)
-        let detail_short = if detail.len() > 40 {
-            &detail[..40]
-        } else {
-            detail
-        };
-        format!("{}: {}", name, detail_short)
+        return name.to_string();
     }
+    format!("{name}: {}", truncate_for_display(&detail))
+}
+
+/// Tool-specific picker: which `tool_input` field carries the most
+/// informative single-string summary for the device. Falls through to
+/// `generic_pick` for tools we don't special-case.
+fn pick_detail(tool: &str, input: &serde_json::Value) -> Option<String> {
+    match tool {
+        "Bash" => {
+            // Claude often supplies a one-line `description` that's already
+            // display-perfect; prefer it. Fall back to the first stage of
+            // the pipeline so `cd foo && pnpm i && pnpm test` doesn't
+            // silently truncate to "cd foo && pnpm i && pn…".
+            if let Some(desc) = non_empty_str(input, "description") {
+                return Some(desc.to_string());
+            }
+            non_empty_str(input, "command").map(|c| first_command_stage(c).to_string())
+        }
+        "Grep" => {
+            let pattern = non_empty_str(input, "pattern")?;
+            match non_empty_str(input, "glob") {
+                Some(glob) => Some(format!("{pattern} in {glob}")),
+                None => Some(pattern.to_string()),
+            }
+        }
+        "AskUserQuestion" => input
+            .get("questions")
+            .and_then(|q| q.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|q| q.get("question"))
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .or_else(|| generic_pick(input)),
+        _ => generic_pick(input),
+    }
+}
+
+/// Generic field-pick chain — the order encodes "which field is most
+/// likely to be human-meaningful in isolation." Prepends path-flavored
+/// fields so right-anchored truncation kicks in for them.
+fn generic_pick(v: &serde_json::Value) -> Option<String> {
+    const FIELDS: &[&str] = &[
+        "file_path",      // Edit, Write, Read, NotebookEdit (when path is the right key)
+        "notebook_path",  // NotebookEdit
+        "url",            // WebFetch
+        "pattern",        // Glob
+        "query",          // WebSearch
+        "skill",          // Skill
+        "subagent_type",  // Agent / Task
+        "subject",        // TaskCreate / TaskUpdate
+        "description",    // generic last-resort summary
+        "command",        // Bash already special-cased; harmless fallback
+    ];
+    FIELDS
+        .iter()
+        .find_map(|k| non_empty_str(v, k).map(str::to_string))
+}
+
+fn non_empty_str<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// Return the first stage of a shell pipeline — splits on `&&`, `||`,
+/// `|`, `;`. Trims surrounding whitespace.
+fn first_command_stage(cmd: &str) -> &str {
+    let mut end = cmd.len();
+    for sep in ["&&", "||", ";", "|"] {
+        if let Some(i) = cmd.find(sep) {
+            if i < end {
+                end = i;
+            }
+        }
+    }
+    cmd[..end].trim()
+}
+
+/// Truncate `s` to fit `MAX_DETAIL_BYTES`, respecting char boundaries.
+/// Right-anchors (keeps the tail with a leading `…`) for paths and URLs
+/// so the filename / last URL segment stays visible. Left-anchors
+/// otherwise.
+fn truncate_for_display(s: &str) -> String {
+    if s.len() <= MAX_DETAIL_BYTES {
+        return s.to_string();
+    }
+    if looks_like_path_or_url(s) {
+        // Reserve 3 bytes for the leading "…" (UTF-8 encoded).
+        const ELLIPSIS: &str = "…";
+        let budget = MAX_DETAIL_BYTES.saturating_sub(ELLIPSIS.len());
+        let mut start = s.len() - budget;
+        while start < s.len() && !s.is_char_boundary(start) {
+            start += 1;
+        }
+        return format!("{ELLIPSIS}{}", &s[start..]);
+    }
+    let mut end = MAX_DETAIL_BYTES;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end < s.len() {
+        format!("{}…", &s[..end])
+    } else {
+        s.to_string()
+    }
+}
+
+fn looks_like_path_or_url(s: &str) -> bool {
+    s.starts_with('/')
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || s.starts_with("~/")
+        || s.contains("://")
 }
 
 /// PreToolUse: mark the session as active and record current tool/task.
