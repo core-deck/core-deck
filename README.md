@@ -6,10 +6,10 @@ Companion software for the Core Deck macropad — a hardware control surface for
 
 The system consists of two binaries:
 
-- **`coredeck-daemon`** — Background service that owns the HID device. Exposes HTTP REST and WebSocket APIs on `127.0.0.1:19384`. Runs as a tray icon with no dock presence.
-- **`core-deck`** — GUI app with embedded terminal emulator (wezterm-term + egui). Connects to the daemon via WebSocket for real-time device control.
+- **`coredeck-daemon`** — Background service that owns the HID device, runs the tray icon, and serves the HTTP REST + WebSocket APIs on `127.0.0.1:19384`. The settings UI is browser-based, served by the daemon. This is the only binary needed to drive the device.
+- **`coredeck-claude`** — Thin wrapper that runs `claude` under a PTY and registers the session with the daemon (via `/wrapper-ws`) so soft keys, the rotary encoder, and tab cycling drive the active Claude session.
 
-Third-party tools can also integrate with the daemon via its REST API — no GUI app required.
+Third-party tools can also integrate with the daemon directly via its REST API.
 
 ## Building
 
@@ -26,26 +26,26 @@ cargo build --workspace
 cargo build --workspace --release
 ```
 
-Output binaries: `target/release/core-deck` and `target/release/coredeck-daemon`.
+Output binaries: `target/release/coredeck-daemon` and `target/release/coredeck-claude`.
 
 See [docs/Building.md](docs/Building.md) for Linux dependencies, individual crate builds, and detailed notes.
 
 ## Running
 
 ```bash
-# Start the daemon (must be running first)
+# Start the daemon
 coredeck-daemon
 
 # Install as launchd service for auto-start
 coredeck-daemon install
 
-# Start the GUI app
-core-deck
+# In a separate terminal, launch Claude under the wrapper
+coredeck-claude
 ```
 
 ## Quick API Test
 
-With the daemon running and no GUI app connected:
+With the daemon running:
 
 ```bash
 # Check device status
@@ -67,8 +67,8 @@ curl -X POST http://127.0.0.1:19384/api/alert \
 ```
 crates/
   coredeck-protocol/   # Shared types & wire format (serde only)
-  coredeck-daemon/     # Background daemon (HID, tray, axum server)
-  coredeck/            # GUI app (egui, wezterm-term, PTY)
+  coredeck-daemon/     # Background daemon (HID, tray, axum server, hooks)
+  coredeck-claude/     # `claude` PTY wrapper + daemon session registration
 docs/                   # API documentation
 ```
 

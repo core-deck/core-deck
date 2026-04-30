@@ -27,13 +27,13 @@ The `hidapi` crate links against IOKit for USB HID access. No Homebrew packages 
 
 ```bash
 # Debian/Ubuntu
-sudo apt install build-essential pkg-config libudev-dev libhidapi-dev \
-  libx11-dev libxcb1-dev libxkbcommon-dev libgl1-mesa-dev libfontconfig1-dev
+sudo apt install build-essential pkg-config libudev-dev libhidapi-dev
 
 # Fedora
-sudo dnf install gcc pkg-config systemd-devel hidapi-devel \
-  libX11-devel libxcb-devel libxkbcommon-devel mesa-libGL-devel fontconfig-devel
+sudo dnf install gcc pkg-config systemd-devel hidapi-devel
 ```
+
+The daemon also draws the tray icon via `tray-icon`/`winit`, which on Linux needs an X11 or Wayland session at runtime but no extra build packages beyond what is listed above.
 
 ## Workspace Structure
 
@@ -42,11 +42,11 @@ The project is a Cargo workspace with 3 crates:
 ```
 crates/
   coredeck-protocol/   # Shared types & wire format (serde only, no system deps)
-  coredeck-daemon/     # Background daemon (HID, tray icon, axum server)
-  coredeck/            # GUI app (egui, wezterm-term, PTY)
+  coredeck-daemon/     # Background daemon (HID, tray icon, axum server, hooks)
+  coredeck-claude/     # `claude` PTY wrapper + daemon session registration
 ```
 
-The default member is `coredeck` (the GUI app), so a bare `cargo build` only builds the app and its dependencies.
+The default member is `coredeck-daemon`, so a bare `cargo build` builds the daemon.
 
 ## Build Commands
 
@@ -59,13 +59,13 @@ cargo build --workspace
 ### Build individual crates
 
 ```bash
-# Daemon only
+# Daemon (default)
 cargo build -p coredeck-daemon
-
-# GUI app only (default)
-cargo build -p core-deck
 # or just:
 cargo build
+
+# Claude wrapper
+cargo build -p coredeck-claude
 
 # Protocol crate only
 cargo build -p coredeck-protocol
@@ -83,20 +83,20 @@ Output binaries:
 
 | Binary | Path |
 |--------|------|
-| `core-deck` | `target/release/core-deck` |
 | `coredeck-daemon` | `target/release/coredeck-daemon` |
+| `coredeck-claude` | `target/release/coredeck-claude` |
 
 ### Run
 
 ```bash
-# Run the GUI app
-cargo run -p core-deck
-
 # Run the daemon
 cargo run -p coredeck-daemon
 
 # Run the daemon on a custom port
 cargo run -p coredeck-daemon -- --listen 127.0.0.1:9000
+
+# Run the Claude wrapper (daemon must be up)
+cargo run -p coredeck-claude
 ```
 
 ### Tests
@@ -107,27 +107,11 @@ cargo test --workspace
 
 ## Notes
 
-### Patched Dependencies
-
-The workspace patches `zune-jpeg` (vendored in `patches/zune-jpeg/`) to fix an unsafe neon SIMD issue on aarch64. This is applied automatically via `[patch.crates-io]` in the root `Cargo.toml`.
-
-### Build Scripts
-
-Both the root workspace and the `coredeck` crate have `build.rs` scripts that generate placeholder tray icon PNGs (16x16 solid color) if they don't already exist in `assets/icons/`. Real icons are checked into the repo, so the build scripts are effectively no-ops on a normal clone.
-
-### WezTerm Git Dependencies
-
-The GUI app depends on several crates from the WezTerm repository, pinned to a specific commit (`05343b3`). The first build will clone and compile these, which takes a few minutes. Subsequent builds use the cached checkout.
-
-### Optional: Ghostty Themes
-
-The GUI app loads terminal color themes from Ghostty.app if installed at `/Applications/Ghostty.app`. This is entirely optional — the app ships with built-in Dark and Light themes.
-
 ### Logging
 
 Both binaries use `tracing` with `RUST_LOG` env filter:
 
 ```bash
 RUST_LOG=debug cargo run -p coredeck-daemon
-RUST_LOG=core_deck=trace cargo run -p core-deck
+RUST_LOG=debug cargo run -p coredeck-claude
 ```
