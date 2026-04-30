@@ -274,28 +274,36 @@ Cosmetic but pleasant.
 
 ## Backlog / not yet committed
 
-- **Track in-progress task across TaskCreate / TaskUpdate**: when Claude
-  uses the structured Task tools (not TodoWrite), `tool_input` for
-  `TaskUpdate(status: in_progress)` only carries `taskId` — the
-  `activeForm` was set earlier on `TaskCreate`. The device today shows
-  "Thinking…" on line 1 and bare "TaskUpdate" on line 2 instead of the
-  actually-informative "Adding raise.rs module" the host UI displays.
-  Fix shape: per-session `task_registry: HashMap<task_id, activeForm>`,
-  populated from `PreToolUse(TaskCreate)` + `PostToolUse(TaskCreate)`
-  (parse the assigned id from `tool_response`); on
-  `PreToolUse(TaskUpdate, in_progress)` look up by id and surface as
-  `current_task`. Clean up on Stop and SessionEnd. Confirm
-  `tool_response` shape from one debug log before coding.
-- **Right-anchor truncation for paths**: `extract_task_text` truncates
-  `tool_input.file_path` (and similar) by lopping the *tail* — for
-  long absolute paths this hides the filename, the most informative
-  bit ("Edit: /Users/vden/work/agentdeck/…" vs the desired
-  "Edit: …/raise.rs"). Switch to right-anchored truncation when the
-  detail starts with `/` (or contains a path separator). Keep
-  left-anchored for commands/queries/descriptions where the prefix is
-  what matters. Bonus: while there, audit byte slicing in the same
-  function for the UTF-8-boundary issue that bit `compact_text` last
-  month.
+- **Mode button: LED reflects current session mode**: daemon tracks
+  `s.permission_mode` from hooks (hooks.rs) but never pushes it back
+  to the device. Firmware's mode LED reads `current_mode_state`
+  (firmware `keymap.c`'s `rgb_matrix_indicators_advanced_user`), which
+  is updated by the daemon's `HidCommand::SetMode (0x07)` — exposed
+  as `hid.set_mode(DeviceMode)` in `device.rs:778`. Wire it: when
+  `permission_mode` changes in a hook handler, map
+  `"default"`/`"plan"`/`"acceptEdits"`/`"bypassPermissions"` →
+  `DeviceMode::{Default,Plan,Accept,Default}` and call set_mode.
+  Small, self-contained.
+- **Mode button: tap should cycle modes regardless of focus**:
+  firmware tap sends `tap_code16(LSFT(KC_TAB))` (firmware `keymap.c:89`)
+  via the **standard keyboard HID interface** — not the RAW HID
+  channel the daemon listens on. Works only when the wrapper terminal
+  has OS focus. Two-sided fix: firmware also emits a RAW HID
+  notification on tap; daemon writes `\x1b[Z` into the active
+  wrapper's PTY on receipt. Coordinate with firmware before coding.
+- **Alert classifier resolves alerts on too many inputs**:
+  `alerts::classify_input` maps anything-that-isn't-Esc/Stop/F20/knob-
+  combo to `InputKind::Allow`, which (a) clears any Idle alert and
+  (b) resolves Pending alerts as Allow. Plain encoder rotation sends
+  Up/Down arrows (firmware `keymap.c:126`, encoder Layer 0), so
+  rotating the knob during an AskUserQuestion alert dismisses it,
+  and rotating during a "allow tool?" prompt silently approves. Soft-
+  key text strings have the same problem. Tighten classify_input:
+  only Enter / 'y' / 'Y' resolve Pending as Allow; only Esc / 'n' /
+  'N' / Ctrl-C resolve as Deny; everything else is Passthrough so
+  the alert stays up. Idle alerts should also stop clearing on
+  arbitrary keys — leave dismissal to F20 (focus → focus-in handler
+  clears) or explicit Esc.
 - **YOLO requires device presence**: today the daemon retains
   `device_status.yolo = true` even after the HID device disconnects
   (sleep/wake, unplug, USB hub flake), so the `PermissionRequest` hook
