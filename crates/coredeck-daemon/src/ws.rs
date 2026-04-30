@@ -4,8 +4,8 @@
 //! While a WS client holds the lock, HTTP mutating endpoints return 409.
 
 use coredeck_protocol::{
-    AppControlAction, DeviceInfo, DeviceMode, SoftKeyType, WsCommandTag,
-    WsEventTag, WsResponseTag, decode_ws_frame, encode_ws_frame,
+    DeviceInfo, DeviceMode, SetActiveWrapperRequest, SoftKeyType, WrapperWriteRequest,
+    WsCommandTag, WsEventTag, WsResponseTag, decode_ws_frame, encode_ws_frame,
 };
 use axum::{
     extract::{State, ws::{Message, WebSocket, WebSocketUpgrade}},
@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::DaemonState;
-use crate::state::{DaemonEvent, TrayUpdate};
+use crate::state::DaemonEvent;
 
 /// Handle for the connected WS client
 pub struct WsClientHandle {
@@ -64,9 +64,6 @@ async fn handle_ws_connection(socket: WebSocket, state: Arc<DaemonState>) {
             }
         }
     }
-
-    // Notify tray via channel
-    state.send_tray_update(TrayUpdate::AppConnected);
 
     // Send current device status directly from HidManager (avoids race with event handler)
     {
@@ -125,14 +122,7 @@ async fn handle_ws_connection(socket: WebSocket, state: Arc<DaemonState>) {
         *guard = None;
     }
     state.notify_lock_change.notify_waiters();
-    state.send_tray_update(TrayUpdate::AppDisconnected);
     info!("WS client disconnected (lock released)");
-
-    // Close HID device — release keys back to system
-    {
-        let hid = state.hid.lock().await;
-        hid.close_device();
-    }
 }
 
 /// Process a single WS binary command from the app
@@ -165,13 +155,7 @@ async fn handle_ws_command(
         WsCommandTag::UpdateDisplay => {
             match serde_json::from_slice::<coredeck_protocol::DisplayUpdate>(payload) {
                 Ok(update) => {
-                    hid.send_display_update(
-                        &update.session,
-                        Some(update.task.as_str()).filter(|s| !s.is_empty()),
-                        Some(update.task2.as_str()).filter(|s| !s.is_empty()),
-                        &update.tabs,
-                        update.active,
-                    )
+                    hid.send_display_update(&update)
                         .map(|_| None)
                         .map_err(|e| e.to_string())
                 }
@@ -271,6 +255,26 @@ async fn handle_ws_command(
                 }
             }
         }
+        WsCommandTag::WrapperWrite => {
+            // Doesn't touch HID — drop the lock so the wrapper task can
+            // acquire other state.
+            drop(hid);
+            match serde_json::from_slice::<WrapperWriteRequest>(payload) {
+                Ok(req) => crate::wrapper::write_to_target(state, &req.wrapper_id, req.bytes)
+                    .await
+                    .map(|_| None),
+                Err(e) => Err(format!("invalid payload: {}", e)),
+            }
+        }
+        WsCommandTag::SetActiveWrapper => {
+            drop(hid);
+            match serde_json::from_slice::<SetActiveWrapperRequest>(payload) {
+                Ok(req) => crate::wrapper::set_active_wrapper(state, &req.wrapper_id)
+                    .await
+                    .map(|_| None),
+                Err(e) => Err(format!("invalid payload: {}", e)),
+            }
+        }
     };
 
     match result {
@@ -347,11 +351,3 @@ pub async fn forward_event_to_ws(state: &Arc<DaemonState>, event: &DaemonEvent) 
     let _ = client.tx.send(frame);
 }
 
-/// Send an AppControl message to the WS client
-pub async fn send_app_control(state: &Arc<DaemonState>, action: AppControlAction) {
-    let guard = state.ws_client.lock().await;
-    if let Some(client) = guard.as_ref() {
-        let frame = encode_ws_frame(WsEventTag::AppControl as u8, 0, &[action as u8]);
-        let _ = client.tx.send(frame);
-    }
-}

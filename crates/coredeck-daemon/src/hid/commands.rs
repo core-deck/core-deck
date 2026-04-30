@@ -7,19 +7,15 @@
 
 use super::protocol::{build_chunked_packets, DeviceMode, HidCommand, HidPacket, ProtocolMode, SoftKeyType};
 
-/// Build a display update with session name, current task, tab states, and active tab index
-pub fn build_display_update(session: &str, task: Option<&str>, task2: Option<&str>, tabs: &[u8], active: usize, mode: ProtocolMode) -> Vec<HidPacket> {
-    let json = serde_json::json!({
-        "session": session,
-        "task": task.unwrap_or(""),
-        "task2": task2.unwrap_or(""),
-        "tabs": tabs,
-        "active": active,
-    });
+/// Build a display update from a DisplayUpdate struct.
+/// Serializes directly to JSON — all fields (including optional context/cost/model)
+/// are included when present.
+pub fn build_display_update(update: &coredeck_protocol::DisplayUpdate, mode: ProtocolMode) -> Vec<HidPacket> {
+    let json = serde_json::to_string(update).expect("DisplayUpdate serialization");
 
     tracing::info!("HID display payload: {}", json);
 
-    build_chunked_packets(HidCommand::UpdateDisplay, json.to_string().as_bytes(), mode)
+    build_chunked_packets(HidCommand::UpdateDisplay, json.as_bytes(), mode)
 }
 
 /// Build a ping packet (single packet)
@@ -97,7 +93,17 @@ mod tests {
 
     #[test]
     fn test_build_display_update() {
-        let packets = build_display_update("my-session", Some("Reading files"), None, &[0, 1, 2], 1, S);
+        let update = coredeck_protocol::DisplayUpdate {
+            session: "my-session".to_string(),
+            task: "Reading files".to_string(),
+            task2: String::new(),
+            tabs: vec![0, 1, 2],
+            active: 1,
+            context_percent: Some(42.0),
+            cost_usd: Some(1.5),
+            model: Some("Opus".to_string()),
+        };
+        let packets = build_display_update(&update, S);
         assert!(!packets.is_empty());
         assert!(packets[0].is_start());
         assert!(packets.last().unwrap().is_end());
@@ -108,7 +114,17 @@ mod tests {
 
     #[test]
     fn test_build_display_update_no_task() {
-        let packets = build_display_update("my-session", None, None, &[1], 0, S);
+        let update = coredeck_protocol::DisplayUpdate {
+            session: "my-session".to_string(),
+            task: String::new(),
+            task2: String::new(),
+            tabs: vec![1],
+            active: 0,
+            context_percent: None,
+            cost_usd: None,
+            model: None,
+        };
+        let packets = build_display_update(&update, S);
         assert!(!packets.is_empty());
         assert!(packets[0].is_start());
     }

@@ -1,0 +1,932 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CoreDeck Settings</title>
+<style>
+  :root {
+    --bg: #1a1a1a;
+    --panel: #242424;
+    --panel-2: #2a2a2a;
+    --border: #333;
+    --text: #e8e8e8;
+    --muted: #888;
+    --accent: #f59e0b;
+    --green: #4ade80;
+    --red: #f87171;
+    --blue: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  header h1 { margin: 0; font-size: 18px; font-weight: 600; }
+  header .ver { color: var(--muted); font-size: 12px; }
+  main {
+    max-width: 880px;
+    margin: 0 auto;
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  section {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 16px 20px;
+  }
+  section h2 {
+    margin: 0 0 12px 0;
+    font-size: 14px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+  }
+  .row label { min-width: 120px; color: var(--muted); }
+  .row .value { font-variant-numeric: tabular-nums; }
+  .row.stack { flex-direction: column; align-items: stretch; gap: 6px; }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .pill.ok { background: rgba(74,222,128,0.12); color: var(--green); }
+  .pill.warn { background: rgba(245,158,11,0.12); color: var(--accent); }
+  .pill.bad { background: rgba(248,113,113,0.12); color: var(--red); }
+  button {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 4px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  button:hover:not(:disabled) { background: #333; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.primary { background: var(--accent); color: #1a1a1a; border-color: var(--accent); font-weight: 500; }
+  button.primary:hover:not(:disabled) { background: #fbbf24; }
+  button.danger { color: var(--red); border-color: rgba(248,113,113,0.3); }
+  input[type="range"] { flex: 1; }
+  input[type="text"], select {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    font-family: inherit;
+  }
+  input[type="text"]:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .mode-group { display: flex; gap: 6px; }
+  .mode-group button.active { background: var(--accent); color: #1a1a1a; border-color: var(--accent); }
+  .softkey-card {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 12px;
+    margin-bottom: 8px;
+  }
+  .softkey-card .row label { min-width: 80px; }
+  /* Preset row mirrors a softkey-card's inner padding so the
+     dropdown's left edge lines up with Type/Data inputs below. */
+  #presets-row, #preset-hint-row { padding-left: 12px; padding-right: 12px; }
+  #presets-row label, #preset-hint-row label { min-width: 80px; }
+  #preset-select { flex: 1; min-width: 0; }
+  /* Soft-key card title: name on the left, dot identifier on the right
+     (matching the silkscreen). */
+  .sk-title-row { justify-content: space-between; }
+  .sk-dots { font-size: 18px; letter-spacing: 4px; color: var(--muted); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  td.active::before { content: "● "; color: var(--accent); }
+  .empty { color: var(--muted); font-style: italic; padding: 12px 0; }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 14px;
+    font-size: 13px;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.15s, transform 0.15s;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .toast.ok { border-color: var(--green); }
+  .toast.err { border-color: var(--red); }
+  .data-input { flex: 1; min-width: 0; }
+  .checkbox-row { display: flex; align-items: center; gap: 6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>CoreDeck Settings</h1>
+  <span class="ver" id="version">…</span>
+</header>
+
+<main>
+
+  <section id="device-section">
+    <h2>Device</h2>
+    <div class="row">
+      <label>Status</label>
+      <span class="value" id="device-status">checking…</span>
+    </div>
+    <div class="row" id="device-info-row" style="display:none">
+      <label>Hardware</label>
+      <span class="value" id="device-hw"></span>
+    </div>
+    <div class="row">
+      <label>Brightness</label>
+      <input type="range" min="0" max="255" step="1" id="brightness-slider" value="128" disabled>
+      <span class="value" id="brightness-value" style="min-width:36px">—</span>
+    </div>
+    <div class="row">
+      <label>Mode</label>
+      <div class="mode-group">
+        <button data-mode="Default">Default</button>
+        <button data-mode="Accept">Accept</button>
+        <button data-mode="Plan">Plan</button>
+      </div>
+    </div>
+    <div class="row">
+      <label>ARM</label>
+      <span class="value" id="arm-state"><span class="pill warn">unknown</span></span>
+      <span class="value" style="color:var(--muted);font-size:12px">toggle from device</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Hooks</h2>
+    <div class="row">
+      <label>Status</label>
+      <span class="value" id="hooks-status"><span class="pill warn">checking…</span></span>
+    </div>
+    <div class="row">
+      <label>Actions</label>
+      <button id="hooks-install" class="primary">Install</button>
+      <button id="hooks-uninstall" class="danger">Uninstall</button>
+    </div>
+    <div class="row">
+      <span style="color:var(--muted);font-size:12px">
+        Writes <code>~/.claude/settings.json</code> with the hook entries the daemon needs
+        for ARM auto-approve, session tracking, and display updates.
+      </span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Soft Keys</h2>
+
+    <div class="row" id="presets-row">
+      <label>Preset</label>
+      <select id="preset-select" style="min-width:240px">
+        <option value="">— Custom —</option>
+      </select>
+      <button id="preset-apply">Apply</button>
+      <button id="preset-save">Save current as…</button>
+      <button id="preset-delete" class="danger" disabled>Delete</button>
+    </div>
+    <div class="row" id="preset-hint-row" style="display:none">
+      <label></label>
+      <span class="value" id="preset-hint" style="color:var(--muted);font-size:12px"></span>
+    </div>
+
+    <div id="softkeys-area"><div class="empty">loading…</div></div>
+    <div class="row" style="justify-content:flex-end">
+      <button id="softkeys-reset" class="danger">Reset all to defaults</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>Connected Wrappers</h2>
+    <div id="wrappers-area"><div class="empty">no wrappers connected</div></div>
+  </section>
+
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const fmt = (v) => v == null ? '—' : v;
+
+// ── Toast ──────────────────────────────────────────────────────────
+let toastTimer = null;
+function toast(msg, kind = 'ok') {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.className = 'toast show ' + kind;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.className = 'toast ' + kind; }, 2400);
+}
+
+// ── HTTP helpers ───────────────────────────────────────────────────
+async function api(method, path, body) {
+  const opts = { method };
+  if (body !== undefined) {
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify(body);
+  }
+  const resp = await fetch(path, opts);
+  if (!resp.ok) {
+    let msg = `${method} ${path} → HTTP ${resp.status}`;
+    try {
+      const j = await resp.json();
+      if (j.error) msg = j.error;
+    } catch (_) { /* not JSON */ }
+    throw new Error(msg);
+  }
+  if (resp.status === 204) return null;
+  const ct = resp.headers.get('content-type') || '';
+  if (ct.includes('application/json')) return await resp.json();
+  return await resp.text();
+}
+
+// ── Device status ──────────────────────────────────────────────────
+let currentMode = null;
+async function refreshStatus() {
+  try {
+    const s = await api('GET', '/api/status');
+    const statusEl = $('#device-status');
+    if (s.device_connected) {
+      statusEl.innerHTML = '<span class="pill ok">connected</span>';
+    } else if (s.device_available) {
+      statusEl.innerHTML = '<span class="pill warn">available, not opened</span>';
+    } else {
+      statusEl.innerHTML = '<span class="pill bad">disconnected</span>';
+    }
+    if (s.device_name || s.firmware_version) {
+      $('#device-info-row').style.display = '';
+      $('#device-hw').textContent = `${s.device_name || '?'} · fw ${s.firmware_version || '?'}`;
+    }
+    currentMode = s.device_mode;
+    document.querySelectorAll('.mode-group button').forEach(b => {
+      b.classList.toggle('active', b.dataset.mode === currentMode);
+    });
+    const armEl = $('#arm-state');
+    armEl.innerHTML = s.device_yolo
+      ? '<span class="pill ok">enabled</span>'
+      : '<span class="pill warn">disabled</span>';
+  } catch (e) {
+    $('#device-status').innerHTML = `<span class="pill bad">${e.message}</span>`;
+  }
+}
+
+async function refreshVersion() {
+  try {
+    const v = await api('GET', '/api/version');
+    if (v && v.version) $('#version').textContent = `v${v.version}`;
+  } catch (_) {
+    $('#version').textContent = '';
+  }
+}
+
+// ── Brightness ─────────────────────────────────────────────────────
+const slider = $('#brightness-slider');
+slider.addEventListener('input', () => {
+  $('#brightness-value').textContent = slider.value;
+});
+let brightnessTimer = null;
+slider.addEventListener('change', () => {
+  if (brightnessTimer) clearTimeout(brightnessTimer);
+  brightnessTimer = setTimeout(async () => {
+    try {
+      await api('POST', '/api/brightness', { level: parseInt(slider.value, 10), save: true });
+      toast(`brightness → ${slider.value}`);
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  }, 50);
+});
+slider.disabled = false;
+
+// ── Mode ───────────────────────────────────────────────────────────
+document.querySelectorAll('.mode-group button').forEach(b => {
+  b.addEventListener('click', async () => {
+    const mode = b.dataset.mode;
+    try {
+      await api('POST', '/api/mode', { mode });
+      currentMode = mode;
+      document.querySelectorAll('.mode-group button').forEach(x => {
+        x.classList.toggle('active', x.dataset.mode === mode);
+      });
+      toast(`mode → ${mode}`);
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
+});
+
+// ── Hooks ──────────────────────────────────────────────────────────
+async function refreshHooks() {
+  try {
+    const h = await api('GET', '/api/hooks/status');
+    $('#hooks-status').innerHTML = h.installed
+      ? '<span class="pill ok">installed</span>'
+      : '<span class="pill warn">not installed</span>';
+  } catch (e) {
+    $('#hooks-status').innerHTML = `<span class="pill bad">${e.message}</span>`;
+  }
+}
+$('#hooks-install').addEventListener('click', async () => {
+  try {
+    await api('POST', '/api/hooks/install');
+    toast('hooks installed');
+    refreshHooks();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+});
+$('#hooks-uninstall').addEventListener('click', async () => {
+  if (!confirm('Remove CoreDeck entries from ~/.claude/settings.json?')) return;
+  try {
+    await api('POST', '/api/hooks/uninstall');
+    toast('hooks removed');
+    refreshHooks();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+});
+
+// ── Soft Keys ──────────────────────────────────────────────────────
+// Dot identifiers silkscreened on the device — see firmware display.c
+// "Dot identifiers: · ·· ··· (U+00B7, matching panel markings)".
+const KEY_DOTS = ['·', '··', '···'];
+// Firmware resolves the deprecated `Default` type to `Keycode` in responses,
+// so the host never sees it in practice. Don't expose it as a user-selectable
+// option — to revert to firmware defaults, use the "Reset all" button.
+const SOFTKEY_TYPES = ['Keycode', 'String', 'Sequence'];
+
+function renderSoftkeyCard(cfg) {
+  const idx = cfg.index;
+  const card = document.createElement('div');
+  card.className = 'softkey-card';
+  card.dataset.index = idx;
+
+  const dots = KEY_DOTS[idx] || '';
+  card.innerHTML = `
+    <div class="row sk-title-row"><label><strong>Soft key ${idx + 1}</strong></label><span class="sk-dots">${dots}</span></div>
+    <div class="row">
+      <label>Type</label>
+      <select class="sk-type">
+        ${SOFTKEY_TYPES.map(t => `<option value="${t}"${t===cfg.key_type?' selected':''}>${t}</option>`).join('')}
+      </select>
+    </div>
+    <div class="row sk-data-row">
+      <label>Data</label>
+      <input type="text" class="data-input sk-data" value="${formatData(cfg.key_type, cfg.data)}">
+      <span class="sk-enter-wrap" style="display:none;align-items:center;gap:6px">
+        <input type="checkbox" class="sk-enter" id="sk-enter-${idx}">
+        <label for="sk-enter-${idx}" style="min-width:0;cursor:pointer;color:var(--muted);font-size:12px">send Enter</label>
+      </span>
+    </div>
+    <div class="row" style="justify-content:flex-end;gap:8px">
+      <span class="value" style="color:var(--muted);font-size:12px;flex:1" data-hint></span>
+      <button class="sk-save primary">Save</button>
+    </div>
+  `;
+
+  const typeSel = card.querySelector('.sk-type');
+  const dataIn = card.querySelector('.sk-data');
+  const enterWrap = card.querySelector('.sk-enter-wrap');
+  const enterChk = card.querySelector('.sk-enter');
+  const hint = card.querySelector('[data-hint]');
+
+  function applyType() {
+    const t = typeSel.value;
+    enterWrap.style.display = t === 'String' ? 'inline-flex' : 'none';
+    dataIn.disabled = false;
+    if (t === 'Keycode') {
+      hint.textContent = 'name (Ctrl-O, F20, Esc, Cmd-Q) or hex (0x012B)';
+    } else if (t === 'String') {
+      hint.textContent = 'literal text typed when pressed';
+    } else if (t === 'Sequence') {
+      hint.textContent = 'comma-separated names or hex (e.g. Esc, Esc — or 0x29, 0x29)';
+    }
+  }
+
+  typeSel.addEventListener('change', () => {
+    if (typeSel.value === 'String') {
+      // String reuses the bytes input; clear since byte form ≠ string form.
+      dataIn.value = '';
+    }
+    applyType();
+  });
+
+  // For String type, prefill enter checkbox from data[0] flag bit.
+  if (cfg.key_type === 'String' && cfg.data.length > 0) {
+    enterChk.checked = (cfg.data[0] & 0x01) !== 0;
+  }
+
+  applyType();
+
+  card.querySelector('.sk-save').addEventListener('click', async () => {
+    const t = typeSel.value;
+    let bytes = [];
+    try {
+      if (t === 'Default') {
+        bytes = [];
+      } else if (t === 'Keycode') {
+        const n = parseKeycodeToken(dataIn.value.trim());
+        if (n == null) throw new Error('invalid keycode — try a name (Ctrl-O, F20) or hex (0x012B)');
+        bytes = [(n >> 8) & 0xFF, n & 0xFF];
+      } else if (t === 'String') {
+        const flags = enterChk.checked ? 0x01 : 0x00;
+        const enc = new TextEncoder().encode(dataIn.value);
+        bytes = [flags, ...enc];
+      } else if (t === 'Sequence') {
+        // Comma- or space-separated tokens; each may be a name (Ctrl-O,
+        // Esc, F20) or hex/decimal. Encoded as count + (hi,lo)*N.
+        const tokens = dataIn.value.split(/[,\s]+/).filter(Boolean);
+        if (tokens.length === 0) throw new Error('no keycodes given');
+        if (tokens.length > 8) throw new Error('sequence may have at most 8 keycodes');
+        bytes = [tokens.length];
+        for (const tok of tokens) {
+          const n = parseKeycodeToken(tok);
+          if (n == null) throw new Error(`invalid keycode "${tok}" — try a name like Esc or hex like 0x29`);
+          bytes.push((n >> 8) & 0xFF, n & 0xFF);
+        }
+      }
+      await api('PUT', `/api/soft-keys/${idx}`, { key_type: t, data: bytes, save: true });
+      toast(`Key ${idx} saved`);
+      await refreshPresetMatch();
+      rebuildPresetSelect();
+    } catch (e) {
+      toast(e.message, 'err');
+    }
+  });
+
+  return card;
+}
+
+// ── Keycode ↔ friendly name ────────────────────────────────────────
+//
+// Mirrors firmware's `keycode_to_label` (see firmware/.../softkeys.c) so
+// the web UI shows the same names the device prints on its OLED. Modifier
+// bits (LCTL/LSFT/LALT/LGUI) live in bits 8–12 of the QMK keycode; the
+// base USB HID keycode is the low byte.
+
+const QK_MODS = 0x0100;
+const MOD_LCTL_BIT = 0x01;
+const MOD_LSFT_BIT = 0x02;
+const MOD_LALT_BIT = 0x04;
+const MOD_LGUI_BIT = 0x08;
+
+// USB HID keycode → short name. Letters and F-keys handled by ranges below.
+const KC_NAME_BY_CODE = {
+  0x28: 'Enter', 0x29: 'Esc', 0x2A: 'Bksp', 0x2B: 'Tab', 0x2C: 'Space',
+  0x2D: '-', 0x2E: '=', 0x2F: '[', 0x30: ']', 0x31: '\\',
+  0x33: ';', 0x34: "'", 0x35: '`', 0x36: ',', 0x37: '.', 0x38: '/',
+  0x49: 'Ins', 0x4A: 'Home', 0x4B: 'PgUp', 0x4C: 'Del', 0x4D: 'End', 0x4E: 'PgDn',
+  0x4F: 'Right', 0x50: 'Left', 0x51: 'Down', 0x52: 'Up',
+  0x00: '---',
+};
+// Reverse lookup, case-insensitive.
+const KC_CODE_BY_NAME = (() => {
+  const m = new Map();
+  for (const [code, name] of Object.entries(KC_NAME_BY_CODE)) {
+    m.set(name.toUpperCase(), parseInt(code, 10));
+  }
+  // Aliases people are likely to type.
+  const alias = {
+    'BACKSPACE': 0x2A, 'RETURN': 0x28, 'ESCAPE': 0x29, 'SPACEBAR': 0x2C,
+    'PAGEUP': 0x4B, 'PAGE_UP': 0x4B, 'PGUP': 0x4B,
+    'PAGEDOWN': 0x4E, 'PAGE_DOWN': 0x4E, 'PGDN': 0x4E,
+    'INSERT': 0x49, 'DELETE': 0x4C, 'BSPC': 0x2A, 'ENT': 0x28,
+    'NO': 0x00, 'NONE': 0x00, 'KC_NO': 0x00,
+    'SPC': 0x2C, 'SPACE': 0x2C,
+    'RIGHT': 0x4F, 'LEFT': 0x50, 'DOWN': 0x51, 'UP': 0x52,
+    'MINUS': 0x2D, 'EQUAL': 0x2E, 'EQUALS': 0x2E,
+    'LBRACKET': 0x2F, 'RBRACKET': 0x30,
+    'BACKSLASH': 0x31, 'SEMICOLON': 0x33, 'QUOTE': 0x34,
+    'GRAVE': 0x35, 'COMMA': 0x36, 'PERIOD': 0x37, 'DOT': 0x37, 'SLASH': 0x38,
+  };
+  for (const [name, code] of Object.entries(alias)) m.set(name, code);
+  return m;
+})();
+
+// Mac-aware modifier prefix (matches firmware which calls detected_host_os()).
+function isLikelyMac() {
+  return /Mac|iPhone|iPad/.test(navigator.platform || '')
+    || /Mac OS|macOS/i.test(navigator.userAgent || '');
+}
+function modPrefix(modBits) {
+  const mac = isLikelyMac();
+  let p = '';
+  if (modBits & MOD_LCTL_BIT) p += 'Ctrl-';
+  if (modBits & MOD_LSFT_BIT) p += 'Shift-';
+  if (modBits & MOD_LALT_BIT) p += mac ? 'Opt-' : 'Alt-';
+  if (modBits & MOD_LGUI_BIT) p += mac ? 'Cmd-' : 'Win-';
+  return p;
+}
+
+// Render a 16-bit QMK keycode as a short friendly label (e.g. "Ctrl-O",
+// "F20", "Esc"). Falls back to "0xXXXX" for keycodes outside the basic
+// mod-prefixed range — uncommon enough for a soft-key that the hex form
+// is acceptable as an escape hatch.
+function keycodeToLabel(kc) {
+  if (kc >= 0x0100 && kc <= 0x1FFF) {
+    const mods = (kc >> 8) & 0x1F;
+    const base = kc & 0xFF;
+    const baseName = baseKeycodeName(base);
+    if (baseName == null) {
+      return '0x' + kc.toString(16).toUpperCase().padStart(4, '0');
+    }
+    return modPrefix(mods) + baseName;
+  }
+  const name = baseKeycodeName(kc);
+  return name != null ? name : '0x' + kc.toString(16).toUpperCase().padStart(4, '0');
+}
+
+function baseKeycodeName(base) {
+  if (base >= 0x04 && base <= 0x1D) return String.fromCharCode('A'.charCodeAt(0) + (base - 0x04));
+  if (base === 0x27) return '0';
+  if (base >= 0x1E && base <= 0x26) return String.fromCharCode('1'.charCodeAt(0) + (base - 0x1E));
+  if (base >= 0x3A && base <= 0x45) return 'F' + (base - 0x3A + 1);     // F1..F12
+  if (base >= 0x68 && base <= 0x73) return 'F' + (base - 0x68 + 13);    // F13..F24
+  if (base in KC_NAME_BY_CODE) return KC_NAME_BY_CODE[base];
+  return null;
+}
+
+// Parse a single keycode token. Accepts:
+//   - hex: "0x012B" or "0X12B"
+//   - decimal: "299"
+//   - friendly: "Ctrl+O", "Ctrl-Shift-Tab", "Esc", "F20", "a", "Cmd-Q"
+// Returns a u16 or null if unparseable.
+function parseKeycodeToken(s) {
+  s = s.trim();
+  if (!s) return null;
+  // Hex / decimal first (covers raw QMK keycodes).
+  const lo = s.toLowerCase();
+  if (lo.startsWith('0x')) {
+    const n = parseInt(s.slice(2), 16);
+    return Number.isFinite(n) ? (n & 0xFFFF) : null;
+  }
+  if (/^-?\d+$/.test(s)) {
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) ? (n & 0xFFFF) : null;
+  }
+  // Friendly: split on - / + / space.
+  const parts = s.split(/[-+\s]+/).map(p => p.trim()).filter(Boolean);
+  if (parts.length === 0) return null;
+  let mods = 0;
+  let base = null;
+  for (const p of parts) {
+    const u = p.toUpperCase();
+    if (u === 'CTRL' || u === 'CONTROL' || u === 'LCTL') { mods |= MOD_LCTL_BIT; continue; }
+    if (u === 'SHIFT' || u === 'LSFT') { mods |= MOD_LSFT_BIT; continue; }
+    if (u === 'ALT' || u === 'OPT' || u === 'OPTION' || u === 'LALT') { mods |= MOD_LALT_BIT; continue; }
+    if (u === 'CMD' || u === 'COMMAND' || u === 'WIN' || u === 'GUI' || u === 'LGUI' || u === 'META') { mods |= MOD_LGUI_BIT; continue; }
+    // Single character (letter or digit)
+    if (p.length === 1) {
+      const c = p.toUpperCase();
+      if (c >= 'A' && c <= 'Z') { base = 0x04 + (c.charCodeAt(0) - 'A'.charCodeAt(0)); continue; }
+      if (c >= '1' && c <= '9') { base = 0x1E + (c.charCodeAt(0) - '1'.charCodeAt(0)); continue; }
+      if (c === '0') { base = 0x27; continue; }
+      // Punctuation by glyph
+      const punct = { '-': 0x2D, '=': 0x2E, '[': 0x2F, ']': 0x30, '\\': 0x31,
+                      ';': 0x33, "'": 0x34, '`': 0x35, ',': 0x36, '.': 0x37, '/': 0x38 };
+      if (c in punct) { base = punct[c]; continue; }
+    }
+    // F1-F24
+    const fmatch = u.match(/^F(\d+)$/);
+    if (fmatch) {
+      const n = parseInt(fmatch[1], 10);
+      if (n >= 1 && n <= 12) { base = 0x3A + (n - 1); continue; }
+      if (n >= 13 && n <= 24) { base = 0x68 + (n - 13); continue; }
+    }
+    // Named lookup
+    if (KC_CODE_BY_NAME.has(u)) { base = KC_CODE_BY_NAME.get(u); continue; }
+    return null; // unknown token
+  }
+  if (base == null) return null;
+  return ((mods << 8) | (base & 0xFF)) & 0xFFFF;
+}
+
+function formatData(type, bytes) {
+  if (!bytes || bytes.length === 0) return '';
+  if (type === 'Keycode' && bytes.length >= 2) {
+    const n = (bytes[0] << 8) | bytes[1];
+    return keycodeToLabel(n);
+  }
+  if (type === 'String' && bytes.length >= 1) {
+    // First byte is flags; rest is UTF-8.
+    try {
+      const trailing = bytes.slice(1);
+      const trimmed = [];
+      for (const b of trailing) { if (b !== 0) trimmed.push(b); }
+      return new TextDecoder().decode(new Uint8Array(trimmed));
+    } catch (_) { return ''; }
+  }
+  if (type === 'Sequence' && bytes.length >= 1) {
+    const count = bytes[0];
+    const codes = [];
+    for (let i = 0; i < count; i++) {
+      const off = 1 + i * 2;
+      if (off + 1 >= bytes.length) break;
+      const n = (bytes[off] << 8) | bytes[off + 1];
+      codes.push(keycodeToLabel(n));
+    }
+    return codes.join(', ');
+  }
+  return bytes.map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+}
+
+function parseNumberMaybeHex(s) {
+  return parseKeycodeToken(s);
+}
+
+async function refreshSoftkeys() {
+  const area = $('#softkeys-area');
+  try {
+    const cfgs = await api('GET', '/api/soft-keys');
+    area.innerHTML = '';
+    cfgs.forEach(cfg => area.appendChild(renderSoftkeyCard(cfg)));
+  } catch (e) {
+    area.innerHTML = `<div class="empty">${e.message}</div>`;
+  }
+}
+$('#softkeys-reset').addEventListener('click', async () => {
+  if (!confirm('Reset all soft keys to firmware defaults?')) return;
+  try {
+    await api('POST', '/api/soft-keys/reset');
+    toast('soft keys reset');
+    await refreshSoftkeys();
+    await refreshPresetMatch();
+    rebuildPresetSelect();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+});
+
+// ── Presets ────────────────────────────────────────────────────────
+let presetState = { builtin: [], user: [], current: null };
+
+function presetByName(name) {
+  return presetState.builtin.find(p => p.name === name)
+    || presetState.user.find(p => p.name === name)
+    || null;
+}
+
+function isUserPreset(name) {
+  return presetState.user.some(p => p.name === name);
+}
+
+// Compare two arrays of 3 PresetKey objects byte-by-byte.
+function keysEqual(a, b) {
+  if (!a || !b || a.length !== 3 || b.length !== 3) return false;
+  for (let i = 0; i < 3; i++) {
+    const ka = a[i], kb = b[i];
+    if (!ka || !kb) return false;
+    if (ka.key_type !== kb.key_type) return false;
+    const da = ka.data || [], db = kb.data || [];
+    if (da.length !== db.length) return false;
+    for (let j = 0; j < da.length; j++) if (da[j] !== db[j]) return false;
+  }
+  return true;
+}
+
+// Convert what we get from GET /api/soft-keys into the PresetKey shape.
+// SoftKeyConfig has {index, key_type, data}; PresetKey has {key_type, data}.
+function configsToPresetKeys(cfgs) {
+  return [0, 1, 2].map(i => {
+    const c = cfgs[i] || { key_type: 'Keycode', data: [] };
+    return { key_type: c.key_type, data: c.data || [] };
+  });
+}
+
+function findMatchingPreset(currentKeys) {
+  for (const p of presetState.builtin) if (keysEqual(p.keys, currentKeys)) return p.name;
+  for (const p of presetState.user) if (keysEqual(p.keys, currentKeys)) return p.name;
+  return null;
+}
+
+function rebuildPresetSelect() {
+  const sel = $('#preset-select');
+  sel.innerHTML = '';
+  const customOpt = document.createElement('option');
+  customOpt.value = '';
+  customOpt.textContent = '— Custom —';
+  sel.appendChild(customOpt);
+
+  if (presetState.builtin.length > 0) {
+    const grp = document.createElement('optgroup');
+    grp.label = 'Built-in';
+    for (const p of presetState.builtin) {
+      const opt = document.createElement('option');
+      opt.value = p.name;
+      opt.textContent = p.description ? `${p.name} — ${p.description}` : p.name;
+      grp.appendChild(opt);
+    }
+    sel.appendChild(grp);
+  }
+  if (presetState.user.length > 0) {
+    const grp = document.createElement('optgroup');
+    grp.label = 'User';
+    for (const p of presetState.user) {
+      const opt = document.createElement('option');
+      opt.value = p.name;
+      opt.textContent = p.name;
+      grp.appendChild(opt);
+    }
+    sel.appendChild(grp);
+  }
+  // Always reflect the current state — if the user edits a key away
+  // from a preset, the dropdown should snap to "— Custom —" rather
+  // than holding the previous selection.
+  sel.value = presetState.current || '';
+  updatePresetButtons();
+}
+
+function updatePresetButtons() {
+  const name = $('#preset-select').value;
+  $('#preset-delete').disabled = !name || !isUserPreset(name);
+  const hint = $('#preset-hint');
+  if (name && presetByName(name)?.description) {
+    $('#preset-hint-row').style.display = '';
+    hint.textContent = presetByName(name).description;
+  } else {
+    $('#preset-hint-row').style.display = 'none';
+  }
+}
+
+async function refreshPresets() {
+  try {
+    const data = await api('GET', '/api/soft-keys/presets');
+    presetState.builtin = data.builtin || [];
+    presetState.user = data.user || [];
+  } catch (e) {
+    presetState.builtin = [];
+    presetState.user = [];
+  }
+  await refreshPresetMatch();
+  rebuildPresetSelect();
+}
+
+async function refreshPresetMatch() {
+  // Pull the current key state and find the matching preset (if any).
+  try {
+    const cfgs = await api('GET', '/api/soft-keys');
+    const currentKeys = configsToPresetKeys(cfgs);
+    presetState.current = findMatchingPreset(currentKeys);
+  } catch (_) {
+    presetState.current = null;
+  }
+}
+
+$('#preset-select').addEventListener('change', updatePresetButtons);
+
+$('#preset-apply').addEventListener('click', async () => {
+  const name = $('#preset-select').value;
+  if (!name) {
+    toast('pick a preset to apply', 'err');
+    return;
+  }
+  try {
+    await api('POST', '/api/soft-keys/presets/apply', { name });
+    toast(`applied "${name}"`);
+    await refreshSoftkeys();
+    await refreshPresetMatch();
+    rebuildPresetSelect();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+});
+
+$('#preset-save').addEventListener('click', async () => {
+  let name = prompt('Save current soft-keys as preset (name):', '');
+  if (name === null) return;
+  name = name.trim();
+  if (!name) return;
+  // Pull current keys to send along.
+  let cfgs;
+  try {
+    cfgs = await api('GET', '/api/soft-keys');
+  } catch (e) {
+    toast(e.message, 'err');
+    return;
+  }
+  const keys = configsToPresetKeys(cfgs);
+  try {
+    await api('POST', '/api/soft-keys/presets/save', { name, keys });
+    toast(`saved "${name}"`);
+    await refreshPresets();
+    $('#preset-select').value = name;
+    updatePresetButtons();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+});
+
+$('#preset-delete').addEventListener('click', async () => {
+  const name = $('#preset-select').value;
+  if (!name || !isUserPreset(name)) return;
+  if (!confirm(`Delete user preset "${name}"?`)) return;
+  try {
+    await api('DELETE', `/api/soft-keys/presets/${encodeURIComponent(name)}`);
+    toast(`deleted "${name}"`);
+    await refreshPresets();
+  } catch (e) {
+    toast(e.message, 'err');
+  }
+});
+
+// ── Wrappers ───────────────────────────────────────────────────────
+async function refreshWrappers() {
+  const area = $('#wrappers-area');
+  try {
+    const rows = await api('GET', '/api/wrappers');
+    if (!rows || rows.length === 0) {
+      area.innerHTML = '<div class="empty">no wrappers connected</div>';
+      return;
+    }
+    rows.sort((a, b) => a.started_at_unix - b.started_at_unix);
+    const html = `
+      <table>
+        <thead><tr>
+          <th></th><th>PID</th><th>Host</th><th>cwd</th><th>Session</th>
+        </tr></thead>
+        <tbody>
+        ${rows.map(r => `
+          <tr>
+            <td class="${r.active ? 'active' : ''}">${r.active ? 'active' : ''}</td>
+            <td>${r.pid}</td>
+            <td>${r.host_terminal_kind || '?'}</td>
+            <td>${escapeHtml(r.cwd)}</td>
+            <td>${r.session_id ? r.session_id.slice(0, 8) : '<span style="color:var(--muted)">unbound</span>'}</td>
+          </tr>
+        `).join('')}
+        </tbody>
+      </table>
+    `;
+    area.innerHTML = html;
+  } catch (e) {
+    area.innerHTML = `<div class="empty">${e.message}</div>`;
+  }
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
+}
+
+// ── Boot ───────────────────────────────────────────────────────────
+async function loadAll() {
+  await Promise.all([
+    refreshStatus(),
+    refreshVersion(),
+    refreshHooks(),
+    refreshSoftkeys(),
+    refreshWrappers(),
+  ]);
+  await refreshPresets();
+  // Populate brightness slider from initial value once status loads.
+  // (Status doesn't return current brightness; leave at slider default.)
+  $('#brightness-value').textContent = slider.value;
+}
+loadAll();
+
+// Refresh status + wrappers periodically so device-state changes
+// (mode toggle, ARM, wrapper connect/disconnect) reflect without reload.
+setInterval(() => {
+  refreshStatus();
+  refreshWrappers();
+}, 3000);
+
+</script>
+</body>
+</html>

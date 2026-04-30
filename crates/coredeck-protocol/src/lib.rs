@@ -83,6 +83,15 @@ pub struct DisplayUpdate {
     pub tabs: Vec<u8>,
     /// Index into tabs array for the currently active tab
     pub active: usize,
+    /// Context window usage percentage (from Claude Code statusline)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_percent: Option<f64>,
+    /// Session cost in USD (from Claude Code statusline)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Model display name (from Claude Code statusline)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// Tab state constants
@@ -141,6 +150,13 @@ pub enum WsCommandTag {
     Alert = 0x08,
     GetVersion = 0x09,
     ClearAlert = 0x0A,
+    /// Push raw bytes into a `coredeck-claude` wrapper's PTY (mode toggle,
+    /// soft-key text). JSON payload: `{"wrapper_id":"...","bytes":[..]}`.
+    /// Empty `wrapper_id` targets the active wrapper.
+    WrapperWrite = 0x0B,
+    /// Set which wrapper the daemon considers "active" (focus). JSON
+    /// payload: `{"wrapper_id":"..."}`.
+    SetActiveWrapper = 0x0C,
 }
 
 impl WsCommandTag {
@@ -156,6 +172,8 @@ impl WsCommandTag {
             0x08 => Some(Self::Alert),
             0x09 => Some(Self::GetVersion),
             0x0A => Some(Self::ClearAlert),
+            0x0B => Some(Self::WrapperWrite),
+            0x0C => Some(Self::SetActiveWrapper),
             _ => None,
         }
     }
@@ -170,7 +188,13 @@ pub enum WsEventTag {
     StateChanged = 0x82,
     KeyEvent = 0x83,
     TypeString = 0x84,
+    /// Claude Code hook event forwarded from daemon (JSON payload)
+    ClaudeHookEvent = 0x85,
     AppControl = 0x89,
+    /// Snapshot of all live `coredeck-claude` wrappers and their per-session
+    /// state. JSON payload is `WrapperTabList`. Re-emitted on every change
+    /// (wrapper register/unregister, hook update, active-tab change).
+    WrapperTabList = 0x8A,
 }
 
 impl WsEventTag {
@@ -181,7 +205,9 @@ impl WsEventTag {
             0x82 => Some(Self::StateChanged),
             0x83 => Some(Self::KeyEvent),
             0x84 => Some(Self::TypeString),
+            0x85 => Some(Self::ClaudeHookEvent),
             0x89 => Some(Self::AppControl),
+            0x8A => Some(Self::WrapperTabList),
             _ => None,
         }
     }
@@ -330,6 +356,188 @@ pub struct ApiError {
     pub error: String,
 }
 
+// ── Wrapper protocol (coredeck-claude ↔ daemon) ────────────────────
+//
+// Each `coredeck-claude` wrapper opens a long-lived WebSocket to the
+// daemon at `/wrapper-ws` and exchanges JSON text frames. Keep the
+// schema simple — it's not in the hot path, and human-readable wins.
+//
+// The HTTP `/wrapper/register` endpoint correlates wrapper_id ↔ session_id;
+// it's POSTed by a tiny SessionStart command hook script that reads
+// $COREDECK_WRAPPER_ID from its inherited environment.
+
+/// Environment variable the wrapper sets so the SessionStart hook
+/// script can identify which wrapper a Claude session belongs to.
+pub const WRAPPER_ENV_VAR: &str = "COREDECK_WRAPPER_ID";
+
+/// Identification of the terminal application hosting the wrapper, captured
+/// at startup from environment variables. The daemon uses this to dispatch
+/// "raise terminal" requests (F20 button) to the right adapter.
+///
+/// Detection is best-effort and may report `Unknown` — in that case the
+/// daemon's raise call is a no-op (or logs a warning).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostTerminalKind {
+    Ghostty,
+    WezTerm,
+    ITerm2,
+    Kitty,
+    Tmux,
+    AppleTerminal,
+    #[default]
+    Unknown,
+}
+
+/// Snapshot of the wrapper's host-terminal context at startup.
+/// `pane_id` semantics depend on `kind`:
+/// - WezTerm: `$WEZTERM_PANE` (pane id, decimal)
+/// - Kitty: `$KITTY_WINDOW_ID`
+/// - iTerm2: `$ITERM_SESSION_ID`
+/// - Tmux: `$TMUX_PANE` (e.g. `%12`); `tmux_socket` carries `$TMUX`
+/// - Ghostty / Apple Terminal: typically `None` (no per-window env)
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HostTerminal {
+    pub kind: HostTerminalKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program_version: Option<String>,
+    /// Tmux socket path from `$TMUX` (`<socket>,<pid>,<session>` form).
+    /// Only populated when `kind == Tmux`. Useful so the daemon can run
+    /// `tmux -S <socket> select-window …` from outside the wrapper.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tmux_socket: Option<String>,
+    /// X11 window id from `$WINDOWID` (decimal). Set by xterm, urxvt, and
+    /// some other Linux terminals; used by the Linux raise path
+    /// (`wmctrl -ia <id>`). Empty on Wayland / when the terminal doesn't
+    /// publish it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<String>,
+}
+
+/// Messages sent by a wrapper to the daemon over /wrapper-ws.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WrapperToDaemon {
+    /// First frame after connect — tells the daemon who we are.
+    Register {
+        wrapper_id: String,
+        pid: u32,
+        cwd: String,
+        /// Unix epoch seconds at wrapper start
+        started_at_unix: u64,
+        /// Host terminal context for raise-to-front. Optional for forward
+        /// compat with older wrappers; daemon treats absence as `Unknown`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host_terminal: Option<HostTerminal>,
+    },
+    /// Best-effort signal that the child claude exited (wrapper is about to close).
+    /// The daemon also treats WS close as unregister.
+    Goodbye {
+        wrapper_id: String,
+        exit_code: Option<i32>,
+    },
+    /// Host terminal focus changed (parsed from OSC 1004 reports on the
+    /// wrapper's stdin). Daemon uses focus-in to set the wrapper as
+    /// active and clear any alert tied to its session.
+    FocusChanged {
+        wrapper_id: String,
+        focused: bool,
+    },
+}
+
+/// Messages sent by the daemon to a wrapper over /wrapper-ws.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DaemonToWrapper {
+    /// Ack the Register frame.
+    Registered { wrapper_id: String },
+    /// Write raw bytes to the child's PTY stdin (e.g. keystroke escapes,
+    /// soft-key text, mode-cycle key).
+    Write { bytes: Vec<u8> },
+}
+
+/// Body for `POST /wrapper/register` — fired from the SessionStart command
+/// hook to bind a Claude session_id to a wrapper_id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrapperRegisterSession {
+    pub wrapper_id: String,
+    pub session_id: String,
+}
+
+/// One row in the daemon's view of "what's running." Combines wrapper info
+/// (cwd, pid) with whatever the latest hook payload told us about the
+/// Claude session bound to that wrapper.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WrapperTab {
+    pub wrapper_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub cwd: String,
+    pub pid: u32,
+    /// Wall-clock wrapper start time (unix seconds) — useful for stable ordering.
+    pub started_at_unix: u64,
+    /// Custom session name (`--name` flag or `/rename`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+    /// Short summary of the user's most recent prompt — used as a fallback
+    /// session label when `session_name` is unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_summary: Option<String>,
+    /// Currently in-progress TodoWrite item, when one exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_todo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Most recent tool name (from PreToolUse), cleared on PostToolUse/Stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool: Option<String>,
+    /// Short human-readable activity description (tool + key input field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_task: Option<String>,
+    /// Most recent tool's task summary, kept across the following Thinking
+    /// phase so the device's second line stays informative while Claude
+    /// thinks about the next step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool_summary: Option<String>,
+    /// Permission mode reported by hooks: "default", "plan", "acceptEdits", "bypassPermissions", etc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// True between PreToolUse and Stop — Claude is doing something.
+    pub active: bool,
+    /// Statusline-derived numbers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_percent: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+/// Daemon → app snapshot of every live wrapper.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WrapperTabList {
+    pub tabs: Vec<WrapperTab>,
+    /// Wrapper currently considered "focused" — the target for HID input.
+    /// Empty when no wrapper is connected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_wrapper_id: Option<String>,
+}
+
+/// Body for `WrapperWrite` WS command (app → daemon).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrapperWriteRequest {
+    /// When empty, the daemon writes to whichever wrapper is currently active.
+    #[serde(default)]
+    pub wrapper_id: String,
+    pub bytes: Vec<u8>,
+}
+
+/// Body for `SetActiveWrapper` WS command (app → daemon).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetActiveWrapperRequest {
+    pub wrapper_id: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,9 +599,31 @@ mod tests {
             task2: String::new(),
             tabs: vec![0, 1, 2],
             active: 1,
+            context_percent: Some(42.5),
+            cost_usd: Some(1.23),
+            model: Some("Opus".to_string()),
         };
         let json = serde_json::to_string(&update).unwrap();
         assert!(json.contains("\"session\":\"my-project\""));
+        assert!(json.contains("\"context_percent\":42.5"));
+        assert!(json.contains("\"cost_usd\":1.23"));
+        assert!(json.contains("\"model\":\"Opus\""));
+
+        // Without optional fields — they should be omitted
+        let update_minimal = DisplayUpdate {
+            session: "test".to_string(),
+            task: String::new(),
+            task2: String::new(),
+            tabs: vec![],
+            active: 0,
+            context_percent: None,
+            cost_usd: None,
+            model: None,
+        };
+        let json_min = serde_json::to_string(&update_minimal).unwrap();
+        assert!(!json_min.contains("context_percent"));
+        assert!(!json_min.contains("cost_usd"));
+        assert!(!json_min.contains("model"));
     }
 
     #[test]

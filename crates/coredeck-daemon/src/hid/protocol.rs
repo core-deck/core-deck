@@ -7,7 +7,9 @@
 
 // Re-export shared types from the protocol crate so existing code
 // can continue to use `crate::hid::protocol::DeviceMode` etc.
-pub use coredeck_protocol::{DeviceMode, DeviceState, DisplayUpdate, SoftKeyConfig, SoftKeyType};
+pub use coredeck_protocol::{DeviceMode, DeviceState, SoftKeyConfig, SoftKeyType};
+#[cfg(test)]
+pub use coredeck_protocol::DisplayUpdate;
 
 /// HID packet size in bytes
 pub const PACKET_SIZE: usize = 32;
@@ -146,6 +148,7 @@ impl HidPacket {
     }
 
     /// Get the flags byte
+    #[cfg(test)]
     pub fn flags(&self) -> u8 {
         self.data[0]
     }
@@ -173,11 +176,6 @@ impl HidPacket {
     /// Get the payload slice (bytes 2-31)
     pub fn payload(&self) -> &[u8] {
         &self.data[HEADER_SIZE..]
-    }
-
-    /// Get mutable payload slice
-    pub fn payload_mut(&mut self) -> &mut [u8] {
-        &mut self.data[HEADER_SIZE..]
     }
 
     /// Set payload from bytes, truncating if necessary
@@ -242,8 +240,6 @@ pub fn build_chunked_packets(command: HidCommand, payload: &[u8], mode: Protocol
 /// Parsed response from the device
 #[derive(Debug, Clone)]
 pub struct ResponsePacket {
-    /// Command this is a response to
-    pub command: u8,
     /// Status byte (first byte of reassembled payload)
     pub status: u8,
     /// Remaining data after status byte
@@ -251,6 +247,7 @@ pub struct ResponsePacket {
 }
 
 /// Protocol error codes from firmware
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ProtoError {
@@ -262,6 +259,7 @@ pub enum ProtoError {
     UnknownCommand = 0x03,
 }
 
+#[allow(dead_code)]
 impl ProtoError {
     pub fn from_byte(byte: u8) -> Option<Self> {
         match byte {
@@ -412,6 +410,9 @@ mod tests {
             task2: String::new(),
             tabs: vec![0, 1, 2],
             active: 1,
+            context_percent: None,
+            cost_usd: None,
+            model: None,
         };
         let json = serde_json::to_string(&update).unwrap();
         assert!(json.contains("\"session\":\"my-project\""));

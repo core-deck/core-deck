@@ -527,11 +527,10 @@ impl HidManager {
         ProtocolMode::from_byte(self.protocol_mode.load(Ordering::Relaxed))
     }
 
-    /// Send a display update with session name, current task, tab states, and active tab index.
-    /// Skips sending if the payload is identical to the last one sent.
-    pub fn send_display_update(&self, session: &str, task: Option<&str>, task2: Option<&str>, tabs: &[u8], active: usize) -> Result<()> {
-        // Build a dedup key from the payload fields
-        let payload_key = format!("{}|{}|{}|{:?}|{}", session, task.unwrap_or(""), task2.unwrap_or(""), tabs, active);
+    /// Send a display update. Skips sending if the payload is identical to the last one sent.
+    pub fn send_display_update(&self, update: &coredeck_protocol::DisplayUpdate) -> Result<()> {
+        // Build a dedup key from serialized JSON
+        let payload_key = serde_json::to_string(update).unwrap_or_default();
         {
             let mut last = self.last_display_payload.lock();
             if *last == payload_key {
@@ -546,7 +545,7 @@ impl HidManager {
             .ok_or_else(|| anyhow!("Device not connected"))?;
 
         let mode = self.mode();
-        let packets = commands::build_display_update(session, task, task2, tabs, active, mode);
+        let packets = commands::build_display_update(update, mode);
         send_packets_to_device(device, &packets, mode)?;
 
         self.drain_response(device);
@@ -596,7 +595,14 @@ impl HidManager {
         Ok(())
     }
 
-    /// Set a soft key assignment
+    /// Set a soft key assignment.
+    ///
+    /// When `save=true` the firmware blocks USB processing on an EEPROM
+    /// flash write (100-500ms on RP2040) before sending its reply, so we
+    /// widen the first-packet timeout for that case. The default 200ms
+    /// surfaces flash-stalls as spurious "Timeout waiting for response"
+    /// errors and leaves a stale set-reply in the read buffer that
+    /// confuses the next `get_soft_key`.
     pub fn set_soft_key(&self, index: u8, key_type: SoftKeyType, data: &[u8], save: bool) -> Result<()> {
         let device_guard = self.device.lock();
         let device = device_guard
@@ -607,13 +613,28 @@ impl HidManager {
         let packets = commands::build_set_soft_key(index, key_type, data, save, mode);
         send_packets_to_device(device, &packets, mode)?;
 
-        self.drain_response(device);
+        let first_timeout_ms = if save { 1500 } else { 200 };
+        let _ = read_response_with_timeout(
+            device,
+            HidCommand::SetSoftKey,
+            &self.event_tx,
+            mode,
+            first_timeout_ms,
+        )?;
 
         info!("Soft key {} set", index);
         Ok(())
     }
 
-    /// Get a soft key configuration
+    /// Get a soft key configuration.
+    ///
+    /// Uses a widened first-packet timeout because the settings page's
+    /// `refreshSoftkeys` is often called immediately after a `save=true`
+    /// `set_soft_key`. The firmware finishes its EEPROM write and emits
+    /// a state report, and processing the next inbound command can drift
+    /// past the default 200ms — long enough to surface as a spurious
+    /// "Timeout waiting for response" partway through the three-key
+    /// refresh.
     pub fn get_soft_key(&self, index: u8) -> Result<SoftKeyConfig> {
         let device_guard = self.device.lock();
         let device = device_guard
@@ -625,7 +646,13 @@ impl HidManager {
         send_packets_to_device(device, &packets, mode)?;
 
         // Read response — expect chunked response with key config data
-        let response = read_response(device, HidCommand::GetSoftKey, &self.event_tx, mode)?;
+        let response = read_response_with_timeout(
+            device,
+            HidCommand::GetSoftKey,
+            &self.event_tx,
+            mode,
+            1000,
+        )?;
 
         // Parse response: [key_index, key_type, ...entry_data]
         // The firmware sends: send_response(cmd, status=0x00, [key_index, type, data...])
@@ -639,11 +666,23 @@ impl HidManager {
         }
 
         let _key_index = response.data[0];
-        let key_type = SoftKeyType::from_byte(response.data[1]).unwrap_or(SoftKeyType::Default);
+        let raw_type = SoftKeyType::from_byte(response.data[1]).unwrap_or(SoftKeyType::Default);
         let data = if response.data.len() > 2 {
             response.data[2..].to_vec()
         } else {
             vec![]
+        };
+
+        // Older firmware reports `Default` (0) directly with the resolved
+        // keymap keycode appended (`[type=0, kc_hi, kc_lo]`); newer firmware
+        // substitutes the type byte to `Keycode` (1). Either way the data
+        // bytes are already a 16-bit keycode for the user-visible "what
+        // does this key do" question — normalise to Keycode here so the
+        // settings page never has to special-case Default.
+        let key_type = if raw_type == SoftKeyType::Default && data.len() == 2 {
+            SoftKeyType::Keycode
+        } else {
+            raw_type
         };
 
         Ok(SoftKeyConfig {
@@ -969,14 +1008,30 @@ fn read_response(
     event_tx: &DaemonEventSender,
     mode: ProtocolMode,
 ) -> Result<ResponsePacket> {
+    read_response_with_timeout(device, expected_cmd, event_tx, mode, 200)
+}
+
+/// Like `read_response` but lets the caller widen the wait for the
+/// *first* packet. Used by `set_soft_key(save=true)` because the
+/// firmware blocks USB processing during EEPROM flash writes
+/// (100-500ms) before sending its reply, and the default 200ms first
+/// timeout would surface that as a spurious "timeout" error.
+fn read_response_with_timeout(
+    device: &HidDevice,
+    expected_cmd: HidCommand,
+    event_tx: &DaemonEventSender,
+    mode: ProtocolMode,
+    first_timeout_ms: i32,
+) -> Result<ResponsePacket> {
     let mut payload = Vec::new();
     let mut got_start = false;
-    let mut command_byte = 0u8;
+    let mut _command_byte = 0u8;
     let mut type_string_buf = Vec::new();
 
     // Read packets until we get a complete response (up to reasonable limit)
     for _ in 0..20 {
-        let pkt = match read_raw_packet(device, 200, mode)? {
+        let timeout = if got_start { 200 } else { first_timeout_ms };
+        let pkt = match read_raw_packet(device, timeout, mode)? {
             Some(pkt) => pkt,
             None => {
                 if got_start {
@@ -1013,7 +1068,7 @@ fn read_response(
 
         if pkt.is_start() {
             got_start = true;
-            command_byte = pkt.command_byte();
+            _command_byte = pkt.command_byte();
             payload.clear();
         }
 
@@ -1036,7 +1091,6 @@ fn read_response(
             };
 
             return Ok(ResponsePacket {
-                command: command_byte,
                 status,
                 data,
             });

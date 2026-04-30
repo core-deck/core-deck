@@ -3,19 +3,26 @@
 //! Provides WebSocket (exclusive) and HTTP REST (shared) APIs for
 //! controlling the CoreDeck macropad.
 
+mod alerts;
 mod hid;
+mod hooks;
+mod keymap;
+mod presets;
+mod raise;
 mod rpc;
 mod state;
 mod tray;
+mod wrapper;
 mod ws;
 
-use coredeck_protocol::{AppControlAction, DEFAULT_DAEMON_ADDR};
+use coredeck_protocol::DEFAULT_DAEMON_ADDR;
 use clap::{Parser, Subcommand};
 use hid::HidManager;
-use state::{DaemonEvent, DaemonEventSender, DeviceStatus, TrayUpdate};
+use state::{ClaudeState, DaemonEvent, DaemonEventSender, DeviceStatus, TrayUpdate, Wrapper};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// HID device configuration (matches the app's HidConfig)
@@ -54,6 +61,15 @@ pub struct DaemonState {
     pub notify_lock_change: Notify,
     /// Channel to send tray updates to the main thread (tray is !Send, lives on main thread)
     pub tray_tx: std::sync::mpsc::Sender<TrayUpdate>,
+    /// State derived from Claude Code hooks
+    pub claude_state: RwLock<ClaudeState>,
+    /// Active `coredeck-claude` wrappers, keyed by wrapper_id
+    pub wrappers: RwLock<HashMap<String, Wrapper>>,
+    /// What's currently displayed on the device's alert overlay (idle
+    /// notification / pending permission decision / nothing).
+    pub alert_state: Mutex<alerts::AlertState>,
+    /// Listen address (for hooks install to know the URL)
+    pub listen_addr: String,
 }
 
 impl DaemonState {
@@ -79,6 +95,19 @@ enum Commands {
     Install,
     /// Uninstall launchd plist
     Uninstall,
+    /// Manage Claude Code hooks configuration
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum HooksAction {
+    /// Install Claude Code hooks in ~/.claude/settings.local.json
+    Install,
+    /// Remove Claude Code hooks from ~/.claude/settings.local.json
+    Uninstall,
 }
 
 fn main() {
@@ -90,7 +119,7 @@ fn main() {
 
     let cli = Cli::parse();
 
-    // Handle install/uninstall subcommands
+    // Handle subcommands
     match cli.command {
         Some(Commands::Install) => {
             install_launchd(&cli.listen);
@@ -100,10 +129,22 @@ fn main() {
             uninstall_launchd();
             return;
         }
+        Some(Commands::Hooks { action }) => {
+            match action {
+                HooksAction::Install => hooks::install_claude_hooks(&cli.listen),
+                HooksAction::Uninstall => hooks::uninstall_claude_hooks(),
+            }
+            return;
+        }
         None => {}
     }
 
     info!("Starting CoreDeck daemon on {}", cli.listen);
+
+    // Install a raw SIGINT handler so Ctrl-C actually terminates the process.
+    // On macOS, winit's NSApplication::run() installs its own signal handlers
+    // which intercept SIGINT before tokio can see it.
+    install_signal_handler();
 
     // macOS: set activation policy to Accessory (no dock icon, just tray)
     #[cfg(target_os = "macos")]
@@ -111,6 +152,7 @@ fn main() {
 
     // Create event channel for HID events
     let (event_tx, event_rx) = mpsc::unbounded_channel::<DaemonEvent>();
+    let initial_event_tx = event_tx.clone();
     let event_sender = DaemonEventSender::new(event_tx);
 
     // Initialize HID manager
@@ -139,9 +181,11 @@ fn main() {
     let (tray_update_tx, tray_update_rx) = std::sync::mpsc::channel::<TrayUpdate>();
 
     // Initialize device status from HID manager's enumeration
+    let initially_available = hid_manager.is_device_available();
+    let initial_device_name = hid_manager.cached_device_name();
     let initial_status = DeviceStatus {
-        available: hid_manager.is_device_available(),
-        device_name: hid_manager.cached_device_name(),
+        available: initially_available,
+        device_name: initial_device_name.clone(),
         ..DeviceStatus::default()
     };
 
@@ -152,7 +196,20 @@ fn main() {
         ws_client: Mutex::new(None),
         notify_lock_change: Notify::new(),
         tray_tx: tray_update_tx,
+        claude_state: RwLock::new(ClaudeState::default()),
+        wrappers: RwLock::new(HashMap::new()),
+        alert_state: Mutex::new(alerts::AlertState::default()),
+        listen_addr: cli.listen.clone(),
     });
+
+    // Emit initial DeviceAvailable event if device was found during enumeration.
+    // Hotplug/polling monitors only fire on state *changes*, so they miss
+    // a device that was already plugged in when the daemon started.
+    if initially_available {
+        let name = initial_device_name.unwrap_or_else(|| "Core Deck".to_string());
+        info!("Emitting initial DeviceAvailable for already-connected device: {}", name);
+        let _ = initial_event_tx.send(DaemonEvent::DeviceAvailable { device_name: name });
+    }
 
     // Run the tokio runtime + axum server on a spawned thread.
     // The winit event loop must run on the main thread (required for tray on macOS).
@@ -167,6 +224,11 @@ fn main() {
         rt.block_on(async move {
             run_async(state_clone, event_rx, listen_addr).await;
         });
+
+        // run_async returns when Ctrl-C is received. The main thread is blocked
+        // in the winit event loop (for tray icon), so exit the process directly.
+        info!("Async runtime finished, exiting process");
+        std::process::exit(0);
     });
 
     // Handle tray events on main thread (via winit event loop)
@@ -189,6 +251,25 @@ async fn run_async(
         .route("/api/brightness", axum::routing::post(rpc::post_brightness))
         .route("/api/mode", axum::routing::post(rpc::post_mode))
         .route("/api/version", axum::routing::get(rpc::get_version))
+        .route("/api/hooks/status", axum::routing::get(rpc::get_hooks_status))
+        .route("/api/hooks/install", axum::routing::post(rpc::post_hooks_install))
+        .route("/api/hooks/uninstall", axum::routing::post(rpc::post_hooks_uninstall))
+        .route("/api/soft-keys", axum::routing::get(rpc::get_soft_keys))
+        .route("/api/soft-keys/reset", axum::routing::post(rpc::post_soft_keys_reset))
+        .route("/api/soft-keys/presets", axum::routing::get(rpc::get_soft_key_presets))
+        .route("/api/soft-keys/presets/apply", axum::routing::post(rpc::apply_soft_key_preset))
+        .route("/api/soft-keys/presets/save", axum::routing::post(rpc::save_soft_key_preset))
+        .route("/api/soft-keys/presets/{name}", axum::routing::delete(rpc::delete_soft_key_preset))
+        .route("/api/soft-keys/{index}", axum::routing::put(rpc::put_soft_key))
+        .route("/api/wrappers", axum::routing::get(rpc::get_wrappers))
+        // Static settings page (HTML embedded in the binary)
+        .route("/", axum::routing::get(rpc::get_settings_page))
+        .route("/settings", axum::routing::get(rpc::get_settings_page))
+        // Claude Code hook endpoints (no WS lock needed — hooks come from Claude Code)
+        .route("/hooks/{event_type}", axum::routing::post(hooks::handle_hook))
+        // coredeck-claude wrapper protocol
+        .route("/wrapper-ws", axum::routing::get(wrapper::wrapper_ws_handler))
+        .route("/wrapper/register", axum::routing::post(wrapper::wrapper_register_session))
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -215,6 +296,13 @@ async fn run_async(
         }
     });
 
+    // 1Hz tab-list ticker — keeps elapsed-seconds advancing on the device
+    // between hook events for the active session.
+    let ticker_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        wrapper::run_display_ticker(ticker_state).await;
+    });
+
     // Process HID events and forward to WS client
     let state_for_events = Arc::clone(&state);
     let event_handler = tokio::spawn(async move {
@@ -228,7 +316,10 @@ async fn run_async(
                     status.device_name = Some(device_name.clone());
                     status.firmware_version = Some(firmware_version.clone());
 
-                    state_for_events.send_tray_update(TrayUpdate::DeviceConnected(device_name.clone()));
+                    state_for_events.send_tray_update(TrayUpdate::DeviceConnected {
+                        name: device_name.clone(),
+                        firmware: firmware_version.clone(),
+                    });
                 }
                 DaemonEvent::HidDisconnected => {
                     let mut status = state_for_events.device_status.write().await;
@@ -239,10 +330,23 @@ async fn run_async(
                     state_for_events.send_tray_update(TrayUpdate::DeviceDisconnected);
                 }
                 DaemonEvent::DeviceAvailable { device_name } => {
-                    let mut status = state_for_events.device_status.write().await;
-                    status.available = true;
-                    status.device_name = Some(device_name.clone());
+                    {
+                        let mut status = state_for_events.device_status.write().await;
+                        status.available = true;
+                        status.device_name = Some(device_name.clone());
+                    }
                     state_for_events.send_tray_update(TrayUpdate::DeviceAvailable(device_name.clone()));
+                    // Open HID immediately and keep it open for the
+                    // daemon's lifetime — no GUI app means there's
+                    // nothing to hand it off to, and the open/close
+                    // churn from transient HTTP requests was racing
+                    // protocol detection and EEPROM saves.
+                    let hid = state_for_events.hid.lock().await;
+                    if !hid.is_connected() {
+                        if let Err(e) = hid.open_device() {
+                            warn!("Failed to open HID on DeviceAvailable: {}", e);
+                        }
+                    }
                 }
                 DaemonEvent::DeviceUnavailable => {
                     let mut status = state_for_events.device_status.write().await;
@@ -257,6 +361,70 @@ async fn run_async(
                     status.yolo = *yolo;
                 }
                 _ => {}
+            }
+
+            // Try to consume HID input as a response to a live alert
+            // (idle prompt clear, F20 focus, interactive permission
+            // decision). Outcomes:
+            //   - Passthrough: route to active wrapper as normal
+            //   - Consumed: alert resolved; don't route
+            //   - FocusSession: F20 with alert up — switch active to the
+            //     alerting session, raise its terminal, leave alert up,
+            //     don't route
+            //   - RaiseActive: F20 with no alert — raise the currently-
+            //     active session's terminal, don't route
+            if matches!(
+                &event,
+                DaemonEvent::HidKeyEvent { .. } | DaemonEvent::HidTypeString { .. }
+            ) {
+                match alerts::consume_input_for_decision(&state_for_events, &event).await {
+                    alerts::AlertOutcome::Consumed => continue,
+                    alerts::AlertOutcome::FocusSession(sid) => {
+                        let _ = wrapper::set_active_for_session(&state_for_events, &sid).await;
+                        raise::raise_for_session(&state_for_events, &sid).await;
+                        continue;
+                    }
+                    alerts::AlertOutcome::RaiseActive => {
+                        raise::raise_active(&state_for_events).await;
+                        continue;
+                    }
+                    alerts::AlertOutcome::Passthrough => {}
+                }
+            }
+
+            // Knob press+rotate is a daemon-level cycler (replaces the
+            // old "F20 cycles" idea). Firmware emits Ctrl+Tab / Ctrl+
+            // Shift+Tab from encoder Layer 1; intercept here so neither
+            // the wrapper PTY nor any outer terminal sees a literal tab
+            // switch escape.
+            if let DaemonEvent::HidKeyEvent { keycode } = &event {
+                match *keycode {
+                    keymap::KEYCODE_KNOB_NEXT => {
+                        wrapper::cycle_active(&state_for_events, 1).await;
+                        continue;
+                    }
+                    keymap::KEYCODE_KNOB_PREV => {
+                        wrapper::cycle_active(&state_for_events, -1).await;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Route HID input to the active wrapper's PTY when one is connected.
+            // Only fall through to legacy WS forwarding (GUI app) when no
+            // wrapper handled the event.
+            let routed = match &event {
+                DaemonEvent::HidKeyEvent { keycode } => {
+                    wrapper::route_hid_key(&state_for_events, *keycode).await
+                }
+                DaemonEvent::HidTypeString { text, send_enter } => {
+                    wrapper::route_hid_type_string(&state_for_events, text, *send_enter).await
+                }
+                _ => false,
+            };
+            if routed {
+                continue;
             }
 
             // Forward to WS client
@@ -277,7 +445,7 @@ async fn run_async(
 /// Run the winit event loop on the main thread (for tray icon support on macOS)
 fn run_main_event_loop(
     state: Arc<DaemonState>,
-    mut tray_manager: Option<tray::DaemonTrayManager>,
+    tray_manager: Option<tray::DaemonTrayManager>,
     tray_action_rx: Option<std::sync::mpsc::Receiver<tray::DaemonTrayAction>>,
     tray_update_rx: std::sync::mpsc::Receiver<TrayUpdate>,
 ) {
@@ -308,24 +476,29 @@ fn run_main_event_loop(
             while let Ok(update) = self.tray_update_rx.try_recv() {
                 if let Some(ref mut tray) = self.tray_manager {
                     match update {
-                        TrayUpdate::DeviceConnected(name) => {
-                            tray.set_device_status(tray::DevicePresence::Active, Some(&name));
+                        TrayUpdate::DeviceConnected { name, firmware } => {
+                            tray.set_device_status(
+                                tray::DevicePresence::Active,
+                                Some(&name),
+                                Some(&firmware),
+                            );
                         }
                         TrayUpdate::DeviceDisconnected => {
                             // Device interface closed but may still be physically available
-                            tray.set_device_status(tray::DevicePresence::Available, None);
+                            tray.set_device_status(tray::DevicePresence::Available, None, None);
                         }
                         TrayUpdate::DeviceAvailable(name) => {
-                            tray.set_device_status(tray::DevicePresence::Available, Some(&name));
+                            tray.set_device_status(
+                                tray::DevicePresence::Available,
+                                Some(&name),
+                                None,
+                            );
                         }
                         TrayUpdate::DeviceUnavailable => {
-                            tray.set_device_status(tray::DevicePresence::None, None);
+                            tray.set_device_status(tray::DevicePresence::None, None, None);
                         }
-                        TrayUpdate::AppConnected => {
-                            tray.set_app_connected(true);
-                        }
-                        TrayUpdate::AppDisconnected => {
-                            tray.set_app_connected(false);
+                        TrayUpdate::Tabs(list) => {
+                            tray.set_tabs(&list);
                         }
                     }
                 }
@@ -335,8 +508,7 @@ fn run_main_event_loop(
             if let Some(ref rx) = self.tray_action_rx {
                 while let Ok(action) = rx.try_recv() {
                     match action {
-                        tray::DaemonTrayAction::ToggleApp => {
-                            // Send show/hide to app via WS
+                        tray::DaemonTrayAction::FocusWrapper(wrapper_id) => {
                             let state = Arc::clone(&self.state);
                             std::thread::spawn(move || {
                                 let rt = tokio::runtime::Builder::new_current_thread()
@@ -344,9 +516,19 @@ fn run_main_event_loop(
                                     .build()
                                     .unwrap();
                                 rt.block_on(async {
-                                    ws::send_app_control(&state, AppControlAction::ShowWindow).await;
+                                    if let Err(e) = wrapper::set_active_wrapper(&state, &wrapper_id).await {
+                                        info!("FocusWrapper({}) failed: {}", wrapper_id, e);
+                                    }
                                 });
                             });
+                        }
+                        tray::DaemonTrayAction::OpenSettings => {
+                            let url = format!(
+                                "http://{}/settings",
+                                self.state.listen_addr,
+                            );
+                            info!(url = %url, "opening settings page");
+                            open_url_in_browser(&url);
                         }
                         tray::DaemonTrayAction::Quit => {
                             info!("Quit requested from tray");
@@ -386,6 +568,45 @@ fn setup_macos_accessory() {
 
 #[cfg(not(target_os = "macos"))]
 fn setup_macos_accessory() {}
+
+/// Spawn a platform-appropriate "open URL in default browser" command.
+/// Best-effort and non-blocking — tray actions shouldn't be load-bearing.
+fn open_url_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let (program, args): (&str, Vec<&str>) = ("open", vec![url]);
+    #[cfg(target_os = "linux")]
+    let (program, args): (&str, Vec<&str>) = ("xdg-open", vec![url]);
+    #[cfg(target_os = "windows")]
+    let (program, args): (&str, Vec<&str>) = ("cmd", vec!["/C", "start", "", url]);
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        info!(url = %url, "open_url_in_browser: unsupported platform");
+        return;
+    }
+
+    if let Err(e) = std::process::Command::new(program).args(&args).spawn() {
+        info!(error = %e, program, "open_url_in_browser failed to spawn");
+    }
+}
+
+// ── Signal handling ────────────────────────────────────────────────
+
+/// Install a raw SIGINT/SIGTERM handler that terminates the process.
+///
+/// On macOS, winit runs NSApplication::run() which installs its own signal
+/// handlers that swallow SIGINT. tokio::signal::ctrl_c() never fires because
+/// the signal is consumed before kqueue sees it. This handler runs before
+/// winit and ensures Ctrl-C actually exits.
+fn install_signal_handler() {
+    extern "C" fn handle_signal(_sig: libc::c_int) {
+        // Use _exit to avoid running atexit handlers which could deadlock
+        unsafe { libc::_exit(0) }
+    }
+    unsafe {
+        libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+    }
+}
 
 // ── launchd install/uninstall ──────────────────────────────────────
 

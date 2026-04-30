@@ -1,0 +1,43 @@
+[package]
+name = "coredeck-claude"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Thin PTY wrapper around the `claude` CLI that registers each session with the CoreDeck daemon"
+license = "GPL-3.0-or-later"
+
+[[bin]]
+name = "coredeck-claude"
+path = "src/main.rs"
+
+[dependencies]
+coredeck-protocol = { path = "../coredeck-protocol" }
+
+# Async runtime
+tokio = { version = "1.43", features = ["full", "sync", "time", "io-util", "signal", "macros", "rt-multi-thread"] }
+
+# PTY management
+portable-pty = "0.9"
+
+# WebSocket client to daemon
+tokio-tungstenite = "0.26"
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UUID for wrapper ids
+uuid = { version = "1.11", features = ["v4"] }
+
+# Raw-mode terminal handling (cross-platform)
+crossterm = "0.28"
+
+# Errors / logging
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Unix-specific bits (SIGWINCH, ioctl)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
