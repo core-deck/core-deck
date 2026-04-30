@@ -326,6 +326,14 @@ async fn run_async(
                     status.connected = false;
                     status.device_name = None;
                     status.firmware_version = None;
+                    // Disarm YOLO on disconnect so reconnect doesn't silently
+                    // resume auto-approve. Permission gating already requires
+                    // `connected`, but clearing the flag keeps device + daemon
+                    // state in sync — a fresh connect comes back with the
+                    // firmware's StateReport, which will re-arm if the
+                    // physical switch is still on.
+                    status.yolo = false;
+                    status.mode_initialized = false;
 
                     state_for_events.send_tray_update(TrayUpdate::DeviceDisconnected);
                 }

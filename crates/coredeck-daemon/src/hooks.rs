@@ -467,6 +467,17 @@ async fn handle_user_prompt_submit(state: &DaemonState, event: &HookEvent) {
         let s = claude.touch_session(sid);
         s.active = true;
         s.current_tool = None;
+        // If compaction landed mid-task there's no hook between PreCompact
+        // and the user's next prompt, so the "Compacting…" placeholder is
+        // still pinned by `active_task_id`. Restore the task subject from
+        // the registry now that the user is driving again.
+        if matches!(s.current_task.as_deref(), Some("Compacting…")) {
+            let restored = s
+                .active_task_id
+                .as_ref()
+                .and_then(|id| s.task_registry.get(id).cloned());
+            s.current_task = restored.or_else(|| Some("Thinking…".to_string()));
+        }
         // Preserve the active task's subject — a mid-task user prompt
         // is still part of the same task, not a blank "Thinking…".
         if s.active_task_id.is_none() {
@@ -546,6 +557,24 @@ fn extract_task_text(tool_name: Option<&str>, tool_input: Option<&serde_json::Va
     }
     let detail_short = truncate_for_display(&detail, detail_budget);
     format!("{name}: {detail_short}")
+}
+
+/// Like `extract_task_text` but tuned for the device's task2 line
+/// (`last_tool_summary`). For `Bash` the leading "Bash: " is dropped —
+/// the icon column already implies a tool task and the prefix steals
+/// six characters from the command itself. Other tools fall through
+/// to the standard formatter.
+fn extract_tool_summary(tool_name: Option<&str>, tool_input: Option<&serde_json::Value>) -> String {
+    let name = tool_name.unwrap_or("Working");
+    if name == "Bash" {
+        if let Some(detail) = tool_input.and_then(|v| pick_detail(name, v)) {
+            if !detail.is_empty() {
+                return truncate_for_display(&detail, MAX_TASK_LINE_CHARS);
+            }
+        }
+        return truncate_left(name, MAX_TASK_LINE_CHARS);
+    }
+    extract_task_text(tool_name, tool_input)
 }
 
 /// Tool-specific picker: which `tool_input` field carries the most
@@ -734,6 +763,7 @@ async fn handle_pre_tool_use(
     }
 
     let task = extract_task_text(event.tool_name.as_deref(), event.tool_input.as_ref());
+    let summary = extract_tool_summary(event.tool_name.as_deref(), event.tool_input.as_ref());
     debug!("PreToolUse: {}", task);
 
     if let Some(ref sid) = event.session_id {
@@ -745,9 +775,9 @@ async fn handle_pre_tool_use(
         // device's second line) — otherwise the task name flickers
         // away on every Read/Bash/Edit.
         if s.active_task_id.is_none() {
-            s.current_task = Some(task.clone());
+            s.current_task = Some(task);
         }
-        s.last_tool_summary = Some(task);
+        s.last_tool_summary = Some(summary);
         s.tool_count_this_turn = s.tool_count_this_turn.saturating_add(1);
         s.active = true;
         s.phase_started_at_unix = Some(now_unix());
@@ -826,13 +856,22 @@ async fn handle_permission_request(
 
     // Check YOLO flag — but never auto-approve ExitPlanMode.
     // The whole point of plan mode is human review before execution.
-    let yolo = state.device_status.read().await.yolo;
-    if yolo && tool != "ExitPlanMode" {
+    // Fail-safe: only auto-approve while the device is actually connected.
+    // If the user walked away with YOLO armed and the device dropped (cable
+    // pull, USB hub flake), they no longer have a kill switch within reach,
+    // so fall back to an explicit prompt.
+    let (yolo, connected) = {
+        let s = state.device_status.read().await;
+        (s.yolo, s.connected)
+    };
+    if yolo && connected && tool != "ExitPlanMode" {
         info!("YOLO: auto-approving {}", tool);
         return Json(allow_response()).into_response();
     }
 
-    if yolo {
+    if yolo && !connected {
+        info!("YOLO armed but device disconnected — NOT auto-approving {}", tool);
+    } else if yolo {
         info!("YOLO: NOT auto-approving {} — requires explicit approval", tool);
     }
 
@@ -1056,7 +1095,18 @@ async fn handle_session_start(state: &DaemonState, event: &HookEvent) {
     // explicit focus signal (OSC 1004) or wrapper-register bootstrap. But do
     // ensure the entry exists so subsequent hooks find it.
     let mut claude = state.claude_state.write().await;
-    let _ = claude.touch_session(sid);
+    let s = claude.touch_session(sid);
+
+    // Carry the "Compacting…" placeholder forward when Claude resumes a
+    // freshly compacted session. PreCompact already painted it on the
+    // previous session_id; if compaction renumbers the session, the device
+    // would otherwise drop back to a blank line until the next hook fires.
+    // The next UserPromptSubmit / PreToolUse / Stop will overwrite this.
+    if source == "compact" {
+        s.current_task = Some("Compacting…".to_string());
+        s.active = true;
+        s.phase_started_at_unix = Some(now_unix());
+    }
 }
 
 /// SessionEnd: Claude has terminated this session. Drop everything we know
@@ -1084,15 +1134,25 @@ async fn handle_session_end(state: &DaemonState, event: &HookEvent) {
 }
 
 /// PreCompact: Claude is about to compact (manual `/compact` or auto when
-/// context fills up). The session continues across compaction with a new
-/// `session_id` — old session gets a SessionEnd, then SessionStart fires
-/// with `source: compact`. Today we just log; if compaction-aware UX
-/// becomes useful we can flag the session as `active` and update the
-/// device with a "Compacting…" task.
-async fn handle_pre_compact(_state: &DaemonState, event: &HookEvent) {
+/// context fills up). Compaction blocks generation for several seconds —
+/// without an explicit task line the device just shows the prior phase's
+/// "Thinking…" frozen with a climbing elapsed counter. Replace it with
+/// "Compacting…" so the user can tell why Claude is paused. The 1Hz
+/// ticker keeps the elapsed suffix advancing; the next non-compact hook
+/// (or SessionStart-source=compact's own paint) supersedes this.
+async fn handle_pre_compact(state: &DaemonState, event: &HookEvent) {
     let trigger = event.trigger.as_deref().unwrap_or("?");
     let session = event.session_id.as_deref().unwrap_or("?");
     info!(session = %session, trigger = %trigger, "PreCompact");
+
+    if let Some(ref sid) = event.session_id {
+        let mut claude = state.claude_state.write().await;
+        let s = claude.touch_session(sid);
+        s.current_task = Some("Compacting…".to_string());
+        s.current_tool = None;
+        s.active = true;
+        s.phase_started_at_unix = Some(now_unix());
+    }
 }
 
 /// TaskCreated: a task entry was added to the agent's task list. We
