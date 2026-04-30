@@ -104,6 +104,27 @@ pub struct SessionState {
     /// the device's `current_task` display so a long-running task's
     /// subject stays visible across the tool calls it makes.
     pub active_task_id: Option<String>,
+    /// Subagent rows last reported by Claude Code's `subagentStatusLine`
+    /// refresh tick. Each entry is one visible row in the agent panel.
+    /// Empty when no subagents are running. Cleared on `SessionEnd`;
+    /// otherwise replaced wholesale on every tick (Claude Code sends
+    /// the complete visible list each time).
+    pub subagents: Vec<SubagentRow>,
+}
+
+/// One row from Claude Code's subagent status panel — populated from
+/// the `subagentStatusLine` script tick.
+#[derive(Debug, Clone, Default)]
+pub struct SubagentRow {
+    pub id: String,
+    pub name: Option<String>,
+    pub status: Option<String>,
+    pub description: Option<String>,
+    /// The display label Claude Code would have rendered by default.
+    /// Usually the most informative single-string summary of the row.
+    pub label: Option<String>,
+    pub start_time_unix: Option<u64>,
+    pub token_count: Option<u64>,
 }
 
 /// State derived from Claude Code hooks and statusline.

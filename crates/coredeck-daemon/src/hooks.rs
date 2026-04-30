@@ -19,6 +19,7 @@ use tracing::{debug, info};
 
 use crate::DaemonState;
 use crate::alerts::{self, DecisionOutcome};
+use crate::state::SubagentRow;
 
 /// Common fields present in all Claude Code hook events.
 /// Claude Code sends snake_case field names which match Rust naming directly.
@@ -124,6 +125,36 @@ struct Model {
     display_name: Option<String>,
 }
 
+/// Payload Claude Code pipes to the `subagentStatusLine` script every
+/// refresh tick. `tasks` is the complete visible list — empty/missing
+/// means no subagents are running.
+#[derive(Debug, Deserialize)]
+struct SubagentStatuslineData {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    tasks: Option<Vec<SubagentTaskRaw>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SubagentTaskRaw {
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    /// Per docs the field is `startTime`. Format isn't pinned down — accept
+    /// it as a JSON Value and coerce later (number = ms, string = ISO).
+    #[serde(default, rename = "startTime")]
+    start_time: Option<serde_json::Value>,
+    #[serde(default, rename = "tokenCount")]
+    token_count: Option<u64>,
+}
+
 /// Response for PermissionRequest when YOLO is enabled.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -162,6 +193,18 @@ pub async fn handle_hook(
             info!("HOOK statusline: {}", serde_json::to_string(&v).unwrap_or_default());
         }
         let resp = handle_statusline(&state, &body).await;
+        crate::wrapper::emit_tab_list(&state).await;
+        return resp;
+    }
+
+    if event_type == "subagent-statusline" {
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
+            info!(
+                "HOOK subagent-statusline: {}",
+                serde_json::to_string(&v).unwrap_or_default()
+            );
+        }
+        let resp = handle_subagent_statusline(&state, &body).await;
         crate::wrapper::emit_tab_list(&state).await;
         return resp;
     }
@@ -235,6 +278,75 @@ async fn handle_statusline(
     forward_hook_to_app(state, "statusline", body).await;
 
     StatusCode::OK.into_response()
+}
+
+/// Handle a `subagentStatusLine` refresh tick. Replaces the per-session
+/// `subagents` list wholesale with whatever Claude Code reports (the
+/// payload is always the complete visible list). Returns 200 with an
+/// EMPTY body — the script's stdout is interpreted by Claude Code as
+/// JSON-line row overrides, and we want the default rendering.
+async fn handle_subagent_statusline(
+    state: &DaemonState,
+    body: &[u8],
+) -> axum::response::Response {
+    let data: SubagentStatuslineData = match serde_json::from_slice(body) {
+        Ok(d) => d,
+        Err(e) => {
+            debug!("Failed to parse subagent-statusline: {}", e);
+            return StatusCode::BAD_REQUEST.into_response();
+        }
+    };
+
+    let session_id = data.session_id.clone().unwrap_or_default();
+    if session_id.is_empty() {
+        debug!("subagent-statusline payload missing session_id; skipping");
+        return StatusCode::OK.into_response();
+    }
+
+    let rows: Vec<SubagentRow> = data
+        .tasks
+        .unwrap_or_default()
+        .into_iter()
+        .map(|t| SubagentRow {
+            id: t.id,
+            name: t.name,
+            status: t.status,
+            description: t.description,
+            label: t.label,
+            start_time_unix: t.start_time.and_then(coerce_start_time_unix),
+            token_count: t.token_count,
+        })
+        .collect();
+
+    {
+        let mut claude = state.claude_state.write().await;
+        let s = claude.touch_session(&session_id);
+        s.subagents = rows;
+        info!(
+            "Subagents updated [{}]: {} row(s)",
+            session_id,
+            s.subagents.len(),
+        );
+    }
+
+    forward_hook_to_app(state, "subagent-statusline", body).await;
+
+    StatusCode::OK.into_response()
+}
+
+/// Best-effort `startTime` → unix-seconds. Accepts either a number
+/// (assumed ms epoch when > 10^12, else seconds) or an ISO-8601 string.
+/// Returns `None` for anything else.
+fn coerce_start_time_unix(v: serde_json::Value) -> Option<u64> {
+    match v {
+        serde_json::Value::Number(n) => {
+            let f = n.as_f64()?;
+            let secs = if f > 1e12 { f / 1000.0 } else { f };
+            Some(secs as u64)
+        }
+        serde_json::Value::String(_) => None,
+        _ => None,
+    }
 }
 
 /// Handle a Claude Code hook event (PreToolUse, PostToolUse, PermissionRequest, Stop, etc.)
@@ -759,6 +871,7 @@ async fn handle_stop(state: &DaemonState, event: &HookEvent) {
         s.last_tool_summary = None;
         s.tool_count_this_turn = 0;
         s.current_todo = None;
+        s.subagents.clear();
         claude.pending_permissions.remove(sid);
     }
 }
@@ -967,6 +1080,16 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
             base_url
         ),
     });
+    // subagentStatusLine: stdout is parsed as JSON-line row overrides,
+    // so suppress curl's response output (our endpoint returns empty,
+    // but redirect defensively in case of transport errors).
+    settings["subagentStatusLine"] = serde_json::json!({
+        "type": "command",
+        "command": format!(
+            "curl -s -X POST {}/hooks/subagent-statusline -H 'Content-Type: application/json' -d \"$(cat)\" >/dev/null 2>&1",
+            base_url
+        ),
+    });
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)
@@ -1025,6 +1148,14 @@ pub fn uninstall_hooks_result() -> Result<(), String> {
         let s = sl.to_string();
         if s.contains("127.0.0.1:19384") || s.contains("localhost:19384") {
             settings.as_object_mut().unwrap().remove("statusLine");
+            changed = true;
+        }
+    }
+
+    if let Some(sl) = settings.get("subagentStatusLine") {
+        let s = sl.to_string();
+        if s.contains("127.0.0.1:19384") || s.contains("localhost:19384") {
+            settings.as_object_mut().unwrap().remove("subagentStatusLine");
             changed = true;
         }
     }

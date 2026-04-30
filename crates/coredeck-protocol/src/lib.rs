@@ -511,6 +511,20 @@ pub struct WrapperTab {
     pub context_percent: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Display string for the first visible subagent row (from
+    /// `subagentStatusLine`), when one is running. Already includes a
+    /// `(N)` count prefix when more than one subagent is visible.
+    /// `None` when no subagents are reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_label: Option<String>,
+    /// Number of subagent rows last reported by `subagentStatusLine`.
+    /// Zero when none are running.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub subagent_count: u32,
+}
+
+fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Daemon → app snapshot of every live wrapper.

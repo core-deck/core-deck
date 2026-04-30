@@ -237,8 +237,8 @@ Claude Code hook event forwarded from the daemon. The daemon receives hook event
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `event` | string | Hook event type: `"PreToolUse"`, `"PostToolUse"`, `"PermissionRequest"`, `"Stop"`, `"Notification"`, `"statusline"` |
-| `data` | object | Raw JSON payload from Claude Code (snake_case field names) |
+| `event` | string | Hook event type: `"PreToolUse"`, `"PostToolUse"`, `"PermissionRequest"`, `"Stop"`, `"Notification"`, `"UserPromptSubmit"`, `"SessionStart"`, `"SessionEnd"`, `"PreCompact"`, `"TaskCreated"`, `"TaskCompleted"`, `"statusline"`, `"subagent-statusline"` |
+| `data` | object | Raw JSON payload from Claude Code (snake_case field names; `subagent-statusline` carries `tasks: [{id, name, status, label, tokenCount, ...}]`) |
 
 **Statusline data** (event = `"statusline"`):
 

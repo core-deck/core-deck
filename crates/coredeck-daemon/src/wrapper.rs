@@ -298,12 +298,20 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
         .clone()
         .or_else(|| active.prompt_summary.clone())
         .unwrap_or_else(|| short_cwd_label(&active.cwd));
-    let task = active.current_task.clone().unwrap_or_default();
-    // Line 2 priority: current TodoWrite in-progress item (most contextual)
-    // > last tool summary during the Thinking gap. While a tool is actively
-    // running, its summary is already on `task`, so suppress task2 unless
-    // a todo provides additional context.
-    let task2 = if let Some(todo) = active.current_todo.as_deref() {
+    // Line 1 priority: subagent label (parent's tools are subordinate while
+    // a subagent is running) > the parent's current_task.
+    let task = active
+        .subagent_label
+        .clone()
+        .or_else(|| Some(active.current_task.clone().unwrap_or_default()))
+        .unwrap_or_default();
+    // Line 2 priority: when a subagent is taking line 1, use the parent's
+    // own current_task (it'll usually be "Thinking…") on line 2 so the
+    // user can still see the parent is alive. Otherwise keep the existing
+    // todo > last_tool_summary order.
+    let task2 = if active.subagent_label.is_some() {
+        active.current_task.clone().unwrap_or_default()
+    } else if let Some(todo) = active.current_todo.as_deref() {
         todo.to_string()
     } else if active.current_tool.is_none() {
         active.last_tool_summary.clone().unwrap_or_default()
@@ -341,6 +349,42 @@ fn short_cwd_label(cwd: &str) -> String {
         .next()
         .unwrap_or(cwd)
         .to_string()
+}
+
+/// Pick the most informative subagent row for the device's task line.
+/// Prefers the first one whose status looks "in flight" (anything that
+/// isn't a known terminal state), so the display tracks live work even
+/// when Claude Code keeps completed rows visible briefly. Returns
+/// `None` when no subagents are reported.
+fn subagent_label(s: &crate::state::SessionState) -> Option<String> {
+    if s.subagents.is_empty() {
+        return None;
+    }
+    let row = s
+        .subagents
+        .iter()
+        .find(|r| !is_terminal_status(r.status.as_deref()))
+        .or_else(|| s.subagents.first())?;
+    let label = row
+        .label
+        .as_deref()
+        .or(row.description.as_deref())
+        .or(row.name.as_deref())
+        .unwrap_or("Subagent")
+        .to_string();
+    let total = s.subagents.len();
+    if total > 1 {
+        Some(format!("({total}) {label}"))
+    } else {
+        Some(label)
+    }
+}
+
+fn is_terminal_status(status: Option<&str>) -> bool {
+    matches!(
+        status,
+        Some("completed") | Some("done") | Some("succeeded") | Some("failed") | Some("cancelled")
+    )
 }
 
 /// Render the `current_task` for a tab, enriching the generic "Thinking…"
@@ -421,6 +465,8 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
                 active: session.map(|s| s.active).unwrap_or(false),
                 context_percent: session.and_then(|s| s.context_window_percent),
                 cost_usd: session.and_then(|s| s.cost_usd),
+                subagent_label: session.and_then(subagent_label),
+                subagent_count: session.map(|s| s.subagents.len() as u32).unwrap_or(0),
             }
         })
         .collect();

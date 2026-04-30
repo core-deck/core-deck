@@ -246,11 +246,27 @@ Statusline currently deserializes only `context_window`, `cost`,
 `agent.name`, `worktree.*`, `exceeds_200k_tokens`. Surface whatever the
 device display can fit; rest goes in tray menu / settings page.
 
-### 11. `subagentStatusLine` integration
+### 11. `subagentStatusLine` integration — DONE
 
-Separate setting from `statusLine`. Claude Code pipes per-subagent rows
-(`name, status, tokenCount`) to a script. Could light up keys per
-subagent. New surface; not wired up yet.
+Wired up as a sibling to the regular `statusLine` hook:
+
+- `hooks install` adds a top-level `subagentStatusLine` entry pointing
+  a curl command at `POST /hooks/subagent-statusline` with stdout
+  redirected to `/dev/null` so the script's empty output keeps Claude
+  Code's default subagent-row rendering.
+- The endpoint replaces `SessionState::subagents` wholesale on every
+  refresh tick (Claude Code always sends the complete visible list).
+- `WrapperTab` gained `subagent_label` / `subagent_count` and
+  `push_to_device` prefers the subagent label on line 1, demoting the
+  parent's `current_task` to line 2 — so the device tracks the actual
+  in-flight worker rather than the parent's "Thinking…" placeholder.
+- Cleared on `Stop` (turn boundary) and dropped wholesale on
+  `SessionEnd`. No per-key lighting yet; that's a future extension.
+
+Known unknowns: `startTime` shape (number vs ISO string) and exact
+`status` vocabulary aren't pinned down by the docs — `coerce_start_time_unix`
+accepts both number forms and `is_terminal_status` matches the obvious
+terminal words. Adjust once we observe real payloads.
 
 ### 12. Optional rename: `coredeck-daemon` → `coredeck`
 

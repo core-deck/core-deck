@@ -277,7 +277,7 @@ Hook events are stored in daemon state, forwarded to the connected app via WebSo
 
 | Parameter | Description |
 |-----------|-------------|
-| `event_type` | One of: `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`, `Notification`, `statusline` |
+| `event_type` | One of: `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`, `Notification`, `UserPromptSubmit`, `SessionStart`, `SessionEnd`, `PreCompact`, `TaskCreated`, `TaskCompleted`, `statusline`, `subagent-statusline` |
 
 **Request body:** Raw JSON from Claude Code (snake_case field names).
 
@@ -302,6 +302,27 @@ Statusline example:
   "model": {"display_name": "Opus"}
 }
 ```
+
+Subagent statusline example (one tick = the complete visible list of subagent rows for `session_id`):
+
+```json
+{
+  "session_id": "ba8fc727-...",
+  "columns": 80,
+  "tasks": [
+    {
+      "id": "task-1",
+      "name": "Edit",
+      "status": "running",
+      "label": "Edit: parser.rs",
+      "tokenCount": 4231,
+      "startTime": 1712598421000
+    }
+  ]
+}
+```
+
+The daemon replaces the session's tracked subagent list wholesale on every tick and surfaces the first running row as the device's primary task line. The endpoint returns `200 OK` with an empty body so Claude Code uses default rendering for every row (its `subagentStatusLine` script reads stdout as JSON-line row overrides).
 
 **Response codes:**
 
