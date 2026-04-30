@@ -22,7 +22,7 @@ use state::{ClaudeState, DaemonEvent, DaemonEventSender, DeviceStatus, TrayUpdat
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, Notify, RwLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 /// HID device configuration (matches the app's HidConfig)
@@ -356,9 +356,32 @@ async fn run_async(
                     state_for_events.send_tray_update(TrayUpdate::DeviceUnavailable);
                 }
                 DaemonEvent::DeviceStateChanged { mode, yolo } => {
-                    let mut status = state_for_events.device_status.write().await;
-                    status.mode = *mode;
-                    status.yolo = *yolo;
+                    // Mode-button tap on the device fires this with a new
+                    // `mode`. The firmware deliberately swallows the keypress
+                    // (rev1.c:103) and expects the daemon to inject Shift+Tab
+                    // into the active wrapper so Claude Code cycles modes
+                    // too. Skip the very first state report after connect —
+                    // that's the initial sync, not a tap.
+                    let inject_shift_tab = {
+                        let mut status = state_for_events.device_status.write().await;
+                        let mode_changed = status.mode != *mode;
+                        let was_initialized = status.mode_initialized;
+                        status.mode = *mode;
+                        status.yolo = *yolo;
+                        status.mode_initialized = true;
+                        was_initialized && mode_changed
+                    };
+                    if inject_shift_tab {
+                        if let Err(e) = wrapper::write_to_target(
+                            &state_for_events,
+                            "",
+                            b"\x1b[Z".to_vec(),
+                        )
+                        .await
+                        {
+                            debug!(error = %e, "mode-tap Shift+Tab injection failed");
+                        }
+                    }
                 }
                 _ => {}
             }

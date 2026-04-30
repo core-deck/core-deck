@@ -284,13 +284,12 @@ Cosmetic but pleasant.
   `"default"`/`"plan"`/`"acceptEdits"`/`"bypassPermissions"` →
   `DeviceMode::{Default,Plan,Accept,Default}` and call set_mode.
   Small, self-contained.
-- **Mode button: tap should cycle modes regardless of focus**:
-  firmware tap sends `tap_code16(LSFT(KC_TAB))` (firmware `keymap.c:89`)
-  via the **standard keyboard HID interface** — not the RAW HID
-  channel the daemon listens on. Works only when the wrapper terminal
-  has OS focus. Two-sided fix: firmware also emits a RAW HID
-  notification on tap; daemon writes `\x1b[Z` into the active
-  wrapper's PTY on receipt. Coordinate with firmware before coding.
+- ~~**Mode button: tap should cycle modes regardless of focus**~~ —
+  done. Firmware's `rev1.c:103` already swallows the tap and just
+  emits a state report; the daemon now injects `\x1b[Z` into the
+  active wrapper on the corresponding `DeviceStateChanged` event
+  (gated on having seen at least one prior state report so the
+  initial sync isn't treated as a tap).
 - **Alert classifier resolves alerts on too many inputs**:
   `alerts::classify_input` maps anything-that-isn't-Esc/Stop/F20/knob-
   combo to `InputKind::Allow`, which (a) clears any Idle alert and

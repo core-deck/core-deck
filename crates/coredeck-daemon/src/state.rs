@@ -53,6 +53,10 @@ pub struct DeviceStatus {
     pub firmware_version: Option<String>,
     pub mode: DeviceMode,
     pub yolo: bool,
+    /// True once we've seen at least one StateReport from the device.
+    /// Gates the mode-change → Shift+Tab injection so the firmware's
+    /// initial state-on-connect packet doesn't get treated as a tap.
+    pub mode_initialized: bool,
 }
 
 /// Per-Claude-session state derived from hook + statusline events.
