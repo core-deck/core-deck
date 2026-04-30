@@ -509,19 +509,28 @@ fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
-/// Soft cap on the detail portion of `extract_task_text` output. The
-/// firmware's hard cap is 128 bytes for the whole `task` field; this
-/// targets readability on the TFT row.
-const MAX_DETAIL_BYTES: usize = 40;
+/// Hard cap on the rendered task line, in characters (not bytes). The
+/// device's TFT row fits ~28 glyphs at the current font; the firmware's
+/// 128-byte field is a separate, looser cap. We budget the whole
+/// "{name}: {detail}" string against this so the prefix is accounted for.
+const MAX_TASK_LINE_CHARS: usize = 28;
 
 /// Extract a short task description from tool_name + tool_input for HID display.
 fn extract_task_text(tool_name: Option<&str>, tool_input: Option<&serde_json::Value>) -> String {
     let name = tool_name.unwrap_or("Working");
     let detail = tool_input.and_then(|v| pick_detail(name, v)).unwrap_or_default();
     if detail.is_empty() {
-        return name.to_string();
+        return truncate_left(name, MAX_TASK_LINE_CHARS);
     }
-    format!("{name}: {}", truncate_for_display(&detail))
+    let prefix_chars = name.chars().count() + 2; // "{name}: "
+    let detail_budget = MAX_TASK_LINE_CHARS.saturating_sub(prefix_chars);
+    if detail_budget == 0 {
+        // Tool name alone exceeds the budget — drop the detail and
+        // truncate the bare prefix.
+        return truncate_left(name, MAX_TASK_LINE_CHARS);
+    }
+    let detail_short = truncate_for_display(&detail, detail_budget);
+    format!("{name}: {detail_short}")
 }
 
 /// Tool-specific picker: which `tool_input` field carries the most
@@ -600,33 +609,34 @@ fn first_command_stage(cmd: &str) -> &str {
     cmd[..end].trim()
 }
 
-/// Truncate `s` to fit `MAX_DETAIL_BYTES`, respecting char boundaries.
-/// Right-anchors (keeps the tail with a leading `…`) for paths and URLs
-/// so the filename / last URL segment stays visible. Left-anchors
-/// otherwise.
-fn truncate_for_display(s: &str) -> String {
-    if s.len() <= MAX_DETAIL_BYTES {
+/// Truncate `s` to fit `max_chars` characters. Right-anchors (keeps the
+/// tail with a leading `…`) for paths and URLs so the filename / last
+/// URL segment stays visible; left-anchors otherwise. Operates on chars
+/// throughout so multi-byte UTF-8 is safe.
+fn truncate_for_display(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
         return s.to_string();
     }
     if looks_like_path_or_url(s) {
-        // Reserve 3 bytes for the leading "…" (UTF-8 encoded).
-        const ELLIPSIS: &str = "…";
-        let budget = MAX_DETAIL_BYTES.saturating_sub(ELLIPSIS.len());
-        let mut start = s.len() - budget;
-        while start < s.len() && !s.is_char_boundary(start) {
-            start += 1;
-        }
-        return format!("{ELLIPSIS}{}", &s[start..]);
-    }
-    let mut end = MAX_DETAIL_BYTES;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    if end < s.len() {
-        format!("{}…", &s[..end])
+        let keep = max_chars.saturating_sub(1);
+        let skip = total.saturating_sub(keep);
+        let tail: String = s.chars().skip(skip).collect();
+        format!("…{tail}")
     } else {
-        s.to_string()
+        truncate_left(s, max_chars)
     }
+}
+
+/// Left-anchored char-based truncate: keep the head, ellipsis on the tail.
+fn truncate_left(s: &str, max_chars: usize) -> String {
+    let total = s.chars().count();
+    if total <= max_chars {
+        return s.to_string();
+    }
+    let keep = max_chars.saturating_sub(1);
+    let head: String = s.chars().take(keep).collect();
+    format!("{head}…")
 }
 
 fn looks_like_path_or_url(s: &str) -> bool {
@@ -635,6 +645,20 @@ fn looks_like_path_or_url(s: &str) -> bool {
         || s.starts_with("../")
         || s.starts_with("~/")
         || s.contains("://")
+}
+
+/// Pull the first row's `question` text out of an `AskUserQuestion`
+/// tool input — used to populate the device alert. Returns `None` for
+/// missing / empty values.
+fn extract_first_question(input: Option<&serde_json::Value>) -> Option<String> {
+    input
+        .and_then(|v| v.get("questions"))
+        .and_then(|q| q.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|q| q.get("question"))
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// PreToolUse: mark the session as active and record current tool/task.
@@ -714,6 +738,20 @@ async fn handle_pre_tool_use(
         s.phase_started_at_unix = Some(now_unix());
     }
 
+    // AskUserQuestion is the one tool whose firing is itself a "look at
+    // me" event — Claude is blocking on the user. The hook can't supply
+    // the answer (multi-option text response), so we surface it as an
+    // Idle alert; the user answers in the terminal and PostToolUse(
+    // AskUserQuestion) clears the alert.
+    if event.tool_name.as_deref() == Some("AskUserQuestion") {
+        if let Some(ref sid) = event.session_id {
+            if let Some(question) = extract_first_question(event.tool_input.as_ref()) {
+                let session_label = compute_session_label(state, sid).await;
+                alerts::show_idle_alert(state, sid, &session_label, &question).await;
+            }
+        }
+    }
+
     StatusCode::OK.into_response()
 }
 
@@ -732,6 +770,16 @@ async fn handle_post_tool_use(state: &DaemonState, event: &HookEvent) {
             s.current_task = Some("Thinking…".to_string());
         }
         s.phase_started_at_unix = Some(now_unix());
+    }
+
+    // PostToolUse(AskUserQuestion) means the user just answered — drop
+    // the Idle alert PreToolUse raised. The shared `cancel_pending_for_
+    // session` only touches Pending alerts; for an Idle one we need the
+    // wider sweep that UserPromptSubmit normally does.
+    if event.tool_name.as_deref() == Some("AskUserQuestion") {
+        if let Some(ref sid) = event.session_id {
+            alerts::cancel_for_session_progress(state, sid).await;
+        }
     }
 }
 

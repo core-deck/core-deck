@@ -120,32 +120,23 @@ Trade-offs accepted:
 
 ## Next steps (priority order, each phase dogfoodable)
 
-### 1. Tray menu shows the live tab list
+### 1. Tray menu shows the live tab list — DONE
 
-The biggest single UX gap right now: the daemon already has a tray icon
-but the tab list lives in the (unused) GUI app. `tray-icon` supports
-dynamic menu rebuilds. On every `WrapperTabList` change, regenerate the
-menu so the tray reflects what's running. Click a row → set active
-wrapper. Half a day's work.
+`tray.rs` rebuilds the menu on every `WrapperTabList` change: one row
+per wrapper with its session label, click to set active. Empty-state
+placeholder when no wrappers are connected.
 
-After this lands, the GUI app is no longer needed for any
-day-to-day operation in companion mode.
+### 2. Claude button → cycle wrappers — REJECTED
 
-### 2. Claude button → cycle / focus active wrapper
+Cycling lives on the rotary knob (press+rotate combo); the Claude
+button (F20) is reserved for raising the active wrapper's host
+terminal — see #6, which is what's actually wired up.
 
-The daemon already routes the device's Claude button. Repurpose: when
-wrappers are connected, button press cycles `active_wrapper_id` (and
-emits an updated tab list, which the device picks up). No firmware
-change. Pairs naturally with #6 (raise terminal) once that's ready.
+### 3. Mode-toggle and soft-keys go via wrapper — DONE
 
-### 3. Mode-toggle and soft-keys go via wrapper
-
-HID mode button → daemon writes `\x1b[Z` (Shift+Tab) into the active
-wrapper. Soft-key text → daemon writes the bytes via `WrapperWrite` to
-the active wrapper. Daemon-side helpers (`write_to_target`) already in
-place; this is just wiring HID handlers in `state.rs` event dispatch
-to the wrapper writer instead of forwarding to the (gone) embedded
-terminal.
+The daemon writes mode-toggle and soft-key bytes into the active
+wrapper via `WrapperWrite` rather than the (gone) embedded terminal.
+Wired through `state.rs`'s HID event dispatch.
 
 ### 4. Interactive `PermissionRequest` routing (the "80% win")
 
@@ -240,11 +231,16 @@ arboard, rfd) fell out automatically when the crate was removed.
 
 ### 10. Use the rest of the statusline payload
 
-Statusline currently deserializes only `context_window`, `cost`,
-`model`, `session_id`, `session_name`. Available but ignored:
-`effort.level`, `thinking.enabled`, `rate_limits.{five_hour,seven_day}`,
-`agent.name`, `worktree.*`, `exceeds_200k_tokens`. Surface whatever the
-device display can fit; rest goes in tray menu / settings page.
+Statusline currently deserializes `context_window`, `cost`, `model`,
+`session_id`, `session_name`, `effort.level`, `thinking.enabled`.
+Available but ignored: `rate_limits.{five_hour,seven_day}`,
+`agent.name`, `worktree.*`, `exceeds_200k_tokens`.
+
+Display constraint: each task line on the device is ~28 chars, so
+the device can't usefully accommodate more text fields. Best fit is
+non-task surfaces — tray menu rows (rate-limit countdown), an alert
+when `exceeds_200k_tokens` flips, or the browser settings page for
+worktree / agent metadata.
 
 ### 11. `subagentStatusLine` integration — DONE
 
