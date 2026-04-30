@@ -536,12 +536,11 @@ async fn handle_wrapper_focused(state: &Arc<DaemonState>, wrapper_id: &str) {
         return;
     }
 
-    // If the alert is tied to this session, the user has just looked at
-    // the right window — clear it. (cancel_for_session_progress is
-    // session-scoped, so no risk of clobbering a different session's
-    // alert.)
+    // If an *Idle* alert for this session is up, the user has just
+    // looked at the right window — drop it. A *Pending* permission
+    // alert must persist: switching window focus isn't a decision.
     if let Some(sid) = session_id {
-        crate::alerts::cancel_for_session_progress(state, &sid).await;
+        crate::alerts::cancel_idle_for_session(state, &sid).await;
     }
 }
 

@@ -243,6 +243,31 @@ pub async fn cancel_for_session_progress(state: &DaemonState, session_id: &str) 
     debug!(session = %session_id, "alert cancelled by session progress");
 }
 
+/// Cancel only an *Idle* alert for `session_id`. Use on focus-in
+/// (the user has just looked at the right window, so an "idle prompt"
+/// or "AskUserQuestion" notice has done its job) — but a Pending
+/// permission alert must persist until the user actually answers,
+/// since looking at the window isn't a decision.
+pub async fn cancel_idle_for_session(state: &DaemonState, session_id: &str) {
+    let mut guard = state.alert_state.lock().await;
+    let should_clear = matches!(
+        &*guard,
+        AlertState::Idle { session_id: sid, .. } if sid == session_id,
+    );
+    if !should_clear {
+        return;
+    }
+    let tab_index = guard.tab_index();
+    *guard = AlertState::None;
+    drop(guard);
+
+    let hid = state.hid.lock().await;
+    if let Err(e) = hid.clear_alert(tab_index) {
+        debug!(error = %e, "clear_alert (idle) failed");
+    }
+    debug!(session = %session_id, "idle alert cancelled by focus-in");
+}
+
 /// Cancel only a *Pending* permission alert for `session_id`. Use on
 /// non-`UserPromptSubmit` activity hooks (PreToolUse, PostToolUse, Stop,
 /// Notification): if Claude is moving past the permission point, the
