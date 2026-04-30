@@ -2,19 +2,15 @@
 resolver = "2"
 members = [
     "crates/coredeck-protocol",
-    "crates/coredeck",
     "crates/coredeck-daemon",
+    "crates/coredeck-claude",
 ]
 
 # Default members for `cargo build` / `cargo run`
-default-members = ["crates/coredeck"]
+default-members = ["crates/coredeck-daemon"]
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
-
-# Patch zune-jpeg to fix neon unsafe issue on aarch64
-[patch.crates-io]
-zune-jpeg = { path = "patches/zune-jpeg" }
