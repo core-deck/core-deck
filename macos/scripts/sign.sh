@@ -111,16 +111,13 @@ echo "Identity: $SIGNING_IDENTITY"
 echo "Entitlements: $ENTITLEMENTS"
 echo "App Store: $APPSTORE"
 
-# Sign all nested components first (frameworks, helpers, etc.)
-# Currently we don't have any, but this is where you'd sign them
-
 # Sign the main executable
 echo "Signing executable..."
 codesign --force --options runtime \
     --sign "$SIGNING_IDENTITY" \
     --entitlements "$ENTITLEMENTS" \
     --timestamp \
-    "$APP_BUNDLE/Contents/MacOS/core-deck"
+    "$APP_BUNDLE/Contents/MacOS/coredeck-daemon"
 
 # Sign the entire app bundle
 echo "Signing app bundle..."

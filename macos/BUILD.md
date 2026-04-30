@@ -46,8 +46,8 @@ macos/
 
 ```bash
 ./macos/scripts/generate-icon.sh
-# Or with custom SVG:
-./macos/scripts/generate-icon.sh assets/icons/your-icon.svg
+# Or with a custom PNG:
+./macos/scripts/generate-icon.sh path/to/your-icon.png
 ```
 
 ### 2. Build the App Bundle

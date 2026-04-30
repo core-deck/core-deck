@@ -10,7 +10,7 @@ MACOS_DIR="$PROJECT_ROOT/macos"
 
 APP_NAME="Core Deck"
 BUNDLE_ID="com.coredeck.CoreDeck"
-EXECUTABLE_NAME="core-deck"
+EXECUTABLE_NAME="coredeck-daemon"
 
 # Parse arguments
 BUILD_TYPE="release"
@@ -93,10 +93,6 @@ if [ "$LIPO_ONLY" = true ]; then
 
 elif [ "$UNIVERSAL" = true ]; then
     echo "Building universal binary..."
-    echo ""
-    echo "NOTE: This requires native C libraries (cairo, freetype) for both architectures."
-    echo "If this fails, use GitHub Actions for universal builds, or build for native arch only."
-    echo ""
 
     # Build for both architectures
     cargo build $BUILD_FLAGS --target aarch64-apple-darwin
@@ -145,12 +141,6 @@ if [ -f "$MACOS_DIR/AppIcon.icns" ]; then
     cp "$MACOS_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/"
 else
     echo "Warning: AppIcon.icns not found. Run generate-icon.sh first."
-fi
-
-# Copy any additional resources
-# (fonts, config templates, etc.)
-if [ -d "$PROJECT_ROOT/assets" ]; then
-    cp -r "$PROJECT_ROOT/assets" "$APP_BUNDLE/Contents/Resources/"
 fi
 
 # Create PkgInfo

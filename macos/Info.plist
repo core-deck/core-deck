@@ -19,7 +19,7 @@
     <string>0.1.0</string>
 
     <key>CFBundleExecutable</key>
-    <string>core-deck</string>
+    <string>coredeck-daemon</string>
 
     <key>CFBundlePackageType</key>
     <string>APPL</string>
