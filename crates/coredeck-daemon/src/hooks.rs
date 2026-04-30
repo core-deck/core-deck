@@ -382,20 +382,25 @@ async fn handle_claude_hook(
         crate::wrapper::sync_active_mode_to_device(state).await;
     }
 
-    // Stale-alert cleanup. Two flavours of "Claude has progressed":
+    // Stale-alert cleanup. Three flavours:
     //   - UserPromptSubmit: the user has just sent input, so even an idle
     //     "Claude is waiting…" alert is no longer accurate — drop any
     //     alert for this session.
+    //   - Notification: the host terminal's bell / attention signal.
+    //     Claude rings this *while still waiting* on a permission prompt
+    //     (the device's Pending alert is for the same prompt) or while
+    //     idle. Either way it's not progress — leave alerts alone.
+    //   - PermissionRequest: never cancels — it's the install path.
     //   - Other activity hooks (PreToolUse / PostToolUse / Stop /
-    //     Notification): only stale *Pending* permission alerts need
-    //     dropping (user probably answered in their terminal). Idle
-    //     alerts must persist — under YOLO, Claude chains many tool
-    //     calls without user input, and clearing on every PreToolUse
-    //     would erase the idle alert before the user sees it.
-    //   - PermissionRequest itself never cancels — it's the install path.
+    //     TaskCreated / etc.): real progress past the permission point,
+    //     so drop any stale *Pending* alert (user probably answered in
+    //     their terminal). Idle alerts must persist — under YOLO,
+    //     Claude chains many tool calls without user input, and
+    //     clearing on every PreToolUse would erase the idle alert
+    //     before the user sees it.
     if let Some(ref sid) = event.session_id {
         match event_type {
-            "PermissionRequest" => {}
+            "PermissionRequest" | "Notification" => {}
             "UserPromptSubmit" => {
                 crate::alerts::cancel_for_session_progress(state, sid).await;
             }
