@@ -265,6 +265,68 @@ curl -s http://127.0.0.1:19384/api/version
 
 ---
 
+---
+
+### POST /hooks/{event_type}
+
+Receives Claude Code hook events and statusline data. These endpoints are **not** subject to the WebSocket lock — they are called by Claude Code's hooks system, not by the app.
+
+Hook events are stored in daemon state, forwarded to the connected app via WebSocket (`ClaudeHookEvent`, tag `0x85`), and may trigger side effects (e.g., YOLO auto-approve).
+
+**Path parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `event_type` | One of: `PreToolUse`, `PostToolUse`, `PermissionRequest`, `Stop`, `Notification`, `statusline` |
+
+**Request body:** Raw JSON from Claude Code (snake_case field names).
+
+Hook event example:
+
+```json
+{
+  "hook_event_name": "PreToolUse",
+  "session_id": "ba8fc727-...",
+  "permission_mode": "default",
+  "tool_name": "Bash",
+  "tool_input": {"command": "ls"}
+}
+```
+
+Statusline example:
+
+```json
+{
+  "context_window": {"used_percentage": 42.5},
+  "cost": {"total_cost_usd": 1.23},
+  "model": {"display_name": "Opus"}
+}
+```
+
+**Response codes:**
+
+| Code | Condition |
+|------|-----------|
+| 200 | Event processed |
+| 400 | Malformed JSON |
+
+**PermissionRequest with YOLO:** When the device YOLO switch is on, the daemon responds with an auto-approve payload:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PermissionRequest",
+    "decision": {"behavior": "allow"}
+  }
+}
+```
+
+> **Note:** Claude Code sends snake_case in request payloads but expects camelCase in the PermissionRequest response.
+
+**Hook installation:** Run `coredeck-daemon hooks install` to write hook config to `~/.claude/settings.json`. Run `coredeck-daemon hooks uninstall` to remove it.
+
+---
+
 ## Error Response Format
 
 All error responses use the [ApiError](Types.md#apierror) format:

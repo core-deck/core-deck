@@ -52,8 +52,10 @@ Update the TFT display content.
 **Payload:** JSON-encoded [DisplayUpdate](Types.md#displayupdate)
 
 ```json
-{"session":"my-project","task":"Building...","task2":"","tabs":[0,2,1],"active":1}
+{"session":"my-project","task":"Building...","tabs":[0,2,1],"active":1,"context_percent":42.5,"cost_usd":1.23,"model":"Opus"}
 ```
+
+Optional fields (`context_percent`, `cost_usd`, `model`) are omitted when `null`. See [DisplayUpdate](Types.md#displayupdate).
 
 **Response:** `CommandAck` (0x87)
 
@@ -214,6 +216,45 @@ A soft key configured as String type was pressed.
 | 0 | 1 | Flags: 1=send Enter after string |
 | 1.. | variable | UTF-8 string bytes |
 
+### 0x85 — ClaudeHookEvent
+
+Claude Code hook event forwarded from the daemon. The daemon receives hook events via HTTP (`POST /hooks/{event_type}`) and forwards them to the connected app over WebSocket.
+
+**Payload:** JSON-encoded envelope
+
+```json
+{
+  "event": "PreToolUse",
+  "data": {
+    "hook_event_name": "PreToolUse",
+    "session_id": "abc-123",
+    "permission_mode": "default",
+    "tool_name": "Bash",
+    "tool_input": {"command": "ls"}
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `event` | string | Hook event type: `"PreToolUse"`, `"PostToolUse"`, `"PermissionRequest"`, `"Stop"`, `"Notification"`, `"statusline"` |
+| `data` | object | Raw JSON payload from Claude Code (snake_case field names) |
+
+**Statusline data** (event = `"statusline"`):
+
+```json
+{
+  "event": "statusline",
+  "data": {
+    "context_window": {"used_percentage": 42.5},
+    "cost": {"total_cost_usd": 1.23},
+    "model": {"display_name": "Opus"}
+  }
+}
+```
+
+> **Note:** Tag `0x85` is shared with `SoftKeyResponse` — they are distinguished by context (events use `seq = 0`, responses echo the command's `seq > 0`).
+
 ### 0x89 — AppControl
 
 Tray menu action directed at the app.
@@ -264,7 +305,7 @@ Command failed. Payload is the error message as UTF-8 bytes.
 | 0x82 | `82` | Daemon → App | StateChanged |
 | 0x83 | `83` | Daemon → App | KeyEvent |
 | 0x84 | `84` | Daemon → App | TypeString |
-| 0x85 | `85` | Daemon → App | SoftKeyResponse |
+| 0x85 | `85` | Daemon → App | ClaudeHookEvent / SoftKeyResponse |
 | 0x86 | `86` | Daemon → App | VersionResponse |
 | 0x87 | `87` | Daemon → App | CommandAck |
 | 0x88 | `88` | Daemon → App | CommandError |

@@ -52,14 +52,17 @@ Request body for `POST /api/display`.
 
 ## DisplayUpdate
 
-Used as the JSON payload for the WebSocket `UpdateDisplay` command (tag `0x01`). Same structure as `DisplayUpdateRequest` but `task2` is omitted when empty.
+Used as the JSON payload for the WebSocket `UpdateDisplay` command (tag `0x01`). Same structure as `DisplayUpdateRequest` plus optional Claude Code statusline fields. Fields with `null`/absent values are omitted from the serialized JSON.
 
 ```json
 {
   "session": "my-project",
   "task": "Reading files",
   "tabs": [0, 2, 1],
-  "active": 1
+  "active": 1,
+  "context_percent": 42.5,
+  "cost_usd": 1.23,
+  "model": "Opus"
 }
 ```
 
@@ -70,6 +73,9 @@ Used as the JSON payload for the WebSocket `UpdateDisplay` command (tag `0x01`).
 | `task2` | string | Second task line (omitted from JSON when empty) |
 | `tabs` | u8[] | Tab state values |
 | `active` | integer | Active tab index |
+| `context_percent` | float \| null | Context window usage percentage (from Claude Code statusline) |
+| `cost_usd` | float \| null | Session cost in USD (from Claude Code statusline) |
+| `model` | string \| null | Model display name (from Claude Code statusline) |
 
 ## AlertRequest
 
