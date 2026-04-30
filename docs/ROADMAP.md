@@ -302,28 +302,22 @@ Cosmetic but pleasant.
   the alert stays up. Idle alerts should also stop clearing on
   arbitrary keys — leave dismissal to F20 (focus → focus-in handler
   clears) or explicit Esc.
-- **YOLO requires device presence**: today the daemon retains
-  `device_status.yolo = true` even after the HID device disconnects
-  (sleep/wake, unplug, USB hub flake), so the `PermissionRequest` hook
-  keeps auto-approving with no hardware affordance to confirm. Fail-safe:
-  in `PermissionRequest` handler, gate auto-approve on
-  `device_status.connected && device_status.yolo`. Optionally also clear
-  `yolo` on `HidDisconnected` so reconnect doesn't silently re-enable.
-  Real-world risk: walk away with YOLO on, device disconnects, Claude
-  runs wild. Worth a short, explicit fix.
-- **Hook errors when daemon is down**: hooks `POST` to
-  `127.0.0.1:19384`; with the daemon stopped, Claude Code surfaces
-  ECONNREFUSED noise on every hook fire. Options:
-  (a) wrap each HTTP hook in a small shell shim that swallows curl
-  failures (the `coredeck-register.sh` pattern) — extra fork per hook
-  but bulletproof;
-  (b) have the wrapper print a one-line "daemon not running, hooks
-  inert" warning at startup and trust the user to know;
-  (c) keep the hooks config but add a single keep-alive ping endpoint
-  the wrapper checks once on register, suppressing further hook noise
-  via a `CORDECK_HOOKS_SILENT=1` env var passed to claude.
-  Pick after we have actual UX data on how often the daemon is offline
-  in practice.
+- ~~**YOLO requires device presence**~~ — done. `PermissionRequest`
+  gates on `device_status.connected && yolo`; `HidDisconnected`
+  clears the flag so reconnect needs the firmware's StateReport to
+  re-arm.
+- ~~**Hook errors when daemon is down**~~ — done. Hooks now run
+  through `~/.claude/coredeck-hook.sh`, a tiny curl shim that
+  swallows ECONNREFUSED and exits 0. statusLine + subagentStatusLine
+  got the same `|| true` treatment inline.
+- **Better session titles**: today `session_name` falls back to the
+  first 60 chars of the user's first prompt, which produces useless
+  device labels like "what does this mean" or "fix the bug". Options:
+  ask Claude to summarize on UserPromptSubmit (extra latency, ~$0.001
+  each), use the cwd basename as the default, or pull the first
+  TodoWrite/TaskCreate subject when present. The wrapper-cwd fallback
+  is already in `compute_session_label` for alerts; consider promoting
+  it to be the device's primary label until a better signal arrives.
 - **Wrapper resilience**: WS connect fails silently today; no
   reconnect. Add bounded backoff + reconnect so daemon restarts
   don't strand wrappers.

@@ -1221,13 +1221,20 @@ async fn forward_hook_to_app(state: &DaemonState, event_type: &str, body: &[u8])
 /// self-contained. Written to `~/.claude/coredeck-register.sh` on install.
 const REGISTER_SCRIPT: &str = include_str!("../scripts/coredeck-register.sh");
 
+/// Generic hook shim. Wraps each Claude Code hook in a curl call that
+/// swallows errors when the daemon is offline (otherwise every hook
+/// fire prints ECONNREFUSED). Written to `~/.claude/coredeck-hook.sh`.
+const HOOK_SHIM_SCRIPT: &str = include_str!("../scripts/coredeck-hook.sh");
+
 /// Install hooks, returning Ok or an error message. Single source of truth.
 pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
     let base_url = format!("http://{}", listen_addr);
     let settings_path = claude_settings_path();
 
-    let script_path = write_register_script()?;
-    let script_path_str = script_path.to_string_lossy().to_string();
+    let register_path = write_register_script()?;
+    let register_path_str = register_path.to_string_lossy().to_string();
+    let hook_shim_path = write_hook_shim_script()?;
+    let hook_shim_path_str = hook_shim_path.to_string_lossy().to_string();
 
     let mut settings: serde_json::Value = if settings_path.exists() {
         let content = std::fs::read_to_string(&settings_path)
@@ -1237,8 +1244,10 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
         serde_json::json!({})
     };
 
-    // HTTP hooks don't support the "async" field (that's command-only).
-    // HTTP hooks are non-blocking on failure/timeout per Claude Code docs.
+    // We previously used `type: http` here, which is non-blocking but
+    // produces visible ECONNREFUSED noise on every hook fire when the
+    // daemon is offline. The shim swallows those errors and always
+    // exits 0, so Claude Code stays quiet.
     //
     // Tool-matching hooks (PreToolUse, PostToolUse, PermissionRequest) require
     // a "matcher" field — without it they silently don't fire. Use "*" for all.
@@ -1258,14 +1267,16 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
 
     let mut hooks_obj = serde_json::Map::new();
 
+    let shim_command = |event: &str| format!("{} {}", hook_shim_path_str, event);
+
     for event_name in &tool_hook_events {
         hooks_obj.insert(
             event_name.to_string(),
             serde_json::json!([{
                 "matcher": "*",
                 "hooks": [{
-                    "type": "http",
-                    "url": format!("{}/hooks/{}", base_url, event_name),
+                    "type": "command",
+                    "command": shim_command(event_name),
                 }]
             }]),
         );
@@ -1276,40 +1287,44 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
             event_name.to_string(),
             serde_json::json!([{
                 "hooks": [{
-                    "type": "http",
-                    "url": format!("{}/hooks/{}", base_url, event_name),
+                    "type": "command",
+                    "command": shim_command(event_name),
                 }]
             }]),
         );
     }
 
-    // SessionStart: command hook for wrapper correlation, plus http for
-    // daemon state updates. Both fire in parallel on every session start.
+    // SessionStart: register script for wrapper correlation, plus the
+    // generic shim for daemon state updates. Both fire in parallel on
+    // every session start.
     hooks_obj.insert(
         "SessionStart".to_string(),
         serde_json::json!([{
             "hooks": [
-                { "type": "command", "command": script_path_str },
-                { "type": "http", "url": format!("{}/hooks/SessionStart", base_url) },
+                { "type": "command", "command": register_path_str },
+                { "type": "command", "command": shim_command("SessionStart") },
             ]
         }]),
     );
 
     settings["hooks"] = serde_json::Value::Object(hooks_obj);
+    // statusLine and subagentStatusLine bypass the shim: they're not
+    // event-name keyed under /hooks/, they read JSON from stdin via
+    // $(cat), and they need response-body pass-through (statusLine) or
+    // explicit /dev/null silencing (subagentStatusLine, whose stdout is
+    // parsed as row overrides). Add `|| true` so a daemon-offline curl
+    // failure doesn't propagate as a non-zero exit.
     settings["statusLine"] = serde_json::json!({
         "type": "command",
         "command": format!(
-            "curl -s -X POST {}/hooks/statusline -H 'Content-Type: application/json' -d \"$(cat)\"",
+            "curl -s -m 5 -X POST {}/hooks/statusline -H 'Content-Type: application/json' --data-binary @- 2>/dev/null || true",
             base_url
         ),
     });
-    // subagentStatusLine: stdout is parsed as JSON-line row overrides,
-    // so suppress curl's response output (our endpoint returns empty,
-    // but redirect defensively in case of transport errors).
     settings["subagentStatusLine"] = serde_json::json!({
         "type": "command",
         "command": format!(
-            "curl -s -X POST {}/hooks/subagent-statusline -H 'Content-Type: application/json' -d \"$(cat)\" >/dev/null 2>&1",
+            "curl -s -m 5 -X POST {}/hooks/subagent-statusline -H 'Content-Type: application/json' --data-binary @- >/dev/null 2>&1 || true",
             base_url
         ),
     });
@@ -1326,11 +1341,11 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
 
 /// Uninstall hooks, returning Ok or an error message. Single source of truth.
 pub fn uninstall_hooks_result() -> Result<(), String> {
-    // Always try to remove the register script — it's safe even if hooks were
-    // never installed.
-    let script_path = coredeck_register_script_path();
-    if script_path.exists() {
-        let _ = std::fs::remove_file(&script_path);
+    // Always try to remove our scripts — safe even if hooks were never installed.
+    for path in [coredeck_register_script_path(), coredeck_hook_shim_script_path()] {
+        if path.exists() {
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     let settings_path = claude_settings_path();
@@ -1354,6 +1369,7 @@ pub fn uninstall_hooks_result() -> Result<(), String> {
                     s.contains("127.0.0.1:19384/hooks/")
                         || s.contains("localhost:19384/hooks/")
                         || s.contains("coredeck-register.sh")
+                        || s.contains("coredeck-hook.sh")
                 })
                 .map(|(k, _)| k.clone())
                 .collect();
@@ -1451,14 +1467,30 @@ fn coredeck_register_script_path() -> std::path::PathBuf {
         .join("coredeck-register.sh")
 }
 
+/// Path to the generic hook shim script.
+fn coredeck_hook_shim_script_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").expect("HOME not set");
+    std::path::PathBuf::from(home)
+        .join(".claude")
+        .join("coredeck-hook.sh")
+}
+
 /// Write the embedded register script to disk and make it executable.
 fn write_register_script() -> Result<std::path::PathBuf, String> {
-    let path = coredeck_register_script_path();
+    write_script(coredeck_register_script_path(), REGISTER_SCRIPT)
+}
+
+/// Write the embedded hook shim script to disk and make it executable.
+fn write_hook_shim_script() -> Result<std::path::PathBuf, String> {
+    write_script(coredeck_hook_shim_script_path(), HOOK_SHIM_SCRIPT)
+}
+
+fn write_script(path: std::path::PathBuf, contents: &str) -> Result<std::path::PathBuf, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
     }
-    std::fs::write(&path, REGISTER_SCRIPT)
+    std::fs::write(&path, contents)
         .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     #[cfg(unix)]
     {
