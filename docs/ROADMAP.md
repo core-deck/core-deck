@@ -318,9 +318,15 @@ Cosmetic but pleasant.
   TodoWrite/TaskCreate subject when present. The wrapper-cwd fallback
   is already in `compute_session_label` for alerts; consider promoting
   it to be the device's primary label until a better signal arrives.
-- **Wrapper resilience**: WS connect fails silently today; no
-  reconnect. Add bounded backoff + reconnect so daemon restarts
-  don't strand wrappers.
+- ~~**Wrapper resilience**~~ — done. Wrapper retries the WS connect
+  with bounded exponential backoff (1s → 30s cap) and re-registers
+  on every reconnect. Daemon preserves any prior `session_id` for
+  the same `wrapper_id` across re-register, so a brief WS flap
+  doesn't unbind the Claude session. Known limitation: a daemon
+  restart wipes the in-memory wrapper map, so cross-restart session
+  correlation needs the next SessionStart hook to rebind. Future
+  fix: cache `session_id` in the wrapper itself and re-send it in
+  Register.
 - **Settings install non-destructive**: current `hooks install`
   overwrites the entire `hooks` block in `~/.claude/settings.json`.
   Pre-existing user hooks are lost. Switch to deep-merge before

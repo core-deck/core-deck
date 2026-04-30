@@ -401,89 +401,120 @@ async fn run_ws(
     mut focus_rx: mpsc::UnboundedReceiver<FocusEvent>,
 ) {
     let url = format!("ws://{}/wrapper-ws", daemon_addr);
-    let (ws_stream, _) = match tokio_tungstenite::connect_async(&url).await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(error = %e, url = %url, "wrapper WS connect failed; running without daemon");
-            // Drain focus events so the stdin parser doesn't block on a
-            // full unbounded channel (it shouldn't, but be defensive).
-            while focus_rx.recv().await.is_some() {}
-            return;
+    let mut backoff_ms: u64 = 0;
+    let mut announced_offline = false;
+
+    'reconnect: loop {
+        if backoff_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
         }
-    };
-    info!(url = %url, "wrapper WS connected");
-    let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    let reg = WrapperToDaemon::Register {
-        wrapper_id: wrapper_id.clone(),
-        pid,
-        cwd,
-        started_at_unix,
-        host_terminal: Some(host_terminal),
-    };
-    let txt = match serde_json::to_string(&reg) {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    if ws_tx.send(Message::Text(txt.into())).await.is_err() {
-        return;
-    }
+        let (ws_stream, _) = match tokio_tungstenite::connect_async(&url).await {
+            Ok(v) => v,
+            Err(e) => {
+                if !announced_offline {
+                    warn!(error = %e, url = %url, "wrapper WS connect failed; running without daemon (will keep retrying)");
+                    announced_offline = true;
+                } else {
+                    debug!(error = %e, "wrapper WS reconnect attempt failed");
+                }
+                backoff_ms = next_backoff_ms(backoff_ms);
+                continue 'reconnect;
+            }
+        };
+        if announced_offline {
+            info!(url = %url, "wrapper WS reconnected");
+            announced_offline = false;
+        } else {
+            info!(url = %url, "wrapper WS connected");
+        }
 
-    loop {
-        tokio::select! {
-            msg = ws_rx.next() => {
-                let msg = match msg {
-                    Some(Ok(m)) => m,
-                    Some(Err(e)) => {
-                        debug!(error = %e, "wrapper WS read error");
-                        break;
-                    }
-                    None => break,
-                };
-                let text = match msg {
-                    Message::Text(t) => t,
-                    Message::Close(_) => break,
-                    _ => continue,
-                };
-                let cmd: DaemonToWrapper = match serde_json::from_str(text.as_str()) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        debug!(error = %e, "wrapper got malformed daemon msg");
-                        continue;
-                    }
-                };
-                match cmd {
-                    DaemonToWrapper::Registered { .. } => {
-                        debug!("wrapper registered with daemon");
-                    }
-                    DaemonToWrapper::Write { bytes } => {
-                        if let Ok(mut w) = pty_writer.lock() {
-                            if w.write_all(&bytes).is_err() {
-                                debug!("writing daemon-supplied bytes to PTY failed");
-                            } else {
-                                let _ = w.flush();
+        let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+        let reg = WrapperToDaemon::Register {
+            wrapper_id: wrapper_id.clone(),
+            pid,
+            cwd: cwd.clone(),
+            started_at_unix,
+            host_terminal: Some(host_terminal.clone()),
+        };
+        let txt = match serde_json::to_string(&reg) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if ws_tx.send(Message::Text(txt.into())).await.is_err() {
+            backoff_ms = next_backoff_ms(0);
+            continue 'reconnect;
+        }
+
+        loop {
+            tokio::select! {
+                msg = ws_rx.next() => {
+                    let msg = match msg {
+                        Some(Ok(m)) => m,
+                        Some(Err(e)) => {
+                            debug!(error = %e, "wrapper WS read error");
+                            break;
+                        }
+                        None => break,
+                    };
+                    let text = match msg {
+                        Message::Text(t) => t,
+                        Message::Close(_) => break,
+                        _ => continue,
+                    };
+                    let cmd: DaemonToWrapper = match serde_json::from_str(text.as_str()) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            debug!(error = %e, "wrapper got malformed daemon msg");
+                            continue;
+                        }
+                    };
+                    match cmd {
+                        DaemonToWrapper::Registered { .. } => {
+                            debug!("wrapper registered with daemon");
+                        }
+                        DaemonToWrapper::Write { bytes } => {
+                            if let Ok(mut w) = pty_writer.lock() {
+                                if w.write_all(&bytes).is_err() {
+                                    debug!("writing daemon-supplied bytes to PTY failed");
+                                } else {
+                                    let _ = w.flush();
+                                }
                             }
                         }
                     }
                 }
-            }
-            ev = focus_rx.recv() => {
-                let Some(ev) = ev else { continue };
-                let focused = matches!(ev, FocusEvent::In);
-                let msg = WrapperToDaemon::FocusChanged {
-                    wrapper_id: wrapper_id.clone(),
-                    focused,
-                };
-                let txt = match serde_json::to_string(&msg) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                if ws_tx.send(Message::Text(txt.into())).await.is_err() {
-                    break;
+                ev = focus_rx.recv() => {
+                    let Some(ev) = ev else { continue };
+                    let focused = matches!(ev, FocusEvent::In);
+                    let msg = WrapperToDaemon::FocusChanged {
+                        wrapper_id: wrapper_id.clone(),
+                        focused,
+                    };
+                    let txt = match serde_json::to_string(&msg) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    if ws_tx.send(Message::Text(txt.into())).await.is_err() {
+                        break;
+                    }
+                    debug!(focused, "wrapper sent focus update");
                 }
-                debug!(focused, "wrapper sent focus update");
             }
         }
+
+        debug!("wrapper WS disconnected; will reconnect");
+        // Don't hot-loop if the daemon hangs up immediately after Register.
+        backoff_ms = 1000;
     }
-    debug!("wrapper WS disconnected");
+}
+
+/// Bounded exponential backoff: 1s → 2s → 4s → … → 30s cap.
+fn next_backoff_ms(prev: u64) -> u64 {
+    if prev == 0 {
+        1000
+    } else {
+        prev.saturating_mul(2).min(30_000)
+    }
 }

@@ -94,9 +94,19 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
     // Channel that owns daemon→wrapper command flow.
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonToWrapper>();
 
-    // Insert into the registry.
+    // Insert into the registry. If the wrapper is reconnecting (same
+    // wrapper_id), keep its prior session_id so a brief WS flap doesn't
+    // unbind the Claude session — SessionStart only fires on session
+    // creation/resume, never on raw reconnect, so we'd otherwise lose
+    // the correlation until the user starts a new session.
     {
         let mut wrappers = state.wrappers.write().await;
+        let preserved_session_id = wrappers
+            .get(&wrapper_id)
+            .and_then(|w| w.session_id.clone());
+        if preserved_session_id.is_some() {
+            debug!(wrapper_id = %wrapper_id, "wrapper reconnect preserved session_id");
+        }
         wrappers.insert(
             wrapper_id.clone(),
             Wrapper {
@@ -104,7 +114,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                 pid,
                 cwd,
                 started_at_unix,
-                session_id: None,
+                session_id: preserved_session_id,
                 host_terminal,
                 tx: cmd_tx.clone(),
             },
