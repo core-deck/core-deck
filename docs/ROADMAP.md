@@ -327,10 +327,15 @@ Cosmetic but pleasant.
   correlation needs the next SessionStart hook to rebind. Future
   fix: cache `session_id` in the wrapper itself and re-send it in
   Register.
-- **Settings install non-destructive**: current `hooks install`
-  overwrites the entire `hooks` block in `~/.claude/settings.json`.
-  Pre-existing user hooks are lost. Switch to deep-merge before
-  public release.
+- ~~**Settings install non-destructive**~~ — done. `hooks install`
+  now merges into the existing `hooks` block: foreign blocks for
+  the same event are preserved, only blocks we own (referencing
+  our scripts or daemon URL) get replaced. `statusLine` /
+  `subagentStatusLine` are still single-valued in Claude Code so
+  they're overwritten, but the install warns when the prior value
+  was non-empty and not ours. Uninstall is symmetric — strips our
+  blocks, leaves user blocks alone, drops the event key only when
+  it ends up empty.
 - **Per-wrapper YOLO**: today YOLO is a global flag on the device. Could
   be per-session (the device shows N tabs, user can YOLO one without
   affecting the rest).

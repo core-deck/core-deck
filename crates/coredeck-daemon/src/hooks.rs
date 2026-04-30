@@ -1227,6 +1227,13 @@ const REGISTER_SCRIPT: &str = include_str!("../scripts/coredeck-register.sh");
 const HOOK_SHIM_SCRIPT: &str = include_str!("../scripts/coredeck-hook.sh");
 
 /// Install hooks, returning Ok or an error message. Single source of truth.
+///
+/// Non-destructive: any pre-existing hooks the user has configured for
+/// the same events are preserved; only blocks recognised as "ours"
+/// (referencing the embedded scripts or the daemon URL) are replaced.
+/// `statusLine` / `subagentStatusLine` are single-valued in Claude Code
+/// so they're overwritten — but we warn first when the prior value is
+/// non-empty and not ours, so the user can roll back if surprised.
 pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
     let base_url = format!("http://{}", listen_addr);
     let settings_path = claude_settings_path();
@@ -1244,11 +1251,10 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
         serde_json::json!({})
     };
 
-    // We previously used `type: http` here, which is non-blocking but
-    // produces visible ECONNREFUSED noise on every hook fire when the
-    // daemon is offline. The shim swallows those errors and always
-    // exits 0, so Claude Code stays quiet.
-    //
+    if !settings.is_object() {
+        settings = serde_json::json!({});
+    }
+
     // Tool-matching hooks (PreToolUse, PostToolUse, PermissionRequest) require
     // a "matcher" field — without it they silently don't fire. Use "*" for all.
     // Non-tool hooks (Stop, Notification) don't use matchers.
@@ -1265,69 +1271,89 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
         "TaskCompleted",
     ];
 
-    let mut hooks_obj = serde_json::Map::new();
+    if !settings
+        .get("hooks")
+        .map(|v| v.is_object())
+        .unwrap_or(false)
+    {
+        settings["hooks"] = serde_json::json!({});
+    }
+    let hooks_map = settings
+        .get_mut("hooks")
+        .and_then(|v| v.as_object_mut())
+        .expect("hooks just ensured to be an object");
 
     let shim_command = |event: &str| format!("{} {}", hook_shim_path_str, event);
 
     for event_name in &tool_hook_events {
-        hooks_obj.insert(
-            event_name.to_string(),
-            serde_json::json!([{
+        merge_managed_hook(
+            hooks_map,
+            event_name,
+            serde_json::json!({
                 "matcher": "*",
                 "hooks": [{
                     "type": "command",
                     "command": shim_command(event_name),
                 }]
-            }]),
+            }),
         );
     }
 
     for event_name in &plain_hook_events {
-        hooks_obj.insert(
-            event_name.to_string(),
-            serde_json::json!([{
+        merge_managed_hook(
+            hooks_map,
+            event_name,
+            serde_json::json!({
                 "hooks": [{
                     "type": "command",
                     "command": shim_command(event_name),
                 }]
-            }]),
+            }),
         );
     }
 
     // SessionStart: register script for wrapper correlation, plus the
     // generic shim for daemon state updates. Both fire in parallel on
     // every session start.
-    hooks_obj.insert(
-        "SessionStart".to_string(),
-        serde_json::json!([{
+    merge_managed_hook(
+        hooks_map,
+        "SessionStart",
+        serde_json::json!({
             "hooks": [
                 { "type": "command", "command": register_path_str },
                 { "type": "command", "command": shim_command("SessionStart") },
             ]
-        }]),
+        }),
     );
 
-    settings["hooks"] = serde_json::Value::Object(hooks_obj);
     // statusLine and subagentStatusLine bypass the shim: they're not
     // event-name keyed under /hooks/, they read JSON from stdin via
     // $(cat), and they need response-body pass-through (statusLine) or
     // explicit /dev/null silencing (subagentStatusLine, whose stdout is
     // parsed as row overrides). Add `|| true` so a daemon-offline curl
     // failure doesn't propagate as a non-zero exit.
-    settings["statusLine"] = serde_json::json!({
+    let new_statusline = serde_json::json!({
         "type": "command",
         "command": format!(
             "curl -s -m 5 -X POST {}/hooks/statusline -H 'Content-Type: application/json' --data-binary @- 2>/dev/null || true",
             base_url
         ),
     });
-    settings["subagentStatusLine"] = serde_json::json!({
+    let new_subagent_statusline = serde_json::json!({
         "type": "command",
         "command": format!(
             "curl -s -m 5 -X POST {}/hooks/subagent-statusline -H 'Content-Type: application/json' --data-binary @- >/dev/null 2>&1 || true",
             base_url
         ),
     });
+    warn_if_clobbering("statusLine", settings.get("statusLine"), &new_statusline);
+    warn_if_clobbering(
+        "subagentStatusLine",
+        settings.get("subagentStatusLine"),
+        &new_subagent_statusline,
+    );
+    settings["statusLine"] = new_statusline;
+    settings["subagentStatusLine"] = new_subagent_statusline;
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)
@@ -1337,6 +1363,69 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&settings).expect("Failed to serialize settings");
     std::fs::write(&settings_path, json)
         .map_err(|e| format!("Failed to write {}: {}", settings_path.display(), e))
+}
+
+/// True if a hook block (a single matcher entry inside an event's array)
+/// is one we'd write — i.e. references our embedded scripts or our
+/// daemon's HTTP endpoint. Used to dedupe re-installs without
+/// disturbing user-defined hooks for the same event.
+fn is_managed_hook_block(block: &serde_json::Value) -> bool {
+    let Some(hooks) = block.get("hooks").and_then(|h| h.as_array()) else {
+        return false;
+    };
+    hooks.iter().any(|entry| {
+        let s = entry.to_string();
+        s.contains("coredeck-hook.sh")
+            || s.contains("coredeck-register.sh")
+            || s.contains("127.0.0.1:19384/hooks/")
+            || s.contains("localhost:19384/hooks/")
+    })
+}
+
+/// Merge a fresh hook block for `event_name` into `hooks_map`, replacing
+/// any prior block we owned and preserving anything else.
+fn merge_managed_hook(
+    hooks_map: &mut serde_json::Map<String, serde_json::Value>,
+    event_name: &str,
+    fresh_block: serde_json::Value,
+) {
+    let entry = hooks_map
+        .entry(event_name.to_string())
+        .or_insert_with(|| serde_json::Value::Array(vec![]));
+    if !entry.is_array() {
+        // Unexpected shape — replace defensively rather than corrupt it.
+        *entry = serde_json::Value::Array(vec![fresh_block]);
+        return;
+    }
+    let arr = entry.as_array_mut().expect("checked is_array");
+    arr.retain(|block| !is_managed_hook_block(block));
+    arr.push(fresh_block);
+}
+
+/// Print a one-line stderr warning when we're about to overwrite a
+/// pre-existing single-valued setting (statusLine, subagentStatusLine)
+/// with content that doesn't match what we'd recognise as ours. Empty
+/// or already-ours values are silent.
+fn warn_if_clobbering(key: &str, existing: Option<&serde_json::Value>, replacement: &serde_json::Value) {
+    let Some(existing) = existing else { return };
+    if existing.is_null() {
+        return;
+    }
+    if existing == replacement {
+        return;
+    }
+    let serialized = existing.to_string();
+    if serialized.contains("coredeck-hook.sh")
+        || serialized.contains("coredeck-register.sh")
+        || serialized.contains("127.0.0.1:19384/hooks/")
+        || serialized.contains("localhost:19384/hooks/")
+    {
+        return;
+    }
+    eprintln!(
+        "warning: overwriting existing `{}` in settings.json — Claude Code only supports one. Prior value: {}",
+        key, serialized
+    );
 }
 
 /// Uninstall hooks, returning Ok or an error message. Single source of truth.
@@ -1362,18 +1451,23 @@ pub fn uninstall_hooks_result() -> Result<(), String> {
 
     if let Some(hooks) = settings.get_mut("hooks") {
         if let Some(obj) = hooks.as_object_mut() {
-            let keys_to_remove: Vec<String> = obj
-                .iter()
-                .filter(|(_, v)| {
-                    let s = v.to_string();
-                    s.contains("127.0.0.1:19384/hooks/")
-                        || s.contains("localhost:19384/hooks/")
-                        || s.contains("coredeck-register.sh")
-                        || s.contains("coredeck-hook.sh")
-                })
-                .map(|(k, _)| k.clone())
-                .collect();
-            for key in keys_to_remove {
+            // For each event, drop only the blocks we own; leave any
+            // user-defined blocks for the same event untouched.
+            let mut empty_keys: Vec<String> = Vec::new();
+            for (key, value) in obj.iter_mut() {
+                let Some(arr) = value.as_array_mut() else {
+                    continue;
+                };
+                let before = arr.len();
+                arr.retain(|block| !is_managed_hook_block(block));
+                if arr.len() != before {
+                    changed = true;
+                }
+                if arr.is_empty() {
+                    empty_keys.push(key.clone());
+                }
+            }
+            for key in empty_keys {
                 obj.remove(&key);
                 changed = true;
             }
