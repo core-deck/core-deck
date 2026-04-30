@@ -504,8 +504,14 @@ pub struct WrapperTab {
     /// Permission mode reported by hooks: "default", "plan", "acceptEdits", "bypassPermissions", etc.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
-    /// True between PreToolUse and Stop — Claude is doing something.
-    pub active: bool,
+    /// Firmware tab-state value for this row — one of `TAB_STATE_INACTIVE`,
+    /// `TAB_STATE_STARTED`, `TAB_STATE_WORKING`. Computed by the daemon from
+    /// (a) whether a live `SessionState` backs this wrapper and (b) the
+    /// session's `active` flag. Replaces the prior `active: bool` field —
+    /// the bool collapsed INACTIVE and STARTED, leaving stale tabs on the
+    /// device for the ~200ms between `SessionEnd` and wrapper disconnect.
+    #[serde(default)]
+    pub tab_state: u8,
     /// Statusline-derived numbers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_percent: Option<f64>,

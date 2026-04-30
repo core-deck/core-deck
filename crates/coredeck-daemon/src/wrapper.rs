@@ -29,6 +29,7 @@ use axum::{
 use coredeck_protocol::{
     encode_ws_frame, DaemonToWrapper, DisplayUpdate, WrapperRegisterSession, WrapperTab,
     WrapperTabList, WrapperToDaemon, WsEventTag, TAB_STATE_STARTED, TAB_STATE_WORKING,
+    TAB_STATE_INACTIVE,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -318,11 +319,7 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
     } else {
         String::new()
     };
-    let tabs_state: Vec<u8> = snapshot
-        .tabs
-        .iter()
-        .map(|t| if t.active { TAB_STATE_WORKING } else { TAB_STATE_STARTED })
-        .collect();
+    let tabs_state: Vec<u8> = snapshot.tabs.iter().map(|t| t.tab_state).collect();
 
     let update = DisplayUpdate {
         session: session_label,
@@ -462,7 +459,11 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
                 current_task: session.and_then(decorate_task),
                 last_tool_summary: session.and_then(|s| s.last_tool_summary.clone()),
                 permission_mode: session.and_then(|s| s.permission_mode.clone()),
-                active: session.map(|s| s.active).unwrap_or(false),
+                tab_state: match session {
+                    None => TAB_STATE_INACTIVE,
+                    Some(s) if s.active => TAB_STATE_WORKING,
+                    Some(_) => TAB_STATE_STARTED,
+                },
                 context_percent: session.and_then(|s| s.context_window_percent),
                 cost_usd: session.and_then(|s| s.cost_usd),
                 subagent_label: session.and_then(subagent_label),

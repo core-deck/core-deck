@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use coredeck_protocol::{WrapperTab, WrapperTabList};
+use coredeck_protocol::{WrapperTab, WrapperTabList, TAB_STATE_WORKING};
 use tray_icon::{
     menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     TrayIcon as TrayIconHandle, TrayIconBuilder,
@@ -237,7 +237,7 @@ fn format_tab_menu_label(tab: &WrapperTab, active_id: Option<&str>) -> String {
     let status = tab
         .current_task
         .clone()
-        .or_else(|| if tab.active { Some("working".to_string()) } else { None });
+        .or_else(|| if tab.tab_state == TAB_STATE_WORKING { Some("working".to_string()) } else { None });
 
     match status {
         Some(s) => format!("{bullet}{name}  —  {s}"),
