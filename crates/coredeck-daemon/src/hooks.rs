@@ -607,6 +607,22 @@ fn pick_detail(tool: &str, input: &serde_json::Value) -> Option<String> {
             .and_then(|x| x.as_str())
             .map(str::to_string)
             .or_else(|| generic_pick(input)),
+        // Subagent invocation. `description` is the human-readable task
+        // ("Audit ship-readiness"); `subagent_type` ("general-purpose")
+        // adds nothing on the device. Fall back through the generic
+        // chain if description is missing.
+        "Task" => non_empty_str(input, "description")
+            .map(str::to_string)
+            .or_else(|| generic_pick(input)),
+        // Reads as a real slash command on the display: `/review` not
+        // `review`. The hook payload's `command` field is the bare name.
+        "SlashCommand" => non_empty_str(input, "command").map(|c| format!("/{c}")),
+        // Plan approval prompt — show the first non-empty line of the
+        // plan so the user has a chance to see what they're approving
+        // without raising the terminal.
+        "ExitPlanMode" => non_empty_str(input, "plan")
+            .and_then(|p| p.lines().map(str::trim).find(|l| !l.is_empty()))
+            .map(str::to_string),
         _ => generic_pick(input),
     }
 }
