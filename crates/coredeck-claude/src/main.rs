@@ -409,13 +409,15 @@ fn run() -> Result<i32> {
                     let _ = handle.flush();
                     let mut titles: Vec<String> = Vec::new();
                     sniffer.feed(&buf[..n], |param, body| {
-                        // OSC 0/1/2 = window/icon title (xterm/ECMA-48,
-                        // honored by every modern terminal). OSC 9 =
-                        // iTerm2/ConEmu notification, also commonly used
-                        // as a title channel by claude. All four carry
-                        // title-like text; the same `Claude Code`-suffix
-                        // filter applies.
-                        if !matches!(param, 0 | 1 | 2 | 9) {
+                        // OSC 0/1/2 are the universal title channels
+                        // (xterm/ECMA-48: 0 sets icon+window title, 1
+                        // sets icon, 2 sets window). OSC 9 is for
+                        // notifications (iTerm2) / taskbar progress
+                        // (ConEmu) — NOT titles, despite my earlier
+                        // assumption. ConEmu's `9;4;0;...` progress
+                        // updates would otherwise show up on the device
+                        // as "4;0;" right after session start.
+                        if !matches!(param, 0 | 1 | 2) {
                             return;
                         }
                         if let Ok(text) = std::str::from_utf8(body) {
