@@ -303,17 +303,20 @@ pub async fn cancel_pending_for_session(state: &DaemonState, session_id: &str) {
 /// Decide what should happen to an HID input event in the presence of an
 /// active alert.
 ///
-/// - No alert → `Passthrough`.
-/// - F20 (Claude button) + alert → `FocusSession(session_id)`. Alert
-///   stays up; caller switches active wrapper to the alerting session.
-/// - Idle alert + any other key/string → clear alert, return
-///   `Passthrough`. Caller still routes the input to the active
-///   wrapper (which may now be the alerting one if the user F20'd
-///   first).
-/// - Pending alert + Esc / Stop (Ctrl-C) → resolve Deny, clear alert,
-///   return `Consumed`.
-/// - Pending alert + any other key/string → resolve Allow, clear alert,
-///   return `Consumed`.
+/// - No alert + F20 → `RaiseActive`; otherwise `Passthrough`.
+/// - F20 + alert → `FocusSession(session_id)`. For Idle alerts the
+///   alert is cleared inline (the user has attended); for Pending it
+///   stays up — focus switch isn't a permission decision.
+/// - Idle alert + Esc → clear alert, return `Passthrough`.
+/// - Idle alert + anything else → leave the alert up, return
+///   `Passthrough`. Notification dismissal is reserved for F20 / Esc;
+///   stray knob rotation, soft-key strings, or random keys mustn't
+///   make the alert vanish silently.
+/// - Pending alert + Enter / `y` / `Y` → resolve Allow.
+/// - Pending alert + `n` / `N` / Ctrl-C / Esc → resolve Deny.
+/// - Pending alert + anything else → leave the alert up, return
+///   `Passthrough`. The user must answer with one of the explicit
+///   decision keys.
 pub async fn consume_input_for_decision(
     state: &DaemonState,
     event: &DaemonEvent,
@@ -366,7 +369,28 @@ pub async fn consume_input_for_decision(
         };
     }
 
-    // Otherwise, transition the alert state.
+    // Idle alerts only respond to Dismiss (Esc). Allow/Deny gestures are
+    // for Pending prompts and have no meaning here — leave the alert up
+    // and let the input flow through to the wrapper as if there were no
+    // alert. Without this, rotating the knob (Up/Down arrows on Layer 0)
+    // or hitting a soft-key during an idle prompt would clear the alert
+    // before the user even saw it.
+    if alert_is_idle && !matches!(kind, InputKind::Dismiss) {
+        return AlertOutcome::Passthrough;
+    }
+
+    // Pending alerts only respond to Allow / Deny / Dismiss; everything
+    // else passes through (including arbitrary keys and soft-key text).
+    if !alert_is_idle
+        && !matches!(
+            kind,
+            InputKind::Allow | InputKind::Deny | InputKind::Dismiss
+        )
+    {
+        return AlertOutcome::Passthrough;
+    }
+
+    // The input is meaningful for the current alert; transition.
     let mut guard = state.alert_state.lock().await;
     let prev = std::mem::take(&mut *guard);
     drop(guard);
@@ -380,9 +404,11 @@ pub async fn consume_input_for_decision(
             tab_index,
             ..
         } => {
+            // Dismiss (Esc) on a Pending alert is treated as Deny —
+            // the user explicitly bailed out of the prompt.
             let outcome = match kind {
-                InputKind::Deny => DecisionOutcome::Deny,
-                _ => DecisionOutcome::Allow,
+                InputKind::Allow => DecisionOutcome::Allow,
+                _ => DecisionOutcome::Deny,
             };
             info!(
                 tool = tool_name.as_deref().unwrap_or("?"),
@@ -410,33 +436,61 @@ pub async fn consume_input_for_decision(
 enum InputKind {
     /// F20 / Claude button — reserved for daemon-level controls.
     Focus,
-    /// Esc / Stop (Ctrl-C) — interpreted as a "no" reply.
-    Deny,
-    /// Any other key or type-string — interpreted as "yes" / generic input.
+    /// Enter / `y` / `Y` — explicit "yes" reply. Pending alerts only.
     Allow,
-    /// Not a key or type-string event (state report, device-status, etc.).
+    /// `n` / `N` / Ctrl-C — explicit "no" reply. Pending alerts only.
+    Deny,
+    /// Esc — dismisses Idle alerts, denies Pending prompts. Distinct
+    /// from Deny so Idle can ignore n/N/Ctrl-C and only react to Esc.
+    Dismiss,
+    /// Anything else — knob rotation, soft-key strings, arbitrary keys.
+    /// Alert (if any) stays up and the input passes through to the
+    /// active wrapper untouched.
     None,
 }
+
+// HID Keyboard keycodes (USB HID Usage Page 0x07). Lower 8 bits of the
+// QMK keycode; modifier flags are in the upper bits (LCTL=0x100,
+// LSFT=0x200, LALT=0x400).
+const HID_ENTER: u8 = 0x28;
+const HID_ESC: u8 = 0x29;
+const HID_Y: u8 = 0x1C; // y/Y depending on Shift
+const HID_N: u8 = 0x11; // n/N depending on Shift
+/// Pre-composed `LCTL + c` keycode (matches firmware's Stop binding).
+const QMK_CTRL_C: u16 = 0x0106;
 
 fn classify_input(event: &DaemonEvent) -> InputKind {
     match event {
         DaemonEvent::HidKeyEvent { keycode } => {
             if *keycode == KEYCODE_F20 {
-                InputKind::Focus
-            } else if *keycode == KEYCODE_KNOB_NEXT || *keycode == KEYCODE_KNOB_PREV {
-                // Knob press+rotate is a daemon control (cycle wrappers).
-                // Mustn't be interpreted as Allow here — that would resolve
-                // a Pending permission prompt to Allow on every rotation.
-                // Returning None lets it fall through to main.rs, which
-                // dispatches the cycler.
-                InputKind::None
-            } else if *keycode == 0x0029 || *keycode == 0x0106 {
-                InputKind::Deny
-            } else {
-                InputKind::Allow
+                return InputKind::Focus;
             }
+            if *keycode == KEYCODE_KNOB_NEXT || *keycode == KEYCODE_KNOB_PREV {
+                // Knob press+rotate is a daemon control (cycle wrappers).
+                // Falls through to main.rs's cycler.
+                return InputKind::None;
+            }
+            if *keycode == QMK_CTRL_C {
+                return InputKind::Deny;
+            }
+            // Strip modifier bits so y/Y and n/N both map regardless of
+            // Shift. Don't accept Ctrl+y / Ctrl+n — Ctrl combos are not
+            // decision gestures, only the Ctrl-C abort is.
+            let base = (*keycode & 0xFF) as u8;
+            let has_ctrl = (*keycode & 0x0100) != 0;
+            if !has_ctrl {
+                match base {
+                    HID_ENTER | HID_Y => return InputKind::Allow,
+                    HID_N => return InputKind::Deny,
+                    HID_ESC => return InputKind::Dismiss,
+                    _ => {}
+                }
+            }
+            InputKind::None
         }
-        DaemonEvent::HidTypeString { .. } => InputKind::Allow,
+        // Soft-key text strings type into the wrapper; never resolve a
+        // permission prompt for the user. They pass through unchanged.
+        DaemonEvent::HidTypeString { .. } => InputKind::None,
         _ => InputKind::None,
     }
 }

@@ -289,19 +289,13 @@ Cosmetic but pleasant.
   active wrapper on the corresponding `DeviceStateChanged` event
   (gated on having seen at least one prior state report so the
   initial sync isn't treated as a tap).
-- **Alert classifier resolves alerts on too many inputs**:
-  `alerts::classify_input` maps anything-that-isn't-Esc/Stop/F20/knob-
-  combo to `InputKind::Allow`, which (a) clears any Idle alert and
-  (b) resolves Pending alerts as Allow. Plain encoder rotation sends
-  Up/Down arrows (firmware `keymap.c:126`, encoder Layer 0), so
-  rotating the knob during an AskUserQuestion alert dismisses it,
-  and rotating during a "allow tool?" prompt silently approves. Soft-
-  key text strings have the same problem. Tighten classify_input:
-  only Enter / 'y' / 'Y' resolve Pending as Allow; only Esc / 'n' /
-  'N' / Ctrl-C resolve as Deny; everything else is Passthrough so
-  the alert stays up. Idle alerts should also stop clearing on
-  arbitrary keys — leave dismissal to F20 (focus → focus-in handler
-  clears) or explicit Esc.
+- ~~**Alert classifier resolves alerts on too many inputs**~~ — done.
+  `classify_input` now produces five outcomes: `Focus` (F20),
+  `Allow` (Enter/y/Y), `Deny` (n/N/Ctrl-C), `Dismiss` (Esc), `None`
+  (everything else, including soft-key strings, plain encoder Up/Down,
+  arbitrary keys). Pending alerts only resolve on Allow/Deny/Dismiss;
+  Idle alerts only clear on F20 or Dismiss. Anything else passes
+  through to the wrapper without disturbing the alert.
 - ~~**YOLO requires device presence**~~ — done. `PermissionRequest`
   gates on `device_status.connected && yolo`; `HidDisconnected`
   clears the flag so reconnect needs the firmware's StateReport to
