@@ -72,6 +72,10 @@ impl AlertState {
         !matches!(self, AlertState::None)
     }
 
+    pub fn is_idle(&self) -> bool {
+        matches!(self, AlertState::Idle { .. })
+    }
+
     /// Session id the current alert belongs to, if any.
     pub fn session_id(&self) -> Option<&str> {
         match self {
@@ -320,7 +324,7 @@ pub async fn consume_input_for_decision(
     }
 
     // Snapshot under the lock; bail fast when nothing is showing.
-    let alert_session_id = {
+    let (alert_session_id, alert_is_idle) = {
         let guard = state.alert_state.lock().await;
         if !guard.is_some() {
             // No alert. F20 still has meaning — it raises the active
@@ -332,12 +336,30 @@ pub async fn consume_input_for_decision(
                 AlertOutcome::Passthrough
             };
         }
-        guard.session_id().map(String::from)
+        (guard.session_id().map(String::from), guard.is_idle())
     };
 
-    // F20 with alert: focus the alerting session (caller also raises),
-    // leave alert up.
+    // F20 with alert. Two cases:
+    //   - Idle alert: the user has explicitly attended to the prompt by
+    //     pressing the Claude button; clear the alert ourselves rather
+    //     than waiting on a focus-in echo from the host terminal (some
+    //     terminals don't emit OSC 1004 reliably on programmatic raise).
+    //   - Pending alert: stays up — switching focus isn't a permission
+    //     decision. Allow/Deny still requires explicit input.
+    // In both cases the caller switches active to the alerting session
+    // and raises that terminal.
     if matches!(kind, InputKind::Focus) {
+        if alert_is_idle {
+            let mut guard = state.alert_state.lock().await;
+            let prev = std::mem::take(&mut *guard);
+            drop(guard);
+            if let AlertState::Idle { tab_index, .. } = prev {
+                let hid = state.hid.lock().await;
+                if let Err(e) = hid.clear_alert(tab_index) {
+                    debug!(error = %e, "clear_alert (idle, F20) failed");
+                }
+            }
+        }
         return match alert_session_id {
             Some(sid) => AlertOutcome::FocusSession(sid),
             None => AlertOutcome::Consumed,
