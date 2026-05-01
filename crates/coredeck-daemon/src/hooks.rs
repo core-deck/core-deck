@@ -560,14 +560,19 @@ fn extract_task_text(tool_name: Option<&str>, tool_input: Option<&serde_json::Va
 }
 
 /// Like `extract_task_text` but tuned for the device's task2 line
-/// (`last_tool_summary`). For `Bash` the leading "Bash: " is dropped —
-/// the icon column already implies a tool task and the prefix steals
-/// six characters from the command itself. Other tools fall through
-/// to the standard formatter.
+/// (`last_tool_summary`). For `Bash` and `WebFetch` the leading prefix
+/// is dropped — the icon column already implies a tool task and the
+/// prefix would steal characters from the command / URL itself. For
+/// `WebFetch` we also strip the `http(s)://` scheme so the host gets
+/// to the front of the truncation budget. Other tools fall through to
+/// the standard formatter.
 fn extract_tool_summary(tool_name: Option<&str>, tool_input: Option<&serde_json::Value>) -> String {
     let name = tool_name.unwrap_or("Working");
-    if name == "Bash" {
-        if let Some(detail) = tool_input.and_then(|v| pick_detail(name, v)) {
+    if name == "Bash" || name == "WebFetch" {
+        if let Some(mut detail) = tool_input.and_then(|v| pick_detail(name, v)) {
+            if name == "WebFetch" {
+                detail = strip_url_scheme(&detail).to_string();
+            }
             if !detail.is_empty() {
                 return truncate_for_display(&detail, MAX_TASK_LINE_CHARS);
             }
@@ -575,6 +580,14 @@ fn extract_tool_summary(tool_name: Option<&str>, tool_input: Option<&serde_json:
         return truncate_left(name, MAX_TASK_LINE_CHARS);
     }
     extract_task_text(tool_name, tool_input)
+}
+
+/// Drop a leading `http://` / `https://` so the host gets prime real
+/// estate on the device's 30-char line.
+fn strip_url_scheme(s: &str) -> &str {
+    s.strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s)
 }
 
 /// Tool-specific picker: which `tool_input` field carries the most
@@ -598,6 +611,38 @@ fn pick_detail(tool: &str, input: &serde_json::Value) -> Option<String> {
                 Some(glob) => Some(format!("{pattern} in {glob}")),
                 None => Some(pattern.to_string()),
             }
+        }
+        // Domain hint when one is present — `react hooks (docs.*)` is more
+        // useful than just the query when Claude is scoped to a site.
+        "WebSearch" => {
+            let query = non_empty_str(input, "query")?;
+            let domain = input
+                .get("allowed_domains")
+                .and_then(|d| d.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            Some(match domain {
+                Some(d) => format!("{query} ({d})"),
+                None => query.to_string(),
+            })
+        }
+        // /loop's tail/watch tool. The input schema isn't documented, so
+        // this is a best-effort extractor: prefer the regex/pattern Claude
+        // is waiting on, fall back to the background shell id. Adjust if
+        // real payloads use different field names.
+        "Monitor" => {
+            if let Some(pattern) = non_empty_str(input, "pattern") {
+                return Some(pattern.to_string());
+            }
+            if let Some(regex) = non_empty_str(input, "regex") {
+                return Some(regex.to_string());
+            }
+            non_empty_str(input, "bash_id")
+                .or_else(|| non_empty_str(input, "shell_id"))
+                .map(|id| format!("shell {id}"))
+                .or_else(|| generic_pick(input))
         }
         "AskUserQuestion" => input
             .get("questions")
