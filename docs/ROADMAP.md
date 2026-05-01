@@ -310,14 +310,13 @@ Cosmetic but pleasant.
   through `~/.claude/coredeck-hook.sh`, a tiny curl shim that
   swallows ECONNREFUSED and exits 0. statusLine + subagentStatusLine
   got the same `|| true` treatment inline.
-- **Better session titles**: today `session_name` falls back to the
-  first 60 chars of the user's first prompt, which produces useless
-  device labels like "what does this mean" or "fix the bug". Options:
-  ask Claude to summarize on UserPromptSubmit (extra latency, ~$0.001
-  each), use the cwd basename as the default, or pull the first
-  TodoWrite/TaskCreate subject when present. The wrapper-cwd fallback
-  is already in `compute_session_label` for alerts; consider promoting
-  it to be the device's primary label until a better signal arrives.
+- **Better session titles** — partially done. `prompt_summary` is
+  out of the device chain; the new order is `session_name` →
+  OSC 9 `terminal_title` (sniffed by the wrapper from claude's PTY
+  output, default " Claude Code" suffix dropped) → cwd
+  right-truncated to 24 chars (`…/agentdeck/app`). Still open: a
+  third source — git branch from statusline `worktree.branch`,
+  manual override via tray, or sniffing OSC 0/1/2 alongside OSC 9.
 - ~~**Wrapper resilience**~~ — done. Wrapper retries the WS connect
   with bounded exponential backoff (1s → 30s cap) and re-registers
   on every reconnect. Daemon preserves any prior `session_id` for

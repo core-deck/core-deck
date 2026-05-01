@@ -445,6 +445,13 @@ pub enum WrapperToDaemon {
         wrapper_id: String,
         focused: bool,
     },
+    /// Title hint sniffed from claude's PTY output (OSC 9). The wrapper
+    /// passes the bytes through to the host terminal as well — this is
+    /// purely a side channel for the daemon's session-label fallback.
+    TitleHint {
+        wrapper_id: String,
+        title: String,
+    },
 }
 
 /// Messages sent by the daemon to a wrapper over /wrapper-ws.
@@ -481,8 +488,14 @@ pub struct WrapperTab {
     /// Custom session name (`--name` flag or `/rename`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_name: Option<String>,
-    /// Short summary of the user's most recent prompt — used as a fallback
-    /// session label when `session_name` is unset.
+    /// Most recent OSC 9 title sniffed from claude's PTY output. Used as
+    /// a label fallback between `session_name` and the cwd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
+    /// Short summary of the user's most recent prompt — was used as a
+    /// fallback session label but is no longer in the device's chain
+    /// (first-prompt snippets like "fix the bug" produced uninformative
+    /// labels). Still emitted for any external consumer that wants it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_summary: Option<String>,
     /// Currently in-progress TodoWrite item, when one exists.

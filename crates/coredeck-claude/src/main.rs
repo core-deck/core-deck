@@ -42,11 +42,14 @@ use uuid::Uuid;
 const FOCUS_REPORTING_ENABLE: &[u8] = b"\x1b[?1004h";
 const FOCUS_REPORTING_DISABLE: &[u8] = b"\x1b[?1004l";
 
-/// Focus event flowing from the stdin parser thread to the WS task.
-#[derive(Debug, Clone, Copy)]
-enum FocusEvent {
-    In,
-    Out,
+/// Out-of-band events flowing from the stdin / PTY parser threads to
+/// the WS task.
+#[derive(Debug, Clone)]
+enum WrapperEvent {
+    FocusIn,
+    FocusOut,
+    /// Title text sniffed from OSC 9 in claude's PTY output.
+    TitleHint(String),
 }
 
 /// Strip OSC 1004 focus events out of `buf` and emit them on `tx`.
@@ -54,19 +57,19 @@ enum FocusEvent {
 /// recognises the patterns when they appear contiguously inside the same
 /// read — avoids the "bare ESC stuck waiting for next byte" pitfall when
 /// the user just presses Escape.
-fn extract_focus_events(buf: &[u8], tx: &mpsc::UnboundedSender<FocusEvent>) -> Vec<u8> {
+fn extract_focus_events(buf: &[u8], tx: &mpsc::UnboundedSender<WrapperEvent>) -> Vec<u8> {
     let mut out = Vec::with_capacity(buf.len());
     let mut i = 0;
     while i < buf.len() {
         if i + 2 < buf.len() && buf[i] == 0x1b && buf[i + 1] == b'[' {
             match buf[i + 2] {
                 b'I' => {
-                    let _ = tx.send(FocusEvent::In);
+                    let _ = tx.send(WrapperEvent::FocusIn);
                     i += 3;
                     continue;
                 }
                 b'O' => {
-                    let _ = tx.send(FocusEvent::Out);
+                    let _ = tx.send(WrapperEvent::FocusOut);
                     i += 3;
                     continue;
                 }
@@ -77,6 +80,128 @@ fn extract_focus_events(buf: &[u8], tx: &mpsc::UnboundedSender<FocusEvent>) -> V
         i += 1;
     }
     out
+}
+
+/// Stateful sniffer for OSC sequences in claude's PTY output. We do
+/// not strip the bytes — the host terminal may also use them — we just
+/// observe and emit the OSC 9 body as a title hint. State has to
+/// persist across reads because OSC bodies routinely span buffers.
+struct OscSniffer {
+    state: OscState,
+    param: u32,
+    has_param: bool,
+    body: Vec<u8>,
+}
+
+enum OscState {
+    Outside,
+    Esc,
+    OscParam,
+    OscBody,
+    OscBodyEsc,
+}
+
+const OSC_BODY_CAP: usize = 512;
+
+impl OscSniffer {
+    fn new() -> Self {
+        Self {
+            state: OscState::Outside,
+            param: 0,
+            has_param: false,
+            body: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.state = OscState::Outside;
+        self.param = 0;
+        self.has_param = false;
+        self.body.clear();
+    }
+
+    fn feed<F: FnMut(u32, &[u8])>(&mut self, buf: &[u8], mut emit: F) {
+        for &b in buf {
+            self.process(b, &mut emit);
+        }
+    }
+
+    fn process<F: FnMut(u32, &[u8])>(&mut self, b: u8, emit: &mut F) {
+        match self.state {
+            OscState::Outside => {
+                if b == 0x1b {
+                    self.state = OscState::Esc;
+                }
+            }
+            OscState::Esc => {
+                if b == b']' {
+                    self.state = OscState::OscParam;
+                    self.param = 0;
+                    self.has_param = false;
+                    self.body.clear();
+                } else {
+                    self.state = OscState::Outside;
+                }
+            }
+            OscState::OscParam => {
+                if b.is_ascii_digit() {
+                    self.has_param = true;
+                    self.param = self
+                        .param
+                        .saturating_mul(10)
+                        .saturating_add((b - b'0') as u32);
+                } else if b == b';' {
+                    self.state = OscState::OscBody;
+                } else if b == 0x07 {
+                    if self.has_param {
+                        emit(self.param, &self.body);
+                    }
+                    self.reset();
+                } else if b == 0x1b {
+                    self.state = OscState::OscBodyEsc;
+                } else {
+                    self.reset();
+                }
+            }
+            OscState::OscBody => {
+                if b == 0x07 {
+                    if self.has_param {
+                        emit(self.param, &self.body);
+                    }
+                    self.reset();
+                } else if b == 0x1b {
+                    self.state = OscState::OscBodyEsc;
+                } else if self.body.len() < OSC_BODY_CAP {
+                    self.body.push(b);
+                }
+            }
+            OscState::OscBodyEsc => {
+                if b == b'\\' {
+                    if self.has_param {
+                        emit(self.param, &self.body);
+                    }
+                    self.reset();
+                } else {
+                    self.reset();
+                }
+            }
+        }
+    }
+}
+
+/// Filter for OSC 9 titles before they reach the daemon. Default Claude
+/// Code titles look like `<cwd> — Claude Code` and add no signal beyond
+/// the cwd we already use as fallback. Drop them at the source so they
+/// don't outrank a real title.
+fn keep_title_hint(title: &str) -> Option<String> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == "Claude Code" || trimmed.ends_with(" Claude Code") {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 const DEFAULT_CLAUDE_BINARY: &str = "claude";
@@ -259,14 +384,19 @@ fn run() -> Result<i32> {
         let _ = handle.flush();
     }
 
-    // Channel from the stdin parser thread to the WS task carrying
-    // focus events. Unbounded keeps the stdin path lock-free.
-    let (focus_tx, focus_rx) = mpsc::unbounded_channel::<FocusEvent>();
+    // Channel from the stdin / PTY parser threads to the WS task,
+    // carrying focus reports and OSC 9 title hints. Unbounded keeps the
+    // hot loops lock-free.
+    let (focus_tx, focus_rx) = mpsc::unbounded_channel::<WrapperEvent>();
+    let title_tx = focus_tx.clone();
 
-    // PTY → user stdout (sync thread, tight loop).
+    // PTY → user stdout (sync thread, tight loop). Bytes are passed
+    // through unchanged; an OSC 9 sniffer runs alongside and emits
+    // title hints to the WS task without touching the stdout stream.
     let pty_to_stdout = std::thread::spawn(move || {
         let mut reader = master_reader;
         let mut buf = [0u8; 8192];
+        let mut sniffer = OscSniffer::new();
         let stdout = std::io::stdout();
         let mut handle = stdout.lock();
         loop {
@@ -277,6 +407,20 @@ fn run() -> Result<i32> {
                         break;
                     }
                     let _ = handle.flush();
+                    let mut titles: Vec<String> = Vec::new();
+                    sniffer.feed(&buf[..n], |param, body| {
+                        if param != 9 {
+                            return;
+                        }
+                        if let Ok(text) = std::str::from_utf8(body) {
+                            if let Some(title) = keep_title_hint(text) {
+                                titles.push(title);
+                            }
+                        }
+                    });
+                    for title in titles {
+                        let _ = title_tx.send(WrapperEvent::TitleHint(title));
+                    }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => break,
@@ -398,7 +542,7 @@ async fn run_ws(
     started_at_unix: u64,
     host_terminal: HostTerminal,
     pty_writer: SharedWriter,
-    mut focus_rx: mpsc::UnboundedReceiver<FocusEvent>,
+    mut focus_rx: mpsc::UnboundedReceiver<WrapperEvent>,
 ) {
     let url = format!("ws://{}/wrapper-ws", daemon_addr);
     let mut backoff_ms: u64 = 0;
@@ -487,10 +631,19 @@ async fn run_ws(
                 }
                 ev = focus_rx.recv() => {
                     let Some(ev) = ev else { continue };
-                    let focused = matches!(ev, FocusEvent::In);
-                    let msg = WrapperToDaemon::FocusChanged {
-                        wrapper_id: wrapper_id.clone(),
-                        focused,
+                    let msg = match ev {
+                        WrapperEvent::FocusIn => WrapperToDaemon::FocusChanged {
+                            wrapper_id: wrapper_id.clone(),
+                            focused: true,
+                        },
+                        WrapperEvent::FocusOut => WrapperToDaemon::FocusChanged {
+                            wrapper_id: wrapper_id.clone(),
+                            focused: false,
+                        },
+                        WrapperEvent::TitleHint(title) => WrapperToDaemon::TitleHint {
+                            wrapper_id: wrapper_id.clone(),
+                            title,
+                        },
                     };
                     let txt = match serde_json::to_string(&msg) {
                         Ok(s) => s,
@@ -499,7 +652,6 @@ async fn run_ws(
                     if ws_tx.send(Message::Text(txt.into())).await.is_err() {
                         break;
                     }
-                    debug!(focused, "wrapper sent focus update");
                 }
             }
         }

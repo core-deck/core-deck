@@ -1044,16 +1044,15 @@ fn deny_response() -> PermissionResponse {
 }
 
 /// Best-effort label for an alert's session line — prefers the session's
-/// `session_name`, then the user's prompt summary, then the wrapper's
-/// cwd basename, then "Claude".
+/// `session_name`, then a right-truncated cwd via `tab_label`'s helper,
+/// then "Claude". `prompt_summary` was deliberately dropped from this
+/// chain — first-prompt snippets like "fix the bug" produced device
+/// labels noisier than the cwd they replaced.
 async fn compute_session_label(state: &DaemonState, session_id: &str) -> String {
     let claude = state.claude_state.read().await;
     if let Some(s) = claude.sessions.get(session_id) {
         if let Some(name) = s.session_name.as_ref() {
             return name.clone();
-        }
-        if let Some(p) = s.prompt_summary.as_ref() {
-            return p.clone();
         }
     }
     drop(claude);
@@ -1063,9 +1062,9 @@ async fn compute_session_label(state: &DaemonState, session_id: &str) -> String 
         .values()
         .find(|w| w.session_id.as_deref() == Some(session_id))
     {
-        let cwd = w.cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(&w.cwd);
-        if !cwd.is_empty() {
-            return cwd.to_string();
+        let label = crate::wrapper::short_cwd_label_pub(&w.cwd);
+        if !label.is_empty() {
+            return label;
         }
     }
 

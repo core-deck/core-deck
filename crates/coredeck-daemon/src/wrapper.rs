@@ -77,7 +77,9 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
             started_at_unix,
             host_terminal,
         } => (wrapper_id, pid, cwd, started_at_unix, host_terminal),
-        WrapperToDaemon::Goodbye { .. } | WrapperToDaemon::FocusChanged { .. } => {
+        WrapperToDaemon::Goodbye { .. }
+        | WrapperToDaemon::FocusChanged { .. }
+        | WrapperToDaemon::TitleHint { .. } => {
             debug!("wrapper sent non-Register frame first; ignoring");
             return;
         }
@@ -107,6 +109,9 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         if preserved_session_id.is_some() {
             debug!(wrapper_id = %wrapper_id, "wrapper reconnect preserved session_id");
         }
+        let preserved_terminal_title = wrappers
+            .get(&wrapper_id)
+            .and_then(|w| w.terminal_title.clone());
         wrappers.insert(
             wrapper_id.clone(),
             Wrapper {
@@ -116,6 +121,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                 started_at_unix,
                 session_id: preserved_session_id,
                 host_terminal,
+                terminal_title: preserved_terminal_title,
                 tx: cmd_tx.clone(),
             },
         );
@@ -166,6 +172,9 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                         handle_wrapper_focused(&state, &wrapper_id).await;
                     }
                     // Focus-out is currently informational only.
+                }
+                Ok(WrapperToDaemon::TitleHint { title, .. }) => {
+                    handle_title_hint(&state, &wrapper_id, title).await;
                 }
                 Ok(_) => {} // Stray Register frames; ignore.
                 Err(e) => debug!(error = %e, "wrapper sent malformed JSON post-register"),
@@ -272,12 +281,14 @@ pub async fn emit_tab_list(state: &Arc<DaemonState>) {
 }
 
 /// Pick the best human-friendly label for a tab, matching the priority
-/// the device uses: explicit session_name, then prompt summary, then a
-/// short cwd basename.
+/// the device uses: explicit session_name → OSC 9 terminal title →
+/// right-truncated cwd. The first-prompt summary used to live in this
+/// chain but was noisy ("what does this mean", "fix the bug") and
+/// rarely better than the cwd.
 pub fn tab_label(tab: &WrapperTab) -> String {
     tab.session_name
         .clone()
-        .or_else(|| tab.prompt_summary.clone())
+        .or_else(|| tab.terminal_title.clone())
         .unwrap_or_else(|| short_cwd_label(&tab.cwd))
 }
 
@@ -313,7 +324,7 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
     let session_label = active
         .session_name
         .clone()
-        .or_else(|| active.prompt_summary.clone())
+        .or_else(|| active.terminal_title.clone())
         .unwrap_or_else(|| short_cwd_label(&active.cwd));
     // Line 1 priority: subagent label (parent's tools are subordinate while
     // a subagent is running) > the parent's current_task.
@@ -354,14 +365,34 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
     }
 }
 
-/// Last path segment of a cwd, falling back to the whole string. Empty
-/// strings stay empty.
+/// Right-truncated cwd, keeping the deepest part of the path within
+/// `MAX_CWD_LABEL_CHARS` characters. The basename alone (`app`) often
+/// isn't enough context — `…work/agentdeck/app` tells the user where
+/// they are. Empty strings stay empty.
+const MAX_CWD_LABEL_CHARS: usize = 24;
+
+pub fn short_cwd_label_pub(cwd: &str) -> String {
+    short_cwd_label(cwd)
+}
+
 fn short_cwd_label(cwd: &str) -> String {
-    cwd.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .unwrap_or(cwd)
-        .to_string()
+    let trimmed = cwd.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let total = trimmed.chars().count();
+    if total <= MAX_CWD_LABEL_CHARS {
+        return trimmed.to_string();
+    }
+    let keep = MAX_CWD_LABEL_CHARS.saturating_sub(1); // leave room for ellipsis
+    let skip = total.saturating_sub(keep);
+    let mut tail: String = trimmed.chars().skip(skip).collect();
+    // Drop a partial leading segment so the label starts at a `/` —
+    // `…rk/agentdeck/app` reads worse than `…/agentdeck/app`.
+    if let Some(slash) = tail.find('/') {
+        tail = tail[slash..].to_string();
+    }
+    format!("…{tail}")
 }
 
 /// Pick the most informative subagent row for the device's task line.
@@ -468,6 +499,7 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
                 pid: w.pid,
                 started_at_unix: w.started_at_unix,
                 session_name: session.and_then(|s| s.session_name.clone()),
+                terminal_title: w.terminal_title.clone(),
                 prompt_summary: session.and_then(|s| s.prompt_summary.clone()),
                 current_todo: session.and_then(|s| s.current_todo.clone()),
                 model: session.and_then(|s| s.model.clone()),
@@ -596,6 +628,27 @@ pub async fn write_to_target(
         .await
         .then_some(())
         .ok_or_else(|| format!("active wrapper {} disappeared", target))
+}
+
+/// Stash an OSC 9 title hint on the wrapper and re-emit the tab list
+/// so the device picks up the new label. Same string in a row → no-op
+/// (skip the redraw).
+async fn handle_title_hint(state: &Arc<DaemonState>, wrapper_id: &str, title: String) {
+    let changed = {
+        let mut wrappers = state.wrappers.write().await;
+        let Some(w) = wrappers.get_mut(wrapper_id) else {
+            return;
+        };
+        if w.terminal_title.as_deref() == Some(title.as_str()) {
+            false
+        } else {
+            w.terminal_title = Some(title);
+            true
+        }
+    };
+    if changed {
+        emit_tab_list(state).await;
+    }
 }
 
 /// Handle a focus-in report from a wrapper: make it active, clear any

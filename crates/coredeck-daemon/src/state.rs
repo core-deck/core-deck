@@ -195,6 +195,11 @@ pub struct Wrapper {
     /// "raise terminal" requests (F20) to the right adapter. `None` if the
     /// wrapper is older than the host-terminal protocol field.
     pub host_terminal: Option<HostTerminal>,
+    /// Last OSC 9 title hint sniffed from the child claude's PTY output.
+    /// Sits between `session_name` (statusline) and `cwd` in the device's
+    /// label fallback chain — informative when claude or a tool sets it,
+    /// silent (None) the rest of the time.
+    pub terminal_title: Option<String>,
     /// Channel for sending DaemonToWrapper messages back over the wrapper's WS.
     pub tx: mpsc::UnboundedSender<DaemonToWrapper>,
 }
