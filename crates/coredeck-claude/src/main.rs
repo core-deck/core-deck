@@ -189,19 +189,36 @@ impl OscSniffer {
     }
 }
 
-/// Filter for OSC 9 titles before they reach the daemon. Default Claude
-/// Code titles look like `<cwd> — Claude Code` and add no signal beyond
-/// the cwd we already use as fallback. Drop them at the source so they
-/// don't outrank a real title.
+/// Filter for OSC titles before they reach the daemon. Two normalisations:
+///
+/// 1. Strip Claude Code's animated spinner glyph (✻, ✷, ⠋, …) plus the
+///    following whitespace. Claude cycles a glyph through every title
+///    update for progress feedback; without this, the device's 24-char
+///    label is crowded by a flickering symbol that adds no signal.
+///
+/// 2. Drop the default `<cwd> — Claude Code` titles entirely — those
+///    add nothing beyond the cwd we already use as fallback.
 fn keep_title_hint(title: &str) -> Option<String> {
     let trimmed = title.trim();
     if trimmed.is_empty() {
         return None;
     }
-    if trimmed == "Claude Code" || trimmed.ends_with(" Claude Code") {
+    // Strip any leading run of whitespace and non-title-start characters.
+    // `is_alphanumeric` is Unicode-aware, so titles in non-Latin scripts
+    // start at the first letter; `/` `~` `.` `(` `[` `"` `'` `<` cover
+    // the obvious ASCII title-starts so paths and quoted text survive.
+    let stripped = trimmed.trim_start_matches(|c: char| {
+        c.is_whitespace()
+            || (!c.is_alphanumeric()
+                && !matches!(c, '/' | '~' | '.' | '(' | '[' | '"' | '\'' | '<'))
+    });
+    if stripped.is_empty() {
         return None;
     }
-    Some(trimmed.to_string())
+    if stripped == "Claude Code" || stripped.ends_with(" Claude Code") {
+        return None;
+    }
+    Some(stripped.to_string())
 }
 
 const DEFAULT_CLAUDE_BINARY: &str = "claude";
