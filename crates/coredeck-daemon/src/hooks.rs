@@ -866,6 +866,8 @@ async fn handle_pre_tool_use(
 /// text back to "Thinking…" until the next PreToolUse or Stop, and reset
 /// the phase timer so the device shows seconds-since-this-phase.
 async fn handle_post_tool_use(state: &DaemonState, event: &HookEvent) {
+    let is_task = event.tool_name.as_deref() == Some("Task");
+
     if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
         let s = claude.touch_session(sid);
@@ -876,6 +878,17 @@ async fn handle_post_tool_use(state: &DaemonState, event: &HookEvent) {
             s.current_task = Some("Thinking…".to_string());
         }
         s.phase_started_at_unix = Some(now_unix());
+
+        // The Task tool returning to the parent means a subagent just
+        // finished. Claude Code's `subagentStatusLine` tick is supposed
+        // to refresh the panel as terminal — but it doesn't always fire
+        // a final tick, so the device gets stuck on the subagent's task
+        // line until the next subagent runs (or Stop). Clear here as
+        // the authoritative completion signal. Parallel subagents will
+        // be repopulated by the next status-line tick.
+        if is_task {
+            s.subagents.clear();
+        }
     }
 
     // PostToolUse(AskUserQuestion) means the user just answered — drop
