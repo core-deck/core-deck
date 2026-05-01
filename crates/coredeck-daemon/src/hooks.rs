@@ -47,6 +47,12 @@ struct HookEvent {
     /// TaskCreated / TaskCompleted: short title of the task.
     #[serde(default)]
     task_subject: Option<String>,
+    /// TaskCreated: present-continuous form Claude Code shows in its
+    /// spinner ("Wiring OSC 9 listener…"). Friendlier on the device
+    /// than the noun-phrase `task_subject` while a task is mid-flight,
+    /// so we prefer it when present.
+    #[serde(default)]
+    task_active_form: Option<String>,
     /// TaskCreated: longer task description (optional).
     #[serde(default)]
     #[allow(dead_code)]
@@ -1229,7 +1235,12 @@ async fn handle_pre_compact(state: &DaemonState, event: &HookEvent) {
 }
 
 /// TaskCreated: a task entry was added to the agent's task list. We
-/// just record `task_id → task_subject` in the per-session registry.
+/// record `task_id → display_string` in the per-session registry,
+/// preferring `task_active_form` (the gerund Claude Code shows in its
+/// spinner: "Wiring OSC 9 listener…") over the noun-phrase
+/// `task_subject` because the gerund reads better as a live status
+/// line on the device.
+///
 /// We do NOT promote it to `current_task` — multiple tasks can be
 /// created up front and only one runs at a time. The actual switch
 /// to in-progress is signaled by `PreToolUse(TaskUpdate, in_progress)`.
@@ -1239,10 +1250,17 @@ async fn handle_task_created(state: &DaemonState, event: &HookEvent) {
     else {
         return;
     };
-    debug!(session = %sid, task_id = %id, subject = %subject, "TaskCreated");
+    let label = event
+        .task_active_form
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(subject.as_str())
+        .to_string();
+    debug!(session = %sid, task_id = %id, subject = %subject, label = %label, "TaskCreated");
     let mut claude = state.claude_state.write().await;
     let s = claude.touch_session(sid);
-    s.task_registry.insert(id.clone(), subject.clone());
+    s.task_registry.insert(id.clone(), label);
 }
 
 /// TaskCompleted: a task was marked complete via `TaskUpdate`. Drop

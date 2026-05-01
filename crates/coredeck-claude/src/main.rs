@@ -409,7 +409,13 @@ fn run() -> Result<i32> {
                     let _ = handle.flush();
                     let mut titles: Vec<String> = Vec::new();
                     sniffer.feed(&buf[..n], |param, body| {
-                        if param != 9 {
+                        // OSC 0/1/2 = window/icon title (xterm/ECMA-48,
+                        // honored by every modern terminal). OSC 9 =
+                        // iTerm2/ConEmu notification, also commonly used
+                        // as a title channel by claude. All four carry
+                        // title-like text; the same `Claude Code`-suffix
+                        // filter applies.
+                        if !matches!(param, 0 | 1 | 2 | 9) {
                             return;
                         }
                         if let Ok(text) = std::str::from_utf8(body) {
