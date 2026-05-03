@@ -94,6 +94,38 @@ impl AlertState {
     }
 }
 
+/// A Pending permission alert waiting in the queue because another
+/// alert was already showing when its hook fired. Holds everything we
+/// need to install it later, plus the same `oneshot::Sender` the live
+/// path uses — so the hook handler awaits its decision the same way
+/// regardless of whether the alert was instant or queued.
+pub struct QueuedPending {
+    pub session_id: String,
+    pub tool_name: Option<String>,
+    pub label: String,
+    pub text: String,
+    pub details: Option<String>,
+    pub tx: oneshot::Sender<DecisionOutcome>,
+}
+
+impl std::fmt::Debug for QueuedPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("QueuedPending")
+            .field("session_id", &self.session_id)
+            .field("tool_name", &self.tool_name)
+            .field("label", &self.label)
+            .field("text", &self.text)
+            .field("details", &self.details)
+            .finish()
+    }
+}
+
+/// Cap on the queue depth so a stuck user can't pin unbounded memory.
+/// Hits in practice would mean four parallel sessions all waiting on
+/// permission prompts at once — anything beyond that falls back to
+/// Claude's terminal prompt.
+const PENDING_QUEUE_CAP: usize = 4;
+
 /// What `consume_input_for_decision` decided about an HID input event.
 #[derive(Debug, Clone)]
 pub enum AlertOutcome {
@@ -158,9 +190,15 @@ pub async fn show_idle_alert(
 }
 
 /// Try to install a Pending alert and return the receiver the caller
-/// should await. Returns `None` if another alert is already live or the
-/// device isn't connected — in those cases the caller should fall back
-/// to Claude's own prompt.
+/// should await.
+///
+/// Behaviour when another alert is already live:
+///   - Queue the request (up to `PENDING_QUEUE_CAP` deep). When the
+///     active alert resolves the queue head pops to the front. The
+///     hook handler awaits exactly the same way as for an immediate
+///     install — the difference is invisible past this function.
+///   - If the queue is full or the device is offline, return `None`
+///     so the caller falls back to Claude's terminal prompt.
 pub async fn install_pending_alert(
     state: &DaemonState,
     session_id: String,
@@ -169,12 +207,32 @@ pub async fn install_pending_alert(
     text: &str,
     details: Option<&str>,
 ) -> Option<oneshot::Receiver<DecisionOutcome>> {
-    {
+    let busy = {
         let guard = state.alert_state.lock().await;
-        if guard.is_some() {
-            debug!("Permission alert suppressed; another alert is already live");
+        guard.is_some()
+    };
+
+    if busy {
+        let mut queue = state.pending_queue.lock().await;
+        if queue.len() >= PENDING_QUEUE_CAP {
+            debug!("Permission alert dropped; queue full");
             return None;
         }
+        let (tx, rx) = oneshot::channel();
+        queue.push_back(QueuedPending {
+            session_id: session_id.clone(),
+            tool_name: tool_name.clone(),
+            label: session_label.to_string(),
+            text: text.to_string(),
+            details: details.map(|s| s.to_string()),
+            tx,
+        });
+        debug!(
+            session = %session_id,
+            depth = queue.len(),
+            "permission alert queued behind a live alert",
+        );
+        return Some(rx);
     }
 
     let tab_index = crate::wrapper::tab_index_for_session(state, &session_id)
@@ -207,44 +265,144 @@ pub async fn install_pending_alert(
     Some(rx)
 }
 
+/// Pop the next queued Pending alert and install it on the device.
+/// Called whenever the active alert clears. If the device is offline
+/// or the send fails, the queued tx is dropped (which wakes the hook
+/// handler with `Err` and falls it back to Claude's terminal prompt),
+/// and we move on to the next entry.
+pub async fn try_install_next_pending(state: &DaemonState) {
+    loop {
+        let q = {
+            let mut queue = state.pending_queue.lock().await;
+            queue.pop_front()
+        };
+        let Some(q) = q else {
+            return;
+        };
+
+        let tab_index = crate::wrapper::tab_index_for_session(state, &q.session_id)
+            .await
+            .unwrap_or(0);
+
+        let installed = {
+            let hid = state.hid.lock().await;
+            if !hid.is_connected() {
+                debug!("queued permission alert dropped: device not connected");
+                false
+            } else if let Err(e) = hid.send_alert(tab_index, &q.label, &q.text, q.details.as_deref())
+            {
+                warn!(error = %e, "send_alert failed for queued permission prompt");
+                false
+            } else {
+                true
+            }
+        };
+
+        if !installed {
+            // q.tx drops here, rx errs, hook handler falls back. Try next.
+            continue;
+        }
+
+        let mut guard = state.alert_state.lock().await;
+        if guard.is_some() {
+            // Race: a fresh install landed while we worked. Drop ours;
+            // the hook handler falls back. Don't keep popping in case
+            // we'd evict the live one.
+            debug!("queued install raced with a fresh install; dropped");
+            return;
+        }
+        *guard = AlertState::Pending {
+            session_id: q.session_id,
+            tool_name: q.tool_name,
+            tx: q.tx,
+            tab_index,
+            label: q.label,
+            text: q.text,
+            details: q.details,
+        };
+        debug!("queued permission alert promoted to active");
+        return;
+    }
+}
+
+/// Drop every queued entry whose `session_id` matches. Their `tx`
+/// senders go away with the entries, waking the parked hook handlers
+/// with `Err` so they fall back. Used when a session has progressed
+/// past the permission point on its own (UserPromptSubmit) or its
+/// wrapper has gone away.
+pub async fn drop_queued_for_session(state: &DaemonState, session_id: &str) {
+    let mut queue = state.pending_queue.lock().await;
+    let before = queue.len();
+    queue.retain(|q| q.session_id != session_id);
+    let dropped = before - queue.len();
+    if dropped > 0 {
+        debug!(session = %session_id, dropped, "queued permission alerts dropped");
+    }
+}
+
 /// Clear any currently-showing alert (sends `clear_alert` to the device
 /// and resets the state). If a Pending alert is replaced, its oneshot
 /// is dropped, which causes the awaiting hook handler to fall back.
+/// Pops the queued Pending head into the freshly empty slot.
 pub async fn clear_alert(state: &DaemonState) {
-    let mut guard = state.alert_state.lock().await;
-    if !guard.is_some() {
-        return;
-    }
-    let tab_index = guard.tab_index();
-    *guard = AlertState::None;
-    drop(guard);
+    let cleared = {
+        let mut guard = state.alert_state.lock().await;
+        if !guard.is_some() {
+            None
+        } else {
+            let tab_index = guard.tab_index();
+            *guard = AlertState::None;
+            Some(tab_index)
+        }
+    };
 
-    let hid = state.hid.lock().await;
-    if let Err(e) = hid.clear_alert(tab_index) {
-        debug!(error = %e, "clear_alert failed");
+    let Some(tab_index) = cleared else {
+        return;
+    };
+
+    {
+        let hid = state.hid.lock().await;
+        if let Err(e) = hid.clear_alert(tab_index) {
+            debug!(error = %e, "clear_alert failed");
+        }
     }
+    try_install_next_pending(state).await;
 }
 
 /// Cancel any alert (Idle or Pending) for `session_id`. Use on
 /// `UserPromptSubmit` — the user has just provided input, so even an
 /// idle alert is no longer accurate.
 pub async fn cancel_for_session_progress(state: &DaemonState, session_id: &str) {
-    let mut guard = state.alert_state.lock().await;
-    let should_clear = guard.session_id() == Some(session_id);
-    if !should_clear {
-        return;
-    }
-    let tab_index = guard.tab_index();
-    // Replacing the variant drops the oneshot::Sender if it was Pending,
-    // which wakes the parked hook handler with Err and lets it fall back.
-    *guard = AlertState::None;
-    drop(guard);
+    let was_active = {
+        let mut guard = state.alert_state.lock().await;
+        if guard.session_id() == Some(session_id) {
+            let tab_index = guard.tab_index();
+            // Replacing the variant drops the oneshot::Sender if it was
+            // Pending, which wakes the parked hook handler with Err and
+            // lets it fall back to Claude's terminal prompt.
+            *guard = AlertState::None;
+            Some(tab_index)
+        } else {
+            None
+        }
+    };
 
-    let hid = state.hid.lock().await;
-    if let Err(e) = hid.clear_alert(tab_index) {
-        debug!(error = %e, "clear_alert (progress) failed");
+    if let Some(tab_index) = was_active {
+        let hid = state.hid.lock().await;
+        if let Err(e) = hid.clear_alert(tab_index) {
+            debug!(error = %e, "clear_alert (progress) failed");
+        }
+        debug!(session = %session_id, "alert cancelled by session progress");
     }
-    debug!(session = %session_id, "alert cancelled by session progress");
+
+    // The session has moved past its permission point; any queued
+    // Pending requests for the same session are stale too.
+    drop_queued_for_session(state, session_id).await;
+
+    if was_active.is_some() {
+        // Slot opened up — show whatever is queued for *other* sessions.
+        try_install_next_pending(state).await;
+    }
 }
 
 /// Cancel only an *Idle* alert for `session_id`. Use on focus-in
@@ -253,23 +411,35 @@ pub async fn cancel_for_session_progress(state: &DaemonState, session_id: &str) 
 /// permission alert must persist until the user actually answers,
 /// since looking at the window isn't a decision.
 pub async fn cancel_idle_for_session(state: &DaemonState, session_id: &str) {
-    let mut guard = state.alert_state.lock().await;
-    let should_clear = matches!(
-        &*guard,
-        AlertState::Idle { session_id: sid, .. } if sid == session_id,
-    );
-    if !should_clear {
-        return;
-    }
-    let tab_index = guard.tab_index();
-    *guard = AlertState::None;
-    drop(guard);
+    let cleared = {
+        let mut guard = state.alert_state.lock().await;
+        let should_clear = matches!(
+            &*guard,
+            AlertState::Idle { session_id: sid, .. } if sid == session_id,
+        );
+        if !should_clear {
+            None
+        } else {
+            let tab_index = guard.tab_index();
+            *guard = AlertState::None;
+            Some(tab_index)
+        }
+    };
 
-    let hid = state.hid.lock().await;
-    if let Err(e) = hid.clear_alert(tab_index) {
-        debug!(error = %e, "clear_alert (idle) failed");
+    let Some(tab_index) = cleared else {
+        return;
+    };
+
+    {
+        let hid = state.hid.lock().await;
+        if let Err(e) = hid.clear_alert(tab_index) {
+            debug!(error = %e, "clear_alert (idle) failed");
+        }
     }
     debug!(session = %session_id, "idle alert cancelled by focus-in");
+    // Slot opened — any queued Pending alert from another session
+    // should now show.
+    try_install_next_pending(state).await;
 }
 
 /// Cancel only a *Pending* permission alert for `session_id`. Use on
@@ -279,23 +449,36 @@ pub async fn cancel_idle_for_session(state: &DaemonState, session_id: &str) {
 /// Idle alerts must persist through all of these — they only become
 /// stale when the user actually submits a new prompt.
 pub async fn cancel_pending_for_session(state: &DaemonState, session_id: &str) {
-    let mut guard = state.alert_state.lock().await;
-    let should_clear = matches!(
-        &*guard,
-        AlertState::Pending { session_id: sid, .. } if sid == session_id,
-    );
-    if !should_clear {
-        return;
-    }
-    let tab_index = guard.tab_index();
-    *guard = AlertState::None;
-    drop(guard);
+    let cleared = {
+        let mut guard = state.alert_state.lock().await;
+        let should_clear = matches!(
+            &*guard,
+            AlertState::Pending { session_id: sid, .. } if sid == session_id,
+        );
+        if !should_clear {
+            None
+        } else {
+            let tab_index = guard.tab_index();
+            *guard = AlertState::None;
+            Some(tab_index)
+        }
+    };
 
-    let hid = state.hid.lock().await;
-    if let Err(e) = hid.clear_alert(tab_index) {
-        debug!(error = %e, "clear_alert (pending) failed");
+    if let Some(tab_index) = cleared {
+        let hid = state.hid.lock().await;
+        if let Err(e) = hid.clear_alert(tab_index) {
+            debug!(error = %e, "clear_alert (pending) failed");
+        }
+        debug!(session = %session_id, "pending alert cancelled by session progress");
     }
-    debug!(session = %session_id, "pending alert cancelled by session progress");
+
+    // The hook signalling progress past the permission point also
+    // makes any queued Pending requests for this session stale.
+    drop_queued_for_session(state, session_id).await;
+
+    if cleared.is_some() {
+        try_install_next_pending(state).await;
+    }
 }
 
 // ── Consuming HID input ─────────────────────────────────────────────
@@ -362,6 +545,8 @@ pub async fn consume_input_for_decision(
                     debug!(error = %e, "clear_alert (idle, F20) failed");
                 }
             }
+            // Slot is free — promote any queued Pending alert.
+            try_install_next_pending(state).await;
         }
         return match alert_session_id {
             Some(sid) => AlertOutcome::FocusSession(sid),
@@ -420,10 +605,15 @@ pub async fn consume_input_for_decision(
         }
     };
 
-    let hid = state.hid.lock().await;
-    if let Err(e) = hid.clear_alert(tab_index) {
-        debug!(error = %e, "clear_alert after decision failed");
+    {
+        let hid = state.hid.lock().await;
+        if let Err(e) = hid.clear_alert(tab_index) {
+            debug!(error = %e, "clear_alert after decision failed");
+        }
     }
+    // Slot is free — promote a queued Pending alert from any other
+    // session into the active position so the user sees it next.
+    try_install_next_pending(state).await;
 
     if consumed {
         AlertOutcome::Consumed
@@ -513,10 +703,33 @@ pub async fn refresh_for_tabs(
     state: &DaemonState,
     snapshot: &coredeck_protocol::WrapperTabList,
 ) {
+    // Drop any queued Pending alerts whose session no longer has a
+    // wrapper backing it — their oneshots wake the parked hook
+    // handlers with `Err`, causing them to fall back to Claude's
+    // terminal prompt instead of being silently lost in the queue.
+    {
+        let mut queue = state.pending_queue.lock().await;
+        let before = queue.len();
+        queue.retain(|q| {
+            snapshot
+                .tabs
+                .iter()
+                .any(|t| t.session_id.as_deref() == Some(q.session_id.as_str()))
+        });
+        let dropped = before - queue.len();
+        if dropped > 0 {
+            debug!(dropped, "queued permission alerts dropped — wrapper(s) gone");
+        }
+    }
+
     // Snapshot what we need under the lock.
     let snapshot_session = {
         let guard = state.alert_state.lock().await;
         let Some(sid) = guard.session_id() else {
+            // No active alert — but a queued one might now be installable
+            // (if a wrapper just appeared while we had nothing showing).
+            drop(guard);
+            try_install_next_pending(state).await;
             return;
         };
         sid.to_string()
@@ -540,7 +753,10 @@ pub async fn refresh_for_tabs(
             if let Err(e) = hid.clear_alert(old_index) {
                 debug!(error = %e, "clear_alert (wrapper gone) failed");
             }
+            drop(hid);
             debug!(session = %snapshot_session, "alert cancelled — wrapper for session is gone");
+            // Slot opened up; promote a queued Pending if any.
+            try_install_next_pending(state).await;
         }
         Some(new_idx) if new_idx != old_index => {
             // Tab list reordered — re-render at the new index.

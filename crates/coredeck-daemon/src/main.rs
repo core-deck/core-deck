@@ -68,6 +68,10 @@ pub struct DaemonState {
     /// What's currently displayed on the device's alert overlay (idle
     /// notification / pending permission decision / nothing).
     pub alert_state: Mutex<alerts::AlertState>,
+    /// Pending permission alerts that arrived while another alert was
+    /// already showing. Popped when the active alert resolves so the
+    /// user doesn't miss prompts from parallel Claude sessions.
+    pub pending_queue: Mutex<std::collections::VecDeque<alerts::QueuedPending>>,
     /// Listen address (for hooks install to know the URL)
     pub listen_addr: String,
 }
@@ -199,6 +203,7 @@ fn main() {
         claude_state: RwLock::new(ClaudeState::default()),
         wrappers: RwLock::new(HashMap::new()),
         alert_state: Mutex::new(alerts::AlertState::default()),
+        pending_queue: Mutex::new(std::collections::VecDeque::new()),
         listen_addr: cli.listen.clone(),
     });
 
