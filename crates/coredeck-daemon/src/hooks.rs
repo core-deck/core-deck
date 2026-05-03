@@ -547,10 +547,35 @@ fn now_unix() -> u64 {
 /// "{name}: {detail}" string against this so the prefix is accounted for.
 const MAX_TASK_LINE_CHARS: usize = 30;
 
+/// Tool-specific glyph prefix for the device. `TaskCreate` and
+/// `TaskComplete` swap their long `Tool:` text prefix for a single
+/// checkbox glyph — frees up screen real estate and reads as a
+/// to-do bullet at a glance. Returns `None` for tools that should
+/// keep the standard `Name: detail` format.
+fn checkbox_prefix(tool: &str) -> Option<&'static str> {
+    match tool {
+        "TaskCreate" => Some("☐ "),
+        "TaskComplete" => Some("☑ "),
+        _ => None,
+    }
+}
+
 /// Extract a short task description from tool_name + tool_input for HID display.
 fn extract_task_text(tool_name: Option<&str>, tool_input: Option<&serde_json::Value>) -> String {
     let name = tool_name.unwrap_or("Working");
     let detail = tool_input.and_then(|v| pick_detail(name, v)).unwrap_or_default();
+    if let Some(prefix) = checkbox_prefix(name) {
+        if detail.is_empty() {
+            return prefix.trim_end().to_string();
+        }
+        let prefix_chars = prefix.chars().count();
+        let detail_budget = MAX_TASK_LINE_CHARS.saturating_sub(prefix_chars);
+        if detail_budget == 0 {
+            return prefix.trim_end().to_string();
+        }
+        let detail_short = truncate_for_display(&detail, detail_budget);
+        return format!("{prefix}{detail_short}");
+    }
     if detail.is_empty() {
         return truncate_left(name, MAX_TASK_LINE_CHARS);
     }
