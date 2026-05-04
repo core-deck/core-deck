@@ -379,12 +379,20 @@ fn build_ssh_command(
         .map(|a| sh_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
-    let remote_cmd = format!(
+    // `claude` is found via the user's PATH on the remote, so we run
+    // through their login shell — bash sources .bash_profile, zsh sources
+    // .zprofile/.zshenv, etc. Non-interactive ssh shells skip those by
+    // default. `$SHELL` is set by the user's login shell on connect, so
+    // it's the right invocation regardless of whether the user is on
+    // bash, zsh, fish (well — fish needs --login, but that's a corner
+    // case; documented as "put PATH in .zshenv / .bash_profile").
+    let inner_cmd = format!(
         "COREDECK_WRAPPER_ID={} COREDECK_DAEMON_URL=http://127.0.0.1:{} exec claude {}",
         sh_quote(wrapper_id),
         remote_port,
         claude_argv,
     );
+    let remote_cmd = format!("exec \"$SHELL\" -l -c {}", sh_quote(&inner_cmd));
 
     let mut cmd = CommandBuilder::new("ssh");
     cmd.arg("-t");
