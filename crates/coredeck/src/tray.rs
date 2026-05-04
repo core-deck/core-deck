@@ -31,6 +31,8 @@ pub enum DaemonTrayAction {
     FocusWrapper(String),
     /// Open the settings page in the user's default browser.
     OpenSettings,
+    /// Install Claude Code hooks (only shown when not already installed).
+    InstallHooks,
     /// Quit the daemon
     Quit,
 }
@@ -51,6 +53,12 @@ pub struct DaemonTrayManager {
     /// MenuId → wrapper_id, used by the event thread to translate clicks
     /// on dynamic tab entries into `FocusWrapper` actions.
     tab_dispatch: Arc<Mutex<HashMap<MenuId, String>>>,
+    /// "Install Claude Code hooks…" menu item, present only when hooks
+    /// aren't installed in ~/.claude/settings.json.
+    install_hooks_item: Option<MenuItem>,
+    /// MenuId of the install-hooks item when present, so the event
+    /// thread can recognise its click.
+    install_hooks_id: Arc<Mutex<Option<MenuId>>>,
 }
 
 impl DaemonTrayManager {
@@ -92,20 +100,30 @@ impl DaemonTrayManager {
 
         let (action_tx, action_rx) = std::sync::mpsc::channel();
         let tab_dispatch: Arc<Mutex<HashMap<MenuId, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let install_hooks_id: Arc<Mutex<Option<MenuId>>> = Arc::new(Mutex::new(None));
 
         // Menu event handler thread
         let quit_id_clone = quit_id.clone();
         let settings_id_clone = settings_id.clone();
         let tab_dispatch_clone = Arc::clone(&tab_dispatch);
+        let install_hooks_id_clone = Arc::clone(&install_hooks_id);
         std::thread::spawn(move || {
             let receiver = MenuEvent::receiver();
             loop {
                 if let Ok(event) = receiver.recv() {
                     debug!("Daemon menu event: {:?}", event);
+                    let install_hooks_match = install_hooks_id_clone
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.clone())
+                        .map(|id| id == event.id)
+                        .unwrap_or(false);
                     let action = if event.id == quit_id_clone {
                         Some(DaemonTrayAction::Quit)
                     } else if event.id == settings_id_clone {
                         Some(DaemonTrayAction::OpenSettings)
+                    } else if install_hooks_match {
+                        Some(DaemonTrayAction::InstallHooks)
                     } else {
                         tab_dispatch_clone
                             .lock()
@@ -131,6 +149,8 @@ impl DaemonTrayManager {
             tab_items: Vec::new(),
             empty_placeholder: Some(empty),
             tab_dispatch,
+            install_hooks_item: None,
+            install_hooks_id,
         };
 
         Ok((manager, action_rx))
@@ -228,6 +248,48 @@ impl DaemonTrayManager {
             _ => "Firmware —".to_string(),
         };
         self.device_firmware_item.set_text(firmware_label);
+    }
+
+    /// Show or hide the "Install Claude Code hooks…" menu row depending
+    /// on whether hooks are present in `~/.claude/settings.json`. Sits
+    /// just above the Settings/Quit pair so the user discovers it the
+    /// first time they open the menu after a fresh install.
+    pub fn set_hooks_installed(&mut self, installed: bool) {
+        if installed {
+            if let Some(item) = self.install_hooks_item.take() {
+                let _ = self.menu.remove(&item as &dyn IsMenuItem);
+                if let Ok(mut g) = self.install_hooks_id.lock() {
+                    *g = None;
+                }
+            }
+            return;
+        }
+        if self.install_hooks_item.is_some() {
+            return;
+        }
+        let item = MenuItem::new("⚠ Install Claude Code hooks…", true, None);
+        if let Ok(mut g) = self.install_hooks_id.lock() {
+            *g = Some(item.id().clone());
+        }
+        let position = self.settings_position();
+        if let Err(e) = self.menu.insert(&item, position) {
+            error!("Failed to insert install-hooks item: {}", e);
+            return;
+        }
+        self.install_hooks_item = Some(item);
+    }
+
+    /// Index of the Settings menu item in the current menu. Used as the
+    /// insertion point for the "Install hooks" warning row.
+    fn settings_position(&self) -> usize {
+        // Layout: [name, firmware, sep, dynamic_tabs|placeholder, sep, settings, quit]
+        let dynamic = if self.tab_items.is_empty() {
+            if self.empty_placeholder.is_some() { 1 } else { 0 }
+        } else {
+            self.tab_items.len()
+        };
+        // 3 = name + firmware + first separator. +1 = second separator.
+        3 + dynamic + 1
     }
 }
 

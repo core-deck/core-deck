@@ -129,6 +129,14 @@ The daemon hosts every user-facing surface:
   the cs.* relaxations (allow-jit, allow-unsigned-executable-memory,
   disable-library-validation) were removed; a pure Rust daemon
   doesn't need them and they only weaken hardened runtime.
+- **Installer ergonomics.** `brew install --cask` ships the .app and
+  symlinks both binaries onto PATH; `coredeck setup` chains
+  `hooks install` + idempotent launchd registration in one shot, then
+  prints the `alias claude=coredeck-claude` snippet (we deliberately
+  don't auto-edit the user's shell rc). The cask uninstall stops the
+  launchd agent and `--zap` clears hook config + logs. For users who
+  install the .app from a DMG without brew, the tray menu surfaces an
+  "⚠ Install Claude Code hooks…" item until hooks are present.
 
 ---
 
@@ -145,9 +153,6 @@ The daemon hosts every user-facing surface:
 - **Linux / Windows.** PTY + raw mode + SIGWINCH work on Unix via
   `portable-pty` + `crossterm`. Windows needs ConPTY validation;
   Linux should be fine but unverified.
-- **Installer ergonomics.** `brew install` + a `coredeck setup`
-  command that installs the daemon, registers launchd, runs
-  `hooks install`, sets up the `claude` alias. Today all manual.
 
 ---
 

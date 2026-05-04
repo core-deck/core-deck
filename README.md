@@ -30,7 +30,25 @@ Output binaries: `target/release/coredeck` and `target/release/coredeck-claude`.
 
 See [docs/Building.md](docs/Building.md) for Linux dependencies, individual crate builds, and detailed notes.
 
-## Running
+## Install
+
+The fastest path on macOS is via Homebrew:
+
+```bash
+brew install --cask core-deck/coredeck/coredeck
+coredeck setup
+```
+
+`brew install` drops `Core Deck.app` into `/Applications` and exposes
+both `coredeck` and `coredeck-claude` on your PATH. `coredeck setup`
+installs the Claude Code hooks and registers the launchd auto-start
+agent. After that, alias `claude` to the wrapper in your shell rc:
+
+```bash
+alias claude="coredeck-claude"
+```
+
+If you'd rather drive things by hand:
 
 ```bash
 # One-time: register Claude Code hooks (writes ~/.claude/settings.json
@@ -44,8 +62,7 @@ coredeck
 # Install as launchd service for auto-start (macOS)
 coredeck install
 
-# In a separate terminal, launch Claude under the wrapper. Aliasing
-# `claude` to `coredeck-claude` is the smoothest path.
+# In a separate terminal, launch Claude under the wrapper.
 coredeck-claude
 ```
 

@@ -168,21 +168,46 @@ spctl --assess --type execute -vvv "dist/Core Deck.app"
 
 ## Hooking up the wrapper
 
-After dragging `Core Deck.app` to `/Applications`, expose
-`coredeck-claude` on the user's `PATH` so it can replace the
-`claude` command. The simplest path is a symlink:
+The Homebrew cask in [`macos/Casks/coredeck.rb`](Casks/coredeck.rb)
+puts both `coredeck` and `coredeck-claude` on PATH automatically.
+After `brew install --cask core-deck/coredeck/coredeck`, run:
 
 ```bash
-sudo ln -sf "/Applications/Core Deck.app/Contents/MacOS/coredeck-claude" \
-            /usr/local/bin/coredeck-claude
-
-# Optional: alias claude to the wrapper
+coredeck setup
 echo 'alias claude="coredeck-claude"' >> ~/.zshrc
 ```
 
-The daemon is also accessible the same way (e.g. for `coredeck hooks
-install` from the shell), but day-to-day it's launched by the bundle
-or by launchd, not invoked manually.
+For users who install the .app from the DMG directly (no brew), they
+need to symlink the binaries themselves:
+
+```bash
+sudo ln -sf "/Applications/Core Deck.app/Contents/MacOS/coredeck" \
+            /usr/local/bin/coredeck
+sudo ln -sf "/Applications/Core Deck.app/Contents/MacOS/coredeck-claude" \
+            /usr/local/bin/coredeck-claude
+coredeck setup
+```
+
+If they skip `coredeck setup`, the tray menu shows an "⚠ Install
+Claude Code hooks…" row until they click it; `coredeck` won't see
+any Claude sessions until those hooks are installed.
+
+## Publishing the cask
+
+The cask file lives in this repo at `macos/Casks/coredeck.rb` for
+co-evolution with the binaries it points at. Releases publish it to
+the tap repo at <https://github.com/core-deck/homebrew-coredeck>:
+
+1. Tag and push: `git tag v0.1.0 && git push --tags` triggers
+   `release.yml`, which builds a signed/notarized DMG and creates a
+   draft GitHub release.
+2. Promote the draft to published. Note the SHA-256 from the release
+   page or `shasum -a 256 dist/CoreDeck-0.1.0.dmg`.
+3. In the tap repo, copy `macos/Casks/coredeck.rb` to `Casks/coredeck.rb`,
+   replace `sha256 :no_check` with the real digest, and bump
+   `version` if needed. Commit + push.
+4. Smoke test from a clean machine:
+   `brew install --cask core-deck/coredeck/coredeck`.
 
 ## App Store
 

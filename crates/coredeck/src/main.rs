@@ -117,6 +117,8 @@ enum Commands {
         #[command(subcommand)]
         action: HooksAction,
     },
+    /// One-shot setup: install hooks, register launchd, print alias hint
+    Setup,
 }
 
 #[derive(Subcommand)]
@@ -151,6 +153,10 @@ fn main() {
                 HooksAction::Install => hooks::install_claude_hooks(&cli.listen),
                 HooksAction::Uninstall => hooks::uninstall_claude_hooks(),
             }
+            return;
+        }
+        Some(Commands::Setup) => {
+            run_setup(&cli.listen);
             return;
         }
         None => {}
@@ -230,6 +236,9 @@ fn main() {
         info!("Emitting initial DeviceAvailable for already-connected device: {}", name);
         let _ = initial_event_tx.send(DaemonEvent::DeviceAvailable { device_name: name });
     }
+
+    // Seed the tray with the initial hooks-installed state.
+    state.send_tray_update(TrayUpdate::HooksInstalled(hooks::are_hooks_installed()));
 
     // Run the tokio runtime + axum server on a spawned thread.
     // The winit event loop must run on the main thread (required for tray on macOS).
@@ -581,6 +590,9 @@ fn run_main_event_loop(
                         TrayUpdate::Tabs(list) => {
                             tray.set_tabs(&list);
                         }
+                        TrayUpdate::HooksInstalled(installed) => {
+                            tray.set_hooks_installed(installed);
+                        }
                     }
                 }
             }
@@ -610,6 +622,15 @@ fn run_main_event_loop(
                             );
                             info!(url = %url, "opening settings page");
                             open_url_in_browser(&url);
+                        }
+                        tray::DaemonTrayAction::InstallHooks => {
+                            let listen = self.state.listen_addr.clone();
+                            let state = Arc::clone(&self.state);
+                            std::thread::spawn(move || {
+                                hooks::install_claude_hooks(&listen);
+                                let installed = hooks::are_hooks_installed();
+                                state.send_tray_update(TrayUpdate::HooksInstalled(installed));
+                            });
                         }
                         tray::DaemonTrayAction::Quit => {
                             info!("Quit requested from tray");
@@ -731,7 +752,15 @@ fn install_launchd(listen: &str) {
         std::fs::create_dir_all(&plist_dir).expect("Failed to create LaunchAgents dir");
         std::fs::write(&plist_path, plist).expect("Failed to write plist");
 
-        // Load the plist
+        // Idempotent reload: unload silently first (no-op if not loaded), then
+        // load the (possibly updated) plist. Using `bootout`+`bootstrap` would
+        // be cleaner on modern macOS but requires the per-uid domain spelled
+        // out, and `load`/`unload` still works.
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", &plist_path])
+            .stderr(std::process::Stdio::null())
+            .status();
+
         let status = std::process::Command::new("launchctl")
             .args(["load", &plist_path])
             .status()
@@ -749,6 +778,27 @@ fn install_launchd(listen: &str) {
         let _ = listen;
         eprintln!("launchd is only available on macOS");
     }
+}
+
+/// One-shot setup: install Claude Code hooks, register launchd, and tell
+/// the user how to alias `claude` to the wrapper. Idempotent — safe to
+/// re-run after upgrading.
+fn run_setup(listen: &str) {
+    println!("=== CoreDeck setup ===\n");
+
+    println!("1/2 Installing Claude Code hooks…");
+    hooks::install_claude_hooks(listen);
+
+    println!("\n2/2 Registering launchd auto-start…");
+    install_launchd(listen);
+
+    println!();
+    println!("Done. To finish, alias `claude` to the wrapper in your shell rc:");
+    println!();
+    println!("  # ~/.zshrc (or ~/.bashrc)");
+    println!("  alias claude=\"coredeck-claude\"");
+    println!();
+    println!("Then `claude` in any terminal will run under CoreDeck.");
 }
 
 fn uninstall_launchd() {

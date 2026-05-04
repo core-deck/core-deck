@@ -214,15 +214,25 @@ pub async fn post_hooks_install(
 ) -> impl IntoResponse {
     // Use the daemon's listen address from state
     let listen_addr = &state.listen_addr;
-    match hooks::install_hooks_result(listen_addr) {
+    let result = hooks::install_hooks_result(listen_addr);
+    state.send_tray_update(crate::state::TrayUpdate::HooksInstalled(
+        hooks::are_hooks_installed(),
+    ));
+    match result {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })).into_response(),
     }
 }
 
 /// POST /api/hooks/uninstall — remove CoreDeck hooks from ~/.claude/settings.json
-pub async fn post_hooks_uninstall() -> impl IntoResponse {
-    match hooks::uninstall_hooks_result() {
+pub async fn post_hooks_uninstall(
+    State(state): State<Arc<DaemonState>>,
+) -> impl IntoResponse {
+    let result = hooks::uninstall_hooks_result();
+    state.send_tray_update(crate::state::TrayUpdate::HooksInstalled(
+        hooks::are_hooks_installed(),
+    ));
+    match result {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })).into_response(),
     }

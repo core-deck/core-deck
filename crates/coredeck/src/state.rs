@@ -217,4 +217,7 @@ pub enum TrayUpdate {
     DeviceUnavailable,
     /// Wrapper tab list snapshot for the tray menu to render.
     Tabs(WrapperTabList),
+    /// Whether Claude Code hooks are installed in ~/.claude/settings.json.
+    /// Drives the "Install Claude Code hooks…" tray menu item.
+    HooksInstalled(bool),
 }
