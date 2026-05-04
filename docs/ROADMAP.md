@@ -332,6 +332,17 @@ Cosmetic but pleasant.
 - **Per-wrapper YOLO**: today YOLO is a global flag on the device. Could
   be per-session (the device shows N tabs, user can YOLO one without
   affecting the rest).
+- **Active-tab not switching when a new wrapper opens focused**: opening
+  a new claude session in a freshly-focused terminal sometimes leaves
+  the device pointing at the previously-active wrapper. Suspected race
+  between Register / SessionStart hook / OSC 1004 focus-in — the first
+  two arrive before the focus event so `active_wrapper_id` is set
+  from `claude.active_session_id` (the most-recently-touched session,
+  which on a brand-new wrapper is itself), but a stale FocusOut from
+  the previous wrapper or a missing FocusIn from the new one can
+  override it. Repro is intermittent — capture the daemon log next
+  time and look for `set_active_wrapper from focus-in failed` or a
+  late FocusOut around the new wrapper's Register.
 - **Resume mapping**: when a user runs `claude --resume <id>` inside a
   wrapper, the wrapper should ideally know the resumed session_id
   ahead of time (today it learns it lazily via the SessionStart hook,

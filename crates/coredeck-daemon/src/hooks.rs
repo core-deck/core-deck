@@ -857,20 +857,19 @@ async fn handle_pre_tool_use(
         return StatusCode::OK.into_response();
     }
 
-    let task = extract_task_text(event.tool_name.as_deref(), event.tool_input.as_ref());
     let summary = extract_tool_summary(event.tool_name.as_deref(), event.tool_input.as_ref());
-    debug!("PreToolUse: {}", task);
+    debug!("PreToolUse: {} ({})", event.tool_name.as_deref().unwrap_or("?"), summary);
 
     if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
         let s = claude.touch_session(sid);
         s.current_tool = event.tool_name.clone();
-        // When a task is the headline, keep the task subject visible
-        // and let the tool detail flow into `last_tool_summary` (the
-        // device's second line) — otherwise the task name flickers
-        // away on every Read/Bash/Edit.
+        // Line 1 stays a calm "Thinking…" through tool execution — the
+        // tool detail belongs on line 2 via `last_tool_summary`. When
+        // a TaskCreate task owns the headline, keep its subject pinned
+        // instead.
         if s.active_task_id.is_none() {
-            s.current_task = Some(task);
+            s.current_task = Some("Thinking…".to_string());
         }
         s.last_tool_summary = Some(summary);
         s.tool_count_this_turn = s.tool_count_this_turn.saturating_add(1);

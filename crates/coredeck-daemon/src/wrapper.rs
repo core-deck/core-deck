@@ -387,16 +387,17 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
         .unwrap_or_default();
     // Line 2 priority: when a subagent is taking line 1, use the parent's
     // own current_task (it'll usually be "Thinking…") on line 2 so the
-    // user can still see the parent is alive. Otherwise keep the existing
-    // todo > last_tool_summary order.
+    // user can still see the parent is alive. Otherwise prefer the
+    // todo headline, then fall through to last_tool_summary — this
+    // shows the running tool's detail (no `Bash:` / `WebFetch:` prefix,
+    // since `extract_tool_summary` strips those) while line 1 stays a
+    // calm "Thinking…".
     let task2 = if active.subagent_label.is_some() {
         active.current_task.clone().unwrap_or_default()
     } else if let Some(todo) = active.current_todo.as_deref() {
         todo.to_string()
-    } else if active.current_tool.is_none() {
-        active.last_tool_summary.clone().unwrap_or_default()
     } else {
-        String::new()
+        active.last_tool_summary.clone().unwrap_or_default()
     };
     let tabs_state: Vec<u8> = snapshot.tabs.iter().map(|t| t.tab_state).collect();
 
