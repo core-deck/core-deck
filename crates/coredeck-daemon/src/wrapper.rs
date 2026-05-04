@@ -395,11 +395,14 @@ fn short_cwd_label(cwd: &str) -> String {
     format!("…{tail}")
 }
 
-/// Pick the most informative subagent row for the device's task line.
-/// Prefers the first one whose status looks "in flight" (anything that
-/// isn't a known terminal state), so the display tracks live work even
-/// when Claude Code keeps completed rows visible briefly. Returns
-/// `None` when no subagents are reported.
+/// Pick the in-flight subagent row for the device's task line. Returns
+/// `None` when no subagents are reported OR every reported row is in
+/// a terminal state — Claude Code keeps completed rows in its panel
+/// for a few seconds for UX, but on the device that just pins a stale
+/// "Explore" label after the subagent has finished and the parent has
+/// moved on. PostToolUse(Task) also clears the list, but the panel
+/// tick can repopulate it with terminal rows after that fires; the
+/// only safe rule is "no in-flight row → no label".
 fn subagent_label(s: &crate::state::SessionState) -> Option<String> {
     if s.subagents.is_empty() {
         return None;
@@ -407,8 +410,7 @@ fn subagent_label(s: &crate::state::SessionState) -> Option<String> {
     let row = s
         .subagents
         .iter()
-        .find(|r| !is_terminal_status(r.status.as_deref()))
-        .or_else(|| s.subagents.first())?;
+        .find(|r| !is_terminal_status(r.status.as_deref()))?;
     let label = row
         .label
         .as_deref()
@@ -416,7 +418,13 @@ fn subagent_label(s: &crate::state::SessionState) -> Option<String> {
         .or(row.name.as_deref())
         .unwrap_or("Subagent")
         .to_string();
-    let total = s.subagents.len();
+    // Count only non-terminal rows in the prefix — terminal ones
+    // shouldn't inflate the "(N)" badge.
+    let total = s
+        .subagents
+        .iter()
+        .filter(|r| !is_terminal_status(r.status.as_deref()))
+        .count();
     if total > 1 {
         Some(format!("({total}) {label}"))
     } else {
