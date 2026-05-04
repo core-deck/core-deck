@@ -947,18 +947,26 @@ async fn handle_permission_request(
     event: &HookEvent,
 ) -> axum::response::Response {
     let tool = event.tool_name.as_deref().unwrap_or("unknown");
-    let task = extract_task_text(
-        Some(tool),
-        event.tool_input.as_ref(),
-    );
+    let summary = extract_tool_summary(Some(tool), event.tool_input.as_ref());
+    // Used as the alert details below, where the tool name DOES belong.
+    let task = extract_task_text(Some(tool), event.tool_input.as_ref());
 
-    debug!("PermissionRequest: {}", task);
+    debug!("PermissionRequest: {} ({})", tool, summary);
 
     if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
         let s = claude.touch_session(sid);
         s.current_tool = event.tool_name.clone();
-        s.current_task = Some(task.clone());
+        // Same line-1 / line-2 split as PreToolUse: line 1 stays
+        // "Thinking…" (or a TaskCreate subject), the tool detail
+        // flows into last_tool_summary for line 2. Without this
+        // guard, PermissionRequest would clobber line 1 with the
+        // prefixed "Bash: …" string and leave it duplicated on
+        // line 2 once last_tool_summary updates.
+        if s.active_task_id.is_none() {
+            s.current_task = Some("Thinking…".to_string());
+        }
+        s.last_tool_summary = Some(summary);
     }
 
     // YOLO gating, with three guardrails:
