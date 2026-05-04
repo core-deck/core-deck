@@ -102,11 +102,15 @@ The daemon hosts every user-facing surface:
   focus-in instead of on-PR. Current on-PR trigger is good enough.)
 - **Robustness.** Wrapper has bounded-exponential WS reconnect
   backoff (1s→30s); daemon preserves prior `session_id` across
-  re-register. YOLO gates on `device_status.connected && yolo` so a
-  disconnected device can't auto-approve. `hooks install` is
-  non-destructive (deep-merge), and a curl shim
-  (`~/.claude/coredeck-hook.sh`) swallows ECONNREFUSED so claude
-  doesn't error when the daemon is down.
+  re-register. Cross-restart session caching: the daemon pushes a
+  `SessionBound` message to the wrapper after binding, the wrapper
+  caches the value, and a subsequent Register echoes it back so a
+  daemon restart restores the session→wrapper binding without
+  waiting for the user's next prompt. YOLO gates on
+  `device_status.connected && yolo` so a disconnected device can't
+  auto-approve. `hooks install` is non-destructive (deep-merge),
+  and a curl shim (`~/.claude/coredeck-hook.sh`) swallows
+  ECONNREFUSED so claude doesn't error when the daemon is down.
 - **Static settings page** at `/` and `/settings` — embedded HTML/JS,
   hosts the soft-key editor; tray "Open Settings…" launches the
   default browser. Hooks install/uninstall is also exposed via
@@ -116,10 +120,6 @@ The daemon hosts every user-facing surface:
 
 ## Open backlog
 
-- **Cross-restart session caching.** A daemon restart wipes the
-  in-memory wrapper map, so cross-restart session correlation needs
-  the next SessionStart hook to rebind. Possible fix: cache
-  `session_id` in the wrapper itself and re-send it in Register.
 - **Resume mapping.** When a user runs `claude --resume <id>` inside
   a wrapper, the wrapper learns the resumed session_id lazily via
   SessionStart. A small race window exists; could be closed by

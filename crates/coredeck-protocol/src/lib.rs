@@ -431,6 +431,13 @@ pub enum WrapperToDaemon {
         /// compat with older wrappers; daemon treats absence as `Unknown`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         host_terminal: Option<HostTerminal>,
+        /// Cached Claude `session_id` from a prior `SessionBound` frame.
+        /// Sent on reconnect so a daemon that lost its in-memory wrapper
+        /// map across a restart can re-bind without waiting for the next
+        /// SessionStart hook. Absent on the very first connect (wrapper
+        /// hasn't bound a session yet) and across older wrappers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
     },
     /// Best-effort signal that the child claude exited (wrapper is about to close).
     /// The daemon also treats WS close as unregister.
@@ -463,6 +470,12 @@ pub enum DaemonToWrapper {
     /// Write raw bytes to the child's PTY stdin (e.g. keystroke escapes,
     /// soft-key text, mode-cycle key).
     Write { bytes: Vec<u8> },
+    /// Sent after the daemon binds a Claude `session_id` to this
+    /// wrapper (typically right after the SessionStart hook posts
+    /// to `/wrapper/register`). The wrapper caches the value and
+    /// echoes it in the next `Register` frame so a daemon restart
+    /// can restore the binding without waiting on the next hook.
+    SessionBound { session_id: String },
 }
 
 /// Body for `POST /wrapper/register` — fired from the SessionStart command

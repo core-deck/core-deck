@@ -69,14 +69,22 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         }
     };
 
-    let (wrapper_id, pid, cwd, started_at_unix, host_terminal) = match register {
+    let (wrapper_id, pid, cwd, started_at_unix, host_terminal, cached_session_id) = match register {
         WrapperToDaemon::Register {
             wrapper_id,
             pid,
             cwd,
             started_at_unix,
             host_terminal,
-        } => (wrapper_id, pid, cwd, started_at_unix, host_terminal),
+            session_id: cached_session_id,
+        } => (
+            wrapper_id,
+            pid,
+            cwd,
+            started_at_unix,
+            host_terminal,
+            cached_session_id,
+        ),
         WrapperToDaemon::Goodbye { .. }
         | WrapperToDaemon::FocusChanged { .. }
         | WrapperToDaemon::TitleHint { .. } => {
@@ -96,22 +104,34 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
     // Channel that owns daemon→wrapper command flow.
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonToWrapper>();
 
-    // Insert into the registry. If the wrapper is reconnecting (same
-    // wrapper_id), keep its prior session_id so a brief WS flap doesn't
-    // unbind the Claude session — SessionStart only fires on session
-    // creation/resume, never on raw reconnect, so we'd otherwise lose
-    // the correlation until the user starts a new session.
-    {
+    // Insert into the registry. Two reconnect paths matter:
+    //   1. Brief WS flap, daemon process intact: the in-memory entry
+    //      still has session_id from the earlier SessionStart bind.
+    //      Keep it; SessionStart won't re-fire on raw reconnect.
+    //   2. Daemon restart: in-memory map is gone. The wrapper echoes
+    //      its last cached session_id in the Register frame, so we
+    //      adopt that and re-create a SessionState entry. This avoids
+    //      a "dead" tab on the device until the user types a new
+    //      prompt to trigger any hook.
+    let adopted_from_cache = {
         let mut wrappers = state.wrappers.write().await;
         let preserved_session_id = wrappers
             .get(&wrapper_id)
             .and_then(|w| w.session_id.clone());
-        if preserved_session_id.is_some() {
-            debug!(wrapper_id = %wrapper_id, "wrapper reconnect preserved session_id");
-        }
         let preserved_terminal_title = wrappers
             .get(&wrapper_id)
             .and_then(|w| w.terminal_title.clone());
+        let bound_session_id = preserved_session_id.clone().or(cached_session_id.clone());
+        let adopted = preserved_session_id.is_none() && cached_session_id.is_some();
+        if preserved_session_id.is_some() {
+            debug!(wrapper_id = %wrapper_id, "wrapper reconnect preserved session_id");
+        } else if adopted {
+            info!(
+                wrapper_id = %wrapper_id,
+                session_id = %cached_session_id.as_deref().unwrap_or(""),
+                "wrapper reconnect adopted cached session_id (daemon restart path)"
+            );
+        }
         wrappers.insert(
             wrapper_id.clone(),
             Wrapper {
@@ -119,12 +139,22 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                 pid,
                 cwd,
                 started_at_unix,
-                session_id: preserved_session_id,
+                session_id: bound_session_id,
                 host_terminal,
                 terminal_title: preserved_terminal_title,
                 tx: cmd_tx.clone(),
             },
         );
+        adopted
+    };
+    if adopted_from_cache {
+        if let Some(sid) = cached_session_id.as_deref() {
+            // Re-create an empty SessionState so the tab renders as
+            // STARTED (claude is running, just no hook data yet) rather
+            // than INACTIVE. Hook events will repopulate the rest.
+            let mut claude = state.claude_state.write().await;
+            claude.touch_session(sid);
+        }
     }
 
     // Ack.
@@ -208,16 +238,26 @@ pub async fn wrapper_register_session(
     State(state): State<Arc<DaemonState>>,
     Json(req): Json<WrapperRegisterSession>,
 ) -> impl IntoResponse {
-    let bound = {
+    let (bound, wrapper_tx) = {
         let mut wrappers = state.wrappers.write().await;
         if let Some(w) = wrappers.get_mut(&req.wrapper_id) {
             w.session_id = Some(req.session_id.clone());
-            true
+            (true, Some(w.tx.clone()))
         } else {
-            false
+            (false, None)
         }
     };
     if bound {
+        // Tell the wrapper about the binding so it can echo the
+        // session_id back on its next Register frame. That closes
+        // the daemon-restart gap: the next time the daemon comes up,
+        // the still-alive wrapper restores the binding immediately
+        // instead of waiting for the user's next prompt.
+        if let Some(tx) = wrapper_tx {
+            let _ = tx.send(DaemonToWrapper::SessionBound {
+                session_id: req.session_id.clone(),
+            });
+        }
         info!(
             wrapper_id = %req.wrapper_id,
             session_id = %req.session_id,

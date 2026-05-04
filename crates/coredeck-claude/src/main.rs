@@ -572,6 +572,10 @@ async fn run_ws(
     let url = format!("ws://{}/wrapper-ws", daemon_addr);
     let mut backoff_ms: u64 = 0;
     let mut announced_offline = false;
+    // Cache the daemon-bound session_id from the most recent
+    // SessionBound frame. Echoed back in every Register so a daemon
+    // restart can re-attach without waiting for the user's next prompt.
+    let mut cached_session_id: Option<String> = None;
 
     'reconnect: loop {
         if backoff_ms > 0 {
@@ -606,6 +610,7 @@ async fn run_ws(
             cwd: cwd.clone(),
             started_at_unix,
             host_terminal: Some(host_terminal.clone()),
+            session_id: cached_session_id.clone(),
         };
         let txt = match serde_json::to_string(&reg) {
             Ok(s) => s,
@@ -651,6 +656,10 @@ async fn run_ws(
                                     let _ = w.flush();
                                 }
                             }
+                        }
+                        DaemonToWrapper::SessionBound { session_id } => {
+                            debug!(session_id = %session_id, "wrapper cached session_id from daemon");
+                            cached_session_id = Some(session_id);
                         }
                     }
                 }
