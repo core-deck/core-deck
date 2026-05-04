@@ -336,7 +336,7 @@ pub async fn emit_tab_list(state: &Arc<DaemonState>) {
 /// collapse `$HOME` to `~` and otherwise show the full path. The
 /// device variant lives inline in `push_to_device` and uses
 /// `short_cwd_label` for the 24-char width. Remote (`--ssh`) tabs get
-/// a leading `↗ ` so they're easy to spot in the menu.
+/// a leading `↦ ` so they're easy to spot in the menu.
 pub fn tab_label_long(tab: &WrapperTab) -> String {
     let base = tab
         .session_name
@@ -344,7 +344,7 @@ pub fn tab_label_long(tab: &WrapperTab) -> String {
         .or_else(|| tab.terminal_title.clone())
         .unwrap_or_else(|| pretty_cwd(&tab.cwd));
     if tab.is_remote {
-        format!("↗ {}", base)
+        format!("↦ {}", base)
     } else {
         base
     }
@@ -436,11 +436,11 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
             .clone()
             .or_else(|| active.terminal_title.clone())
             .unwrap_or_else(|| short_cwd_label(&active.cwd));
-        // `↗ ` marks remote (`--ssh`) sessions on the device too. The
-        // glyph (U+2197 NORTH EAST ARROW) is in Terminus' standard
-        // coverage, so the firmware draws it without extra atlas work.
+        // `↦ ` marks remote (`--ssh`) sessions on the device too. The
+        // glyph (U+21A6 RIGHTWARDS ARROW FROM BAR) is in Terminus'
+        // coverage so the firmware draws it without extra atlas work.
         if active.is_remote {
-            format!("↗ {}", base)
+            format!("↦ {}", base)
         } else {
             base
         }

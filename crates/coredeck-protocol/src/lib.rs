@@ -440,7 +440,7 @@ pub enum WrapperToDaemon {
         session_id: Option<String>,
         /// True when the wrapper is running in `--ssh` mode (claude lives
         /// on a remote box, hooks fire through an SSH reverse tunnel).
-        /// The daemon prefixes the session label with `↗` so users can
+        /// The daemon prefixes the session label with `↦` so users can
         /// tell remote tabs apart at a glance.
         #[serde(default, skip_serializing_if = "is_false")]
         is_remote: bool,
@@ -560,7 +560,7 @@ pub struct WrapperTab {
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub subagent_count: u32,
     /// True when the underlying wrapper is in `--ssh` mode. UI surfaces
-    /// (tray menu, device label) prefix the title with `↗` so the user
+    /// (tray menu, device label) prefix the title with `↦` so the user
     /// can tell remote tabs apart at a glance.
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_remote: bool,
