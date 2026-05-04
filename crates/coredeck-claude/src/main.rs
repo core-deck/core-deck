@@ -225,8 +225,6 @@ const DEFAULT_CLAUDE_BINARY: &str = "claude";
 const CLAUDE_BINARY_ENV: &str = "COREDECK_CLAUDE_BIN";
 const DAEMON_ADDR_ENV: &str = "COREDECK_DAEMON_ADDR";
 const SSH_HOST_ENV: &str = "COREDECK_SSH_HOST";
-const REMOTE_PORT_MIN: u16 = 49152;
-const REMOTE_PORT_MAX: u16 = 65535;
 
 /// Best-effort detection of which terminal application hosts this wrapper,
 /// from environment variables set by the host. Order matters: tmux is
@@ -337,20 +335,6 @@ fn sh_quote(s: &str) -> String {
     out
 }
 
-/// Pick a port in the IANA dynamic range. We don't care if it's free on
-/// the remote — sshd binds with `ExitOnForwardFailure=yes`, so a
-/// collision exits ssh fast and the user re-runs. Cryptographic
-/// randomness isn't needed; nanos are fine and cheap.
-fn pick_remote_port() -> u16 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    let span = (REMOTE_PORT_MAX - REMOTE_PORT_MIN) as u32;
-    REMOTE_PORT_MIN + (nanos % span) as u16
-}
-
 /// Local TCP port the daemon listens on, parsed out of `daemon_addr`
 /// (`host:port` form). Falls back to 19384 on a parse miss.
 fn local_daemon_port(daemon_addr: &str) -> u16 {
@@ -361,7 +345,7 @@ fn local_daemon_port(daemon_addr: &str) -> u16 {
         .unwrap_or(19384)
 }
 
-/// Build the `ssh -t -R <port>:localhost:<daemon_port> <host> "<cmd>"`
+/// Build the `ssh -t -R <port>:localhost:<port> <host> "<cmd>"`
 /// invocation for remote-claude mode.
 ///
 /// The remote command opens the user's *interactive* login shell with
@@ -370,6 +354,14 @@ fn local_daemon_port(daemon_addr: &str) -> u16 {
 /// new -s work` then claude (so disconnects don't kill the session),
 /// `mosh-server` paired with another tool, etc. The wrapper provides
 /// the tunnel and the env; the user picks the workflow.
+///
+/// The remote port mirrors the local daemon port (default 19384) so
+/// that on disconnect-and-reconnect the tunnel rebinds to the same
+/// number. claude processes inside tmux have `COREDECK_DAEMON_URL`
+/// baked into their env at startup; if the port changed they'd be
+/// stranded. The mirror is the price of resilience: it implies one
+/// wrapper per remote host at a time. `ExitOnForwardFailure=yes`
+/// surfaces a clean error if a second wrapper tries to bind.
 ///
 /// If `claude_args` is non-empty, those args become the initial
 /// command run by the interactive shell (so existing
@@ -382,9 +374,9 @@ fn build_ssh_command(
     host: &str,
     wrapper_id: &str,
     claude_args: &[String],
-    local_daemon_port: u16,
+    daemon_port: u16,
 ) -> (CommandBuilder, u16) {
-    let remote_port = pick_remote_port();
+    let remote_port = daemon_port;
 
     // -li gives us a login *and* interactive shell so the user's full PATH
     // (.zshrc, .bashrc — interactive-only on most setups) is available.
@@ -411,7 +403,7 @@ fn build_ssh_command(
     let mut cmd = CommandBuilder::new("ssh");
     cmd.arg("-t");
     cmd.arg("-R");
-    cmd.arg(format!("{}:localhost:{}", remote_port, local_daemon_port));
+    cmd.arg(format!("{}:localhost:{}", remote_port, daemon_port));
     cmd.arg("-o");
     cmd.arg("ExitOnForwardFailure=yes");
     // Quieter ssh: skip the "Welcome to Ubuntu…" MOTD and the banner. Auth
