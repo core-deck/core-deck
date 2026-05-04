@@ -421,7 +421,7 @@ fi"##;
     // current shell so subsequent commands (and the eventually-exec'd
     // user shell) see it. POSIX-portable across bash/zsh/dash.
     let remote_cmd = format!(
-        "export COREDECK_WRAPPER_ID={}; export COREDECK_DAEMON_URL=http://127.0.0.1:{}; {} {}",
+        "export COREDECK_WRAPPER_ID={}; export COREDECK_DAEMON_URL=http://127.0.0.1:{}; {}; {}",
         sh_quote(wrapper_id),
         remote_port,
         tmux_propagate,
