@@ -233,7 +233,7 @@ fn format_tab_menu_label(tab: &WrapperTab, active_id: Option<&str>) -> String {
     let is_active = active_id == Some(tab.wrapper_id.as_str());
     let bullet = if is_active { "● " } else { "  " };
 
-    let name = crate::wrapper::tab_label(tab);
+    let name = crate::wrapper::tab_label_long(tab);
     let status = tab
         .current_task
         .clone()

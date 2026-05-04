@@ -1075,7 +1075,7 @@ fn deny_response() -> PermissionResponse {
 }
 
 /// Best-effort label for an alert's session line — prefers the session's
-/// `session_name`, then a right-truncated cwd via `tab_label`'s helper,
+/// `session_name`, then a right-truncated cwd via `short_cwd_label`,
 /// then "Claude". `prompt_summary` was deliberately dropped from this
 /// chain — first-prompt snippets like "fix the bug" produced device
 /// labels noisier than the cwd they replaced.

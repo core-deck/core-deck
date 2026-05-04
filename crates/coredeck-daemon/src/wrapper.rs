@@ -280,16 +280,68 @@ pub async fn emit_tab_list(state: &Arc<DaemonState>) {
     }
 }
 
-/// Pick the best human-friendly label for a tab, matching the priority
-/// the device uses: explicit session_name → OSC 9 terminal title →
-/// right-truncated cwd. The first-prompt summary used to live in this
-/// chain but was noisy ("what does this mean", "fix the bug") and
-/// rarely better than the cwd.
-pub fn tab_label(tab: &WrapperTab) -> String {
+/// Pick the best human-friendly label for a tab in the tray menu.
+/// Priority: explicit session_name → OSC 1/2 terminal title → cwd.
+/// The cwd fallback isn't middle-truncated — the menu has space, so we
+/// collapse `$HOME` to `~` and otherwise show the full path. The
+/// device variant lives inline in `push_to_device` and uses
+/// `short_cwd_label` for the 24-char width.
+pub fn tab_label_long(tab: &WrapperTab) -> String {
     tab.session_name
         .clone()
         .or_else(|| tab.terminal_title.clone())
-        .unwrap_or_else(|| short_cwd_label(&tab.cwd))
+        .unwrap_or_else(|| pretty_cwd(&tab.cwd))
+}
+
+/// Soft cap for tray-menu cwd labels — wider than the device's 24,
+/// narrow enough that long status suffixes still fit. The cap is
+/// soft: when the deepest path segment alone exceeds it we keep the
+/// segment whole rather than truncating mid-word, since `…/exante`
+/// `-cabinet-onboarding-automation` reads worse than just letting
+/// the line grow a bit.
+const TRAY_CWD_CAP: usize = 32;
+
+fn pretty_cwd(cwd: &str) -> String {
+    let trimmed = cwd.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let with_home = home_subst(trimmed);
+    let total = with_home.chars().count();
+    if total <= TRAY_CWD_CAP {
+        return with_home;
+    }
+    // Tail-truncate, then snap to the next `/` so we never split a
+    // segment mid-word. If the tail has no `/`, the deepest segment
+    // alone is over-budget — fall back to "…/<basename>" so the user
+    // still sees the directory they care about, in full.
+    let skip = total.saturating_sub(TRAY_CWD_CAP.saturating_sub(1));
+    let tail: String = with_home.chars().skip(skip).collect();
+    if let Some(slash) = tail.find('/') {
+        return format!("…{}", &tail[slash..]);
+    }
+    if let Some(slash) = with_home.rfind('/') {
+        return format!("…{}", &with_home[slash..]);
+    }
+    with_home
+}
+
+fn home_subst(path: &str) -> String {
+    let Some(home) = std::env::var_os("HOME") else {
+        return path.to_string();
+    };
+    let home = home.to_string_lossy();
+    let home_trim = home.trim_end_matches('/');
+    if home_trim.is_empty() {
+        return path.to_string();
+    }
+    if path == home_trim {
+        return "~".to_string();
+    }
+    if let Some(rest) = path.strip_prefix(&format!("{home_trim}/")) {
+        return format!("~/{rest}");
+    }
+    path.to_string()
 }
 
 /// Return the current tab-list index of the wrapper bound to `session_id`,
