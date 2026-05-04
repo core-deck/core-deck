@@ -68,6 +68,32 @@ coredeck-claude
 
 The wrapper sets `COREDECK_WRAPPER_ID` in claude's env; the SessionStart hook (installed by `hooks install`) correlates that wrapper to the live `session_id` so the daemon can route HID input and per-session state correctly.
 
+## Remote Claude over SSH
+
+Run claude on a remote dev box with the device still wired to your
+laptop. The wrapper opens an interactive remote shell with hooks
+plumbed back through an SSH reverse tunnel:
+
+```bash
+# One-time, from your laptop: install hooks on the remote box.
+coredeck setup --remote user@dev-box
+
+# Drop into a remote shell with COREDECK_WRAPPER_ID + COREDECK_DAEMON_URL
+# pre-set and the tunnel up. Run claude (or `tmux new` then claude) from
+# the prompt that appears.
+coredeck-claude --ssh user@dev-box
+```
+
+Hooks fire from the remote claude back through the tunnel to the
+daemon on your laptop, so soft keys, the rotary encoder, alerts, and
+session state work the same as for local sessions. tmux is supported —
+the wrapper propagates env into the running tmux server on connect, so
+new windows and panes inherit the right ids.
+
+Trust boundary is SSH itself; no tokens, no TLS. One wrapper per remote
+host at a time (the tunnel mirrors the local daemon port and fails fast
+on collision).
+
 ## Quick API Test
 
 With the daemon running:
