@@ -200,6 +200,10 @@ pub struct Wrapper {
     /// label fallback chain — informative when claude or a tool sets it,
     /// silent (None) the rest of the time.
     pub terminal_title: Option<String>,
+    /// True when the wrapper is in `--ssh` mode (claude lives on a remote
+    /// box, hooks come back through an SSH reverse tunnel). Used by tray
+    /// + device label code to prefix the title with `↗`.
+    pub is_remote: bool,
     /// Channel for sending DaemonToWrapper messages back over the wrapper's WS.
     pub tx: mpsc::UnboundedSender<DaemonToWrapper>,
 }

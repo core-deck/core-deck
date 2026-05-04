@@ -717,6 +717,7 @@ fn run() -> Result<i32> {
         .build()
         .context("tokio runtime")?;
 
+    let is_remote = ssh_host.is_some();
     let exit_code: i32 = rt.block_on(async move {
         let ws_handle = tokio::spawn(run_ws(
             daemon_addr.clone(),
@@ -725,6 +726,7 @@ fn run() -> Result<i32> {
             cwd.to_string_lossy().to_string(),
             started_at_unix,
             host_terminal,
+            is_remote,
             Arc::clone(&master_writer),
             focus_rx,
         ));
@@ -792,6 +794,7 @@ async fn run_ws(
     cwd: String,
     started_at_unix: u64,
     host_terminal: HostTerminal,
+    is_remote: bool,
     pty_writer: SharedWriter,
     mut focus_rx: mpsc::UnboundedReceiver<WrapperEvent>,
 ) {
@@ -840,6 +843,7 @@ async fn run_ws(
             started_at_unix,
             host_terminal: Some(host_terminal.clone()),
             session_id: cached_session_id.clone(),
+            is_remote,
         };
         let txt = match serde_json::to_string(&reg) {
             Ok(s) => s,

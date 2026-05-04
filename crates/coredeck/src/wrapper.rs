@@ -69,7 +69,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         }
     };
 
-    let (wrapper_id, pid, cwd, started_at_unix, host_terminal, cached_session_id) = match register {
+    let (wrapper_id, pid, cwd, started_at_unix, host_terminal, cached_session_id, is_remote) = match register {
         WrapperToDaemon::Register {
             wrapper_id,
             pid,
@@ -77,6 +77,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
             started_at_unix,
             host_terminal,
             session_id: cached_session_id,
+            is_remote,
         } => (
             wrapper_id,
             pid,
@@ -84,6 +85,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
             started_at_unix,
             host_terminal,
             cached_session_id,
+            is_remote,
         ),
         WrapperToDaemon::Goodbye { .. }
         | WrapperToDaemon::FocusChanged { .. }
@@ -142,6 +144,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                 session_id: bound_session_id,
                 host_terminal,
                 terminal_title: preserved_terminal_title,
+                is_remote,
                 tx: cmd_tx.clone(),
             },
         );
@@ -332,12 +335,19 @@ pub async fn emit_tab_list(state: &Arc<DaemonState>) {
 /// The cwd fallback isn't middle-truncated — the menu has space, so we
 /// collapse `$HOME` to `~` and otherwise show the full path. The
 /// device variant lives inline in `push_to_device` and uses
-/// `short_cwd_label` for the 24-char width.
+/// `short_cwd_label` for the 24-char width. Remote (`--ssh`) tabs get
+/// a leading `↗ ` so they're easy to spot in the menu.
 pub fn tab_label_long(tab: &WrapperTab) -> String {
-    tab.session_name
+    let base = tab
+        .session_name
         .clone()
         .or_else(|| tab.terminal_title.clone())
-        .unwrap_or_else(|| pretty_cwd(&tab.cwd))
+        .unwrap_or_else(|| pretty_cwd(&tab.cwd));
+    if tab.is_remote {
+        format!("↗ {}", base)
+    } else {
+        base
+    }
 }
 
 /// Soft cap for tray-menu cwd labels — wider than the device's 24,
@@ -420,11 +430,21 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
         None => return,
     };
 
-    let session_label = active
-        .session_name
-        .clone()
-        .or_else(|| active.terminal_title.clone())
-        .unwrap_or_else(|| short_cwd_label(&active.cwd));
+    let session_label = {
+        let base = active
+            .session_name
+            .clone()
+            .or_else(|| active.terminal_title.clone())
+            .unwrap_or_else(|| short_cwd_label(&active.cwd));
+        // `↗ ` marks remote (`--ssh`) sessions on the device too. The
+        // glyph (U+2197 NORTH EAST ARROW) is in Terminus' standard
+        // coverage, so the firmware draws it without extra atlas work.
+        if active.is_remote {
+            format!("↗ {}", base)
+        } else {
+            base
+        }
+    };
     // Line 1 priority: subagent label (parent's tools are subordinate while
     // a subagent is running) > the parent's current_task.
     let task = active
@@ -624,6 +644,7 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
                 cost_usd: session.and_then(|s| s.cost_usd),
                 subagent_label: session.and_then(subagent_label),
                 subagent_count: session.map(|s| s.subagents.len() as u32).unwrap_or(0),
+                is_remote: w.is_remote,
             }
         })
         .collect();

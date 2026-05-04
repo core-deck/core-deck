@@ -438,6 +438,12 @@ pub enum WrapperToDaemon {
         /// hasn't bound a session yet) and across older wrappers.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// True when the wrapper is running in `--ssh` mode (claude lives
+        /// on a remote box, hooks fire through an SSH reverse tunnel).
+        /// The daemon prefixes the session label with `↗` so users can
+        /// tell remote tabs apart at a glance.
+        #[serde(default, skip_serializing_if = "is_false")]
+        is_remote: bool,
     },
     /// Best-effort signal that the child claude exited (wrapper is about to close).
     /// The daemon also treats WS close as unregister.
@@ -553,10 +559,19 @@ pub struct WrapperTab {
     /// Zero when none are running.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub subagent_count: u32,
+    /// True when the underlying wrapper is in `--ssh` mode. UI surfaces
+    /// (tray menu, device label) prefix the title with `↗` so the user
+    /// can tell remote tabs apart at a glance.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub is_remote: bool,
 }
 
 fn is_zero_u32(n: &u32) -> bool {
     *n == 0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Daemon → app snapshot of every live wrapper.
