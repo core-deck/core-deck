@@ -393,8 +393,13 @@ fn build_ssh_command(
         format!("exec \"$SHELL\" -lic {}", sh_quote(&argv))
     };
 
+    // Shell prefix-assignment: `VAR=val exec cmd` exports VAR for the
+    // duration of the exec. Works in bash/zsh/dash. We can't do `env
+    // VAR=val exec ...` here because `env` doesn't accept the `exec`
+    // shell builtin as its program argument — that's what produced the
+    // first reported failure.
     let remote_cmd = format!(
-        "exec env COREDECK_WRAPPER_ID={} COREDECK_DAEMON_URL=http://127.0.0.1:{} {}",
+        "COREDECK_WRAPPER_ID={} COREDECK_DAEMON_URL=http://127.0.0.1:{} {}",
         sh_quote(wrapper_id),
         remote_port,
         inner,
