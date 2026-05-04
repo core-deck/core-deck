@@ -551,7 +551,14 @@ fn run_main_event_loop(
 
     impl ApplicationHandler for TrayApp {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            // WaitUntil lets us drain the mpsc channels (tray_update_rx,
+            // tray_action_rx) on a regular tick. Pure Wait would only fire
+            // about_to_wait on native UI events, which leaves async-side
+            // updates (hooks installed, wrapper connected) sitting in the
+            // channel until the user happens to open the menu.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(250),
+            ));
         }
 
         fn window_event(
@@ -562,6 +569,12 @@ fn run_main_event_loop(
         ) {}
 
         fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+            // Re-arm the periodic tick so the channels keep draining even
+            // when no native UI events arrive.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(250),
+            ));
+
             // Process tray updates from async code (non-blocking)
             while let Ok(update) = self.tray_update_rx.try_recv() {
                 if let Some(ref mut tray) = self.tray_manager {
