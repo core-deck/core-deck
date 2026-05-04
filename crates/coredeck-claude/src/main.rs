@@ -361,17 +361,55 @@ fn local_daemon_port(daemon_addr: &str) -> u16 {
         .unwrap_or(19384)
 }
 
+/// Probe the remote host for the absolute path to `claude`. Runs
+/// `"$SHELL" -ic 'command -v claude'` over ssh — interactive mode so
+/// the user's rc files load (PATH adjustments typically live in
+/// .zshrc/.bashrc, gated on `[[ $- == *i* ]]`). The probe is quiet:
+/// stderr of the inner shell is dropped (bash's job-control warnings
+/// in -ic mode), and only the stdout (the resolved path) is kept.
+///
+/// Returns Some(abs_path) on success, None if claude isn't found or
+/// ssh failed — the caller logs and falls back to bare `claude`.
+fn probe_remote_claude(host: &str) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let output = Command::new("ssh")
+        .args([
+            "-o", "BatchMode=no",
+            "-o", "ConnectTimeout=10",
+            host,
+            "\"$SHELL\" -ic 'command -v claude' 2>/dev/null",
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if path.is_empty() || !path.starts_with('/') {
+        return None;
+    }
+    Some(path)
+}
+
 /// Build the `ssh -t -R <port>:localhost:<daemon_port> <host> "<cmd>"`
 /// invocation for remote-claude mode. The remote command sets
 /// `COREDECK_WRAPPER_ID` and `COREDECK_DAEMON_URL` inline, then exec's
 /// `claude` with the user's pass-through args. We don't rely on
 /// SendEnv/AcceptEnv — those vary by sshd config; inline env always
 /// works.
+///
+/// `remote_claude_bin` is the absolute path discovered by
+/// `probe_remote_claude`, or just `"claude"` as a fallback. Using the
+/// absolute path means we don't need to wrestle with login-vs-non-
+/// interactive PATH semantics on the remote side.
 fn build_ssh_command(
     host: &str,
     wrapper_id: &str,
     claude_args: &[String],
     local_daemon_port: u16,
+    remote_claude_bin: &str,
 ) -> (CommandBuilder, u16) {
     let remote_port = pick_remote_port();
     let claude_argv = claude_args
@@ -379,20 +417,13 @@ fn build_ssh_command(
         .map(|a| sh_quote(a))
         .collect::<Vec<_>>()
         .join(" ");
-    // `claude` is found via the user's PATH on the remote, so we run
-    // through their login shell — bash sources .bash_profile, zsh sources
-    // .zprofile/.zshenv, etc. Non-interactive ssh shells skip those by
-    // default. `$SHELL` is set by the user's login shell on connect, so
-    // it's the right invocation regardless of whether the user is on
-    // bash, zsh, fish (well — fish needs --login, but that's a corner
-    // case; documented as "put PATH in .zshenv / .bash_profile").
-    let inner_cmd = format!(
-        "COREDECK_WRAPPER_ID={} COREDECK_DAEMON_URL=http://127.0.0.1:{} exec claude {}",
+    let remote_cmd = format!(
+        "COREDECK_WRAPPER_ID={} COREDECK_DAEMON_URL=http://127.0.0.1:{} exec {} {}",
         sh_quote(wrapper_id),
         remote_port,
+        sh_quote(remote_claude_bin),
         claude_argv,
     );
-    let remote_cmd = format!("exec \"$SHELL\" -l -c {}", sh_quote(&inner_cmd));
 
     let mut cmd = CommandBuilder::new("ssh");
     cmd.arg("-t");
@@ -485,11 +516,26 @@ fn run() -> Result<i32> {
     let (mut cmd, spawn_label) = match &ssh_host {
         Some(host) => {
             let port = local_daemon_port(&daemon_addr);
-            let (cmd, remote_port) = build_ssh_command(host, &wrapper_id, &args, port);
+            // Probe the remote for claude's absolute path (see
+            // probe_remote_claude). Falls back to bare "claude" if the
+            // probe fails — user gets a clear error if it's not on PATH.
+            let remote_bin = probe_remote_claude(host).unwrap_or_else(|| {
+                eprintln!(
+                    "coredeck-claude: couldn't locate `claude` on {} — \
+                     falling back to bare `claude`. Set COREDECK_REMOTE_CLAUDE_BIN \
+                     or ensure claude is in your interactive shell's PATH.",
+                    host
+                );
+                "claude".to_string()
+            });
+            let remote_bin = std::env::var("COREDECK_REMOTE_CLAUDE_BIN").unwrap_or(remote_bin);
+            let (cmd, remote_port) =
+                build_ssh_command(host, &wrapper_id, &args, port, &remote_bin);
             debug!(
                 ssh_host = %host,
                 remote_port,
                 local_daemon_port = port,
+                remote_claude_bin = %remote_bin,
                 "wrapper using SSH reverse tunnel for remote claude",
             );
             (cmd, format!("ssh {}", host))
