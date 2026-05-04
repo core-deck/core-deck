@@ -1728,6 +1728,12 @@ pub fn uninstall_claude_hooks() {
 }
 
 /// Check if CoreDeck hooks are installed in ~/.claude/settings.json.
+///
+/// Matches against the `coredeck-hook.sh` shim path (what `install` writes
+/// today) and the legacy direct-URL form (older installs that pointed at
+/// `127.0.0.1:19384/hooks/...`). Either signal is enough — the shim is
+/// what we ship now, but a user upgrading from a previous version may
+/// still have the URL form.
 pub fn are_hooks_installed() -> bool {
     let settings_path = claude_settings_path();
     let content = match std::fs::read_to_string(&settings_path) {
@@ -1740,7 +1746,10 @@ pub fn are_hooks_installed() -> bool {
     };
     if let Some(hooks) = settings.get("hooks") {
         let s = hooks.to_string();
-        if s.contains("127.0.0.1:19384/hooks/") || s.contains("localhost:19384/hooks/") {
+        if s.contains("coredeck-hook.sh")
+            || s.contains("127.0.0.1:19384/hooks/")
+            || s.contains("localhost:19384/hooks/")
+        {
             return true;
         }
     }
