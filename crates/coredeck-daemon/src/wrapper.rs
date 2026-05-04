@@ -193,7 +193,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         let mut wrappers = state.wrappers.write().await;
         wrappers.remove(&wrapper_id);
     }
-    drop_yolo_opt_in_for_wrapper(&state, &wrapper_id).await;
+    drop_yolo_enrollment_for_wrapper(&state, &wrapper_id).await;
     emit_tab_list(&state).await;
 
     info!(wrapper_id = %wrapper_id, "wrapper disconnected");
@@ -726,12 +726,25 @@ pub async fn active_wrapper_id(state: &DaemonState) -> Option<String> {
     sorted.first().map(|w| w.wrapper_id.clone())
 }
 
-/// Per-wrapper YOLO opt-in helpers. The opt-in set lives in
-/// `DaemonState::yolo_opt_in` and gates `PermissionRequest`
-/// auto-approve when global YOLO is on — see `handle_permission_request`.
+/// Per-wrapper Auto-approve enrollment helpers. Three states per wrapper:
+///
+/// - **opted-in** (`yolo_opt_in`): silent auto-approve.
+/// - **opted-out** (`yolo_opt_out`): user declined via Deny on the
+///   enrollment alert; daemon falls back to Claude's terminal prompt
+///   without re-asking until Auto-approve toggles or the wrapper exits.
+/// - **undecided** (in neither set): next PermissionRequest raises
+///   the enrollment alert.
+///
+/// Both sets are cleared wholesale by `clear_yolo_enrollment` on
+/// Auto-approve OFF and HID disconnect; per-wrapper entries drop on
+/// wrapper disconnect.
 pub async fn mark_yolo_opt_in(state: &DaemonState, wrapper_id: &str) {
     let mut set = state.yolo_opt_in.lock().await;
     set.insert(wrapper_id.to_string());
+    drop(set);
+    // A wrapper can't be in both sets at once.
+    let mut out = state.yolo_opt_out.lock().await;
+    out.remove(wrapper_id);
 }
 
 pub async fn is_yolo_opted_in(state: &DaemonState, wrapper_id: &str) -> bool {
@@ -739,14 +752,27 @@ pub async fn is_yolo_opted_in(state: &DaemonState, wrapper_id: &str) -> bool {
     set.contains(wrapper_id)
 }
 
-pub async fn drop_yolo_opt_in_for_wrapper(state: &DaemonState, wrapper_id: &str) {
-    let mut set = state.yolo_opt_in.lock().await;
-    set.remove(wrapper_id);
+pub async fn mark_yolo_opt_out(state: &DaemonState, wrapper_id: &str) {
+    let mut set = state.yolo_opt_out.lock().await;
+    set.insert(wrapper_id.to_string());
+    drop(set);
+    let mut in_set = state.yolo_opt_in.lock().await;
+    in_set.remove(wrapper_id);
 }
 
-pub async fn clear_yolo_opt_in(state: &DaemonState) {
-    let mut set = state.yolo_opt_in.lock().await;
-    set.clear();
+pub async fn is_yolo_opted_out(state: &DaemonState, wrapper_id: &str) -> bool {
+    let set = state.yolo_opt_out.lock().await;
+    set.contains(wrapper_id)
+}
+
+pub async fn drop_yolo_enrollment_for_wrapper(state: &DaemonState, wrapper_id: &str) {
+    state.yolo_opt_in.lock().await.remove(wrapper_id);
+    state.yolo_opt_out.lock().await.remove(wrapper_id);
+}
+
+pub async fn clear_yolo_enrollment(state: &DaemonState) {
+    state.yolo_opt_in.lock().await.clear();
+    state.yolo_opt_out.lock().await.clear();
 }
 
 /// Stash an OSC 9 title hint on the wrapper and re-emit the tab list

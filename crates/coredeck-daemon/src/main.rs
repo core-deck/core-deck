@@ -72,12 +72,19 @@ pub struct DaemonState {
     /// already showing. Popped when the active alert resolves so the
     /// user doesn't miss prompts from parallel Claude sessions.
     pub pending_queue: Mutex<std::collections::VecDeque<alerts::QueuedPending>>,
-    /// Wrapper IDs that have explicitly opted in to YOLO auto-approve
-    /// under the current global YOLO session. Populated on YOLO ON
-    /// (active wrapper auto-opts in) and on Allow of a per-wrapper
-    /// "YOLO {tool}?" alert. Cleared wholesale on YOLO OFF and on
-    /// HID disconnect; per-wrapper entries drop on wrapper disconnect.
+    /// Wrapper IDs that have explicitly opted in to Auto-approve
+    /// under the current global Auto-approve session. Populated on
+    /// Auto-approve ON (active wrapper auto-opts in) and on Allow of
+    /// the per-wrapper "Auto-approve this tab?" enrollment alert.
+    /// Cleared wholesale on Auto-approve OFF and HID disconnect;
+    /// per-wrapper entries drop on wrapper disconnect.
     pub yolo_opt_in: Mutex<std::collections::HashSet<String>>,
+    /// Wrapper IDs that have explicitly DECLINED enrollment via Deny
+    /// on the "Auto-approve this tab?" alert. Suppresses re-prompting
+    /// — the daemon falls back to Claude's terminal prompt for every
+    /// PermissionRequest from these wrappers until Auto-approve
+    /// toggles, the device disconnects, or the wrapper exits.
+    pub yolo_opt_out: Mutex<std::collections::HashSet<String>>,
     /// Listen address (for hooks install to know the URL)
     pub listen_addr: String,
 }
@@ -211,6 +218,7 @@ fn main() {
         alert_state: Mutex::new(alerts::AlertState::default()),
         pending_queue: Mutex::new(std::collections::VecDeque::new()),
         yolo_opt_in: Mutex::new(std::collections::HashSet::new()),
+        yolo_opt_out: Mutex::new(std::collections::HashSet::new()),
         listen_addr: cli.listen.clone(),
     });
 
@@ -349,7 +357,7 @@ async fn run_async(
                         status.mode_initialized = false;
                     }
                     // YOLO is gone, so the per-wrapper opt-in set is too.
-                    wrapper::clear_yolo_opt_in(&state_for_events).await;
+                    wrapper::clear_yolo_enrollment(&state_for_events).await;
 
                     state_for_events.send_tray_update(TrayUpdate::DeviceDisconnected);
                 }
@@ -416,7 +424,7 @@ async fn run_async(
                             }
                         }
                         Some(false) => {
-                            wrapper::clear_yolo_opt_in(&state_for_events).await;
+                            wrapper::clear_yolo_enrollment(&state_for_events).await;
                             info!("YOLO OFF — opt-in set cleared");
                         }
                         None => {}

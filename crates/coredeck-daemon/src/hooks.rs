@@ -983,18 +983,29 @@ async fn handle_permission_request(
         None => None,
     };
     if yolo && connected && tool != "ExitPlanMode" {
-        let opted_in = match &wrapper_id {
-            Some(wid) => crate::wrapper::is_yolo_opted_in(state, wid).await,
-            None => false,
+        let (opted_in, opted_out) = match &wrapper_id {
+            Some(wid) => (
+                crate::wrapper::is_yolo_opted_in(state, wid).await,
+                crate::wrapper::is_yolo_opted_out(state, wid).await,
+            ),
+            None => (false, false),
         };
         if opted_in {
             info!("YOLO: auto-approving {}", tool);
             return Json(allow_response()).into_response();
         }
+        if opted_out {
+            info!(
+                tool,
+                wrapper = ?wrapper_id,
+                "Auto-approve declined for this wrapper — passing to Claude's terminal prompt"
+            );
+            return Json(serde_json::json!({})).into_response();
+        }
         info!(
             tool,
             wrapper = ?wrapper_id,
-            "YOLO on but wrapper not opted in — surfacing opt-in alert"
+            "Auto-approve on but wrapper not enrolled — surfacing enrollment alert"
         );
     } else if yolo && !connected {
         info!("YOLO armed but device disconnected — NOT auto-approving {}", tool);
@@ -1094,8 +1105,15 @@ async fn handle_permission_request(
         Ok(Ok(DecisionOutcome::Deny)) => {
             if was_enrollment_alert {
                 // Deny on enrollment ≠ deny this PR. The user said
-                // "don't enroll this tab" — fall back to Claude's
-                // terminal prompt so they can decide per-PR there.
+                // "don't enroll this tab" — record the opt-out so we
+                // don't re-prompt on every subsequent PR, and fall
+                // back to Claude's terminal prompt for this request.
+                // The opt-out clears when Auto-approve toggles, the
+                // device disconnects, or the wrapper exits.
+                if let Some(wid) = wrapper_id.as_deref() {
+                    crate::wrapper::mark_yolo_opt_out(state, wid).await;
+                    info!(wrapper = wid, "Auto-approve declined");
+                }
                 Json(serde_json::json!({})).into_response()
             } else {
                 Json(deny_response()).into_response()
