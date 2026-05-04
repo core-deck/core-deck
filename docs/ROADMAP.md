@@ -76,6 +76,13 @@ The daemon hosts every user-facing surface:
   from claude's PTY output, with a leading-glyph and trailing
   ` Claude Code` strip) → right-truncated cwd. Tray menu uses a
   wider, segment-aligned cwd cap.
+- **Per-wrapper YOLO opt-in.** Global YOLO toggle still on the device,
+  but auto-approve is now gated on a per-wrapper opt-in set. The
+  wrapper that's focused at the moment YOLO flips on is auto-enrolled;
+  every other wrapper sees a "YOLO {tool}?" alert on its first
+  PermissionRequest. Allow enrolls + approves; Deny denies just that
+  request and the next PR re-prompts. Set is cleared on YOLO OFF and
+  HID disconnect; per-wrapper entries drop on wrapper disconnect.
 - **Robustness.** Wrapper has bounded-exponential WS reconnect
   backoff (1s→30s); daemon preserves prior `session_id` across
   re-register. YOLO gates on `device_status.connected && yolo` so a
@@ -92,14 +99,6 @@ The daemon hosts every user-facing surface:
 
 ## Open backlog
 
-- **Per-wrapper YOLO.** Today YOLO is a single global hardware flag.
-  Wanted behavior (matches the deleted GUI app): the focused wrapper
-  at the moment YOLO turns on is auto-opted-in; for any other wrapper
-  the daemon withholds auto-approve and instead raises a "Apply YOLO
-  here? — {tool}" device alert on its first PermissionRequest. Allow
-  adds it to the per-wrapper opt-in set; Deny falls back to claude's
-  terminal prompt. Opt-ins clear when the wrapper disconnects or when
-  global YOLO is toggled off.
 - **Active-tab not switching when a new wrapper opens focused.**
   Opening a new claude session in a freshly-focused terminal
   sometimes leaves the device pointing at the previously-active

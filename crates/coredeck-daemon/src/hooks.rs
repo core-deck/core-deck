@@ -961,22 +961,42 @@ async fn handle_permission_request(
         s.current_task = Some(task.clone());
     }
 
-    // Check YOLO flag — but never auto-approve ExitPlanMode.
-    // The whole point of plan mode is human review before execution.
-    // Fail-safe: only auto-approve while the device is actually connected.
-    // If the user walked away with YOLO armed and the device dropped (cable
-    // pull, USB hub flake), they no longer have a kill switch within reach,
-    // so fall back to an explicit prompt.
+    // YOLO gating, with three guardrails:
+    //   1. ExitPlanMode never auto-approves — the whole point of plan
+    //      mode is human review before execution.
+    //   2. Only auto-approve while the device is actually connected.
+    //      A cable pull / USB flake drops the kill-switch out of reach,
+    //      so we fall back to an explicit prompt.
+    //   3. Per-wrapper opt-in. Even with global YOLO on, only wrappers
+    //      that have opted in (auto-opted on YOLO ON for the focused
+    //      wrapper, or via Allow on a "YOLO {tool}?" prompt) get the
+    //      silent treatment. Others see an opt-in alert on their first
+    //      PermissionRequest — see the Allow handler below for the
+    //      bookkeeping. This prevents a parallel claude session in
+    //      another tab from silently blasting through approvals.
     let (yolo, connected) = {
         let s = state.device_status.read().await;
         (s.yolo, s.connected)
     };
+    let wrapper_id = match event.session_id.as_deref() {
+        Some(sid) => crate::wrapper::wrapper_id_for_session(state, sid).await,
+        None => None,
+    };
     if yolo && connected && tool != "ExitPlanMode" {
-        info!("YOLO: auto-approving {}", tool);
-        return Json(allow_response()).into_response();
-    }
-
-    if yolo && !connected {
+        let opted_in = match &wrapper_id {
+            Some(wid) => crate::wrapper::is_yolo_opted_in(state, wid).await,
+            None => false,
+        };
+        if opted_in {
+            info!("YOLO: auto-approving {}", tool);
+            return Json(allow_response()).into_response();
+        }
+        info!(
+            tool,
+            wrapper = ?wrapper_id,
+            "YOLO on but wrapper not opted in — surfacing opt-in alert"
+        );
+    } else if yolo && !connected {
         info!("YOLO armed but device disconnected — NOT auto-approving {}", tool);
     } else if yolo {
         info!("YOLO: NOT auto-approving {} — requires explicit approval", tool);
@@ -999,7 +1019,15 @@ async fn handle_permission_request(
     }
 
     let session_label = compute_session_label(state, &session_id).await;
-    let alert_text = format!("Allow {}?", tool);
+    // Under YOLO, the prompt is doing double duty: the device is asking
+    // both "allow this tool?" and "opt this wrapper into auto-approve
+    // from now on?". Title the alert so the user knows Allow has the
+    // opt-in side-effect.
+    let alert_text = if yolo {
+        format!("YOLO {}?", tool)
+    } else {
+        format!("Allow {}?", tool)
+    };
 
     let rx = match alerts::install_pending_alert(
         state,
@@ -1039,7 +1067,19 @@ async fn handle_permission_request(
     }
 
     match outcome {
-        Ok(Ok(DecisionOutcome::Allow)) => Json(allow_response()).into_response(),
+        Ok(Ok(DecisionOutcome::Allow)) => {
+            // Under YOLO, an Allow on the opt-in alert also enrolls the
+            // wrapper so future PermissionRequests auto-approve silently.
+            // Re-read yolo here in case it was toggled mid-prompt.
+            let still_yolo = state.device_status.read().await.yolo;
+            if still_yolo {
+                if let Some(wid) = wrapper_id.as_deref() {
+                    crate::wrapper::mark_yolo_opt_in(state, wid).await;
+                    info!(wrapper = wid, "YOLO opt-in: wrapper enrolled");
+                }
+            }
+            Json(allow_response()).into_response()
+        }
         Ok(Ok(DecisionOutcome::Deny)) => Json(deny_response()).into_response(),
         Ok(Err(_)) => {
             debug!("permission oneshot dropped without decision");

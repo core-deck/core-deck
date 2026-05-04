@@ -193,6 +193,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         let mut wrappers = state.wrappers.write().await;
         wrappers.remove(&wrapper_id);
     }
+    drop_yolo_opt_in_for_wrapper(&state, &wrapper_id).await;
     emit_tab_list(&state).await;
 
     info!(wrapper_id = %wrapper_id, "wrapper disconnected");
@@ -689,6 +690,63 @@ pub async fn write_to_target(
         .await
         .then_some(())
         .ok_or_else(|| format!("active wrapper {} disappeared", target))
+}
+
+/// Look up the wrapper currently bound to `session_id`, returning its
+/// `wrapper_id`. Used by the per-wrapper YOLO opt-in plumbing.
+pub async fn wrapper_id_for_session(state: &DaemonState, session_id: &str) -> Option<String> {
+    let wrappers = state.wrappers.read().await;
+    wrappers
+        .values()
+        .find(|w| w.session_id.as_deref() == Some(session_id))
+        .map(|w| w.wrapper_id.clone())
+}
+
+/// Resolve the currently-active wrapper id (the one the device's HID
+/// input would target). Mirrors the priority used by `build_tab_list`:
+/// most-recently-touched session's wrapper, falling back to the
+/// oldest connected wrapper. Returns `None` when no wrappers exist.
+pub async fn active_wrapper_id(state: &DaemonState) -> Option<String> {
+    let wrappers = state.wrappers.read().await;
+    let claude = state.claude_state.read().await;
+    if let Some(sid) = claude.active_session_id.as_ref() {
+        if let Some(w) = wrappers
+            .values()
+            .find(|w| w.session_id.as_deref() == Some(sid.as_str()))
+        {
+            return Some(w.wrapper_id.clone());
+        }
+    }
+    let mut sorted: Vec<&Wrapper> = wrappers.values().collect();
+    sorted.sort_by(|a, b| {
+        a.started_at_unix
+            .cmp(&b.started_at_unix)
+            .then_with(|| a.wrapper_id.cmp(&b.wrapper_id))
+    });
+    sorted.first().map(|w| w.wrapper_id.clone())
+}
+
+/// Per-wrapper YOLO opt-in helpers. The opt-in set lives in
+/// `DaemonState::yolo_opt_in` and gates `PermissionRequest`
+/// auto-approve when global YOLO is on — see `handle_permission_request`.
+pub async fn mark_yolo_opt_in(state: &DaemonState, wrapper_id: &str) {
+    let mut set = state.yolo_opt_in.lock().await;
+    set.insert(wrapper_id.to_string());
+}
+
+pub async fn is_yolo_opted_in(state: &DaemonState, wrapper_id: &str) -> bool {
+    let set = state.yolo_opt_in.lock().await;
+    set.contains(wrapper_id)
+}
+
+pub async fn drop_yolo_opt_in_for_wrapper(state: &DaemonState, wrapper_id: &str) {
+    let mut set = state.yolo_opt_in.lock().await;
+    set.remove(wrapper_id);
+}
+
+pub async fn clear_yolo_opt_in(state: &DaemonState) {
+    let mut set = state.yolo_opt_in.lock().await;
+    set.clear();
 }
 
 /// Stash an OSC 9 title hint on the wrapper and re-emit the tab list

@@ -72,6 +72,12 @@ pub struct DaemonState {
     /// already showing. Popped when the active alert resolves so the
     /// user doesn't miss prompts from parallel Claude sessions.
     pub pending_queue: Mutex<std::collections::VecDeque<alerts::QueuedPending>>,
+    /// Wrapper IDs that have explicitly opted in to YOLO auto-approve
+    /// under the current global YOLO session. Populated on YOLO ON
+    /// (active wrapper auto-opts in) and on Allow of a per-wrapper
+    /// "YOLO {tool}?" alert. Cleared wholesale on YOLO OFF and on
+    /// HID disconnect; per-wrapper entries drop on wrapper disconnect.
+    pub yolo_opt_in: Mutex<std::collections::HashSet<String>>,
     /// Listen address (for hooks install to know the URL)
     pub listen_addr: String,
 }
@@ -204,6 +210,7 @@ fn main() {
         wrappers: RwLock::new(HashMap::new()),
         alert_state: Mutex::new(alerts::AlertState::default()),
         pending_queue: Mutex::new(std::collections::VecDeque::new()),
+        yolo_opt_in: Mutex::new(std::collections::HashSet::new()),
         listen_addr: cli.listen.clone(),
     });
 
@@ -327,18 +334,22 @@ async fn run_async(
                     });
                 }
                 DaemonEvent::HidDisconnected => {
-                    let mut status = state_for_events.device_status.write().await;
-                    status.connected = false;
-                    status.device_name = None;
-                    status.firmware_version = None;
-                    // Disarm YOLO on disconnect so reconnect doesn't silently
-                    // resume auto-approve. Permission gating already requires
-                    // `connected`, but clearing the flag keeps device + daemon
-                    // state in sync — a fresh connect comes back with the
-                    // firmware's StateReport, which will re-arm if the
-                    // physical switch is still on.
-                    status.yolo = false;
-                    status.mode_initialized = false;
+                    {
+                        let mut status = state_for_events.device_status.write().await;
+                        status.connected = false;
+                        status.device_name = None;
+                        status.firmware_version = None;
+                        // Disarm YOLO on disconnect so reconnect doesn't silently
+                        // resume auto-approve. Permission gating already requires
+                        // `connected`, but clearing the flag keeps device + daemon
+                        // state in sync — a fresh connect comes back with the
+                        // firmware's StateReport, which will re-arm if the
+                        // physical switch is still on.
+                        status.yolo = false;
+                        status.mode_initialized = false;
+                    }
+                    // YOLO is gone, so the per-wrapper opt-in set is too.
+                    wrapper::clear_yolo_opt_in(&state_for_events).await;
 
                     state_for_events.send_tray_update(TrayUpdate::DeviceDisconnected);
                 }
@@ -375,15 +386,41 @@ async fn run_async(
                     // into the active wrapper so Claude Code cycles modes
                     // too. Skip the very first state report after connect —
                     // that's the initial sync, not a tap.
-                    let inject_shift_tab = {
+                    let (inject_shift_tab, yolo_transition) = {
                         let mut status = state_for_events.device_status.write().await;
                         let mode_changed = status.mode != *mode;
                         let was_initialized = status.mode_initialized;
+                        let prev_yolo = status.yolo;
                         status.mode = *mode;
                         status.yolo = *yolo;
                         status.mode_initialized = true;
-                        was_initialized && mode_changed
+                        // Only treat as a transition once we've seen a prior
+                        // state report; the initial sync isn't a flip.
+                        let yolo_transition = if was_initialized && prev_yolo != *yolo {
+                            Some(*yolo)
+                        } else {
+                            None
+                        };
+                        (was_initialized && mode_changed, yolo_transition)
                     };
+                    match yolo_transition {
+                        Some(true) => {
+                            // YOLO turned ON — the wrapper that's focused at
+                            // this moment auto-opts in. Other wrappers will
+                            // be asked on their first PermissionRequest.
+                            if let Some(wid) =
+                                wrapper::active_wrapper_id(&state_for_events).await
+                            {
+                                wrapper::mark_yolo_opt_in(&state_for_events, &wid).await;
+                                info!("YOLO ON — wrapper {} auto-opted in", wid);
+                            }
+                        }
+                        Some(false) => {
+                            wrapper::clear_yolo_opt_in(&state_for_events).await;
+                            info!("YOLO OFF — opt-in set cleared");
+                        }
+                        None => {}
+                    }
                     if inject_shift_tab {
                         if let Err(e) = wrapper::write_to_target(
                             &state_for_events,
