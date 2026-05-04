@@ -6,7 +6,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-SOURCE_PNG="${1:-$PROJECT_ROOT/crates/coredeck-daemon/assets/icons/CoreDeck.png}"
+SOURCE_PNG="${1:-$PROJECT_ROOT/crates/coredeck/assets/icons/CoreDeck.png}"
 OUTPUT_DIR="$PROJECT_ROOT/macos"
 ICONSET_DIR="$OUTPUT_DIR/AppIcon.iconset"
 

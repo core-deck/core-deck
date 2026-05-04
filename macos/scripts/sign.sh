@@ -111,15 +111,23 @@ echo "Identity: $SIGNING_IDENTITY"
 echo "Entitlements: $ENTITLEMENTS"
 echo "App Store: $APPSTORE"
 
-# Sign the main executable
-echo "Signing executable..."
+# Sign nested binaries first (inside-out)
+echo "Signing wrapper (coredeck-claude)..."
 codesign --force --options runtime \
     --sign "$SIGNING_IDENTITY" \
     --entitlements "$ENTITLEMENTS" \
     --timestamp \
-    "$APP_BUNDLE/Contents/MacOS/coredeck-daemon"
+    "$APP_BUNDLE/Contents/MacOS/coredeck-claude"
 
-# Sign the entire app bundle
+echo "Signing daemon (coredeck)..."
+codesign --force --options runtime \
+    --sign "$SIGNING_IDENTITY" \
+    --entitlements "$ENTITLEMENTS" \
+    --timestamp \
+    "$APP_BUNDLE/Contents/MacOS/coredeck"
+
+# Sign the entire app bundle (entitlements applied to the main executable
+# matching CFBundleExecutable; nested binaries keep theirs from above).
 echo "Signing app bundle..."
 codesign --force --options runtime \
     --sign "$SIGNING_IDENTITY" \

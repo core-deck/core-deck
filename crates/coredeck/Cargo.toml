@@ -1,13 +1,13 @@
 [package]
-name = "coredeck-daemon"
+name = "coredeck"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Background daemon for CoreDeck - owns HID device and exposes WebSocket/REST APIs"
+description = "CoreDeck daemon: owns the HID device and serves the HTTP/WS APIs and Claude Code hook endpoints"
 license = "GPL-3.0-or-later"
 
 [[bin]]
-name = "coredeck-daemon"
+name = "coredeck"
 path = "src/main.rs"
 
 [dependencies]

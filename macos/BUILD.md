@@ -2,7 +2,18 @@
 
 This directory contains everything needed to build, sign, and distribute Core Deck for macOS.
 
-The macOS bundle is the daemon (`coredeck-daemon`) packaged as a tray-only application — no GUI window, just a menu-bar icon. `CFBundleExecutable` points at `coredeck-daemon`, `LSUIElement` is true (accessory app, no Dock icon).
+The macOS bundle ships two executables under `Contents/MacOS/`:
+
+- `coredeck` — the daemon (HID, tray, HTTP/WS server, hooks).
+  `CFBundleExecutable` points at this. `LSUIElement` is true so it
+  runs as a pure menu-bar accessory with no Dock icon.
+- `coredeck-claude` — the PTY wrapper. Users add it to their `PATH`
+  (or alias `claude` to it) — see "Hooking up the wrapper" below.
+
+Both binaries are signed inside-out with the hardened runtime
+(`--options runtime`); the wrapper carries the same entitlements as
+the daemon. Notarization runs against the outer bundle and staples
+the ticket onto the `.app`.
 
 ## Prerequisites
 
@@ -155,6 +166,24 @@ Check the detailed assessment:
 spctl --assess --type execute -vvv "dist/Core Deck.app"
 ```
 
+## Hooking up the wrapper
+
+After dragging `Core Deck.app` to `/Applications`, expose
+`coredeck-claude` on the user's `PATH` so it can replace the
+`claude` command. The simplest path is a symlink:
+
+```bash
+sudo ln -sf "/Applications/Core Deck.app/Contents/MacOS/coredeck-claude" \
+            /usr/local/bin/coredeck-claude
+
+# Optional: alias claude to the wrapper
+echo 'alias claude="coredeck-claude"' >> ~/.zshrc
+```
+
+The daemon is also accessible the same way (e.g. for `coredeck hooks
+install` from the shell), but day-to-day it's launched by the bundle
+or by launchd, not invoked manually.
+
 ## App Store
 
 Direct App Store distribution is out of scope right now — the daemon
@@ -167,6 +196,6 @@ file is kept around in case that changes. Distribute via Developer ID
 
 When releasing a new version:
 
-1. Update version in `Cargo.toml`
+1. Update version in `crates/coredeck/Cargo.toml`
 2. Update version in `macos/Info.plist` (CFBundleVersion and CFBundleShortVersionString)
 3. Rebuild and re-sign

@@ -575,26 +575,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "coredeck-claude"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "coredeck-protocol",
- "crossterm",
- "futures-util",
- "libc",
- "portable-pty",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.26.2",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "coredeck-daemon"
+name = "coredeck"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -622,6 +603,25 @@ dependencies = [
  "tracing-subscriber",
  "tray-icon",
  "winit",
+]
+
+[[package]]
+name = "coredeck-claude"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "coredeck-protocol",
+ "crossterm",
+ "futures-util",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite 0.26.2",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

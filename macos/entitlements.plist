@@ -2,32 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <!-- Hardened Runtime (required for notarization) -->
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
-
-    <!-- Allow JIT compilation (may be needed for some dependencies) -->
-    <key>com.apple.security.cs.allow-jit</key>
-    <true/>
-
-    <!-- Allow loading unsigned libraries (for dynamic linking) -->
-    <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-
-    <!-- USB/HID Device Access -->
     <key>com.apple.security.device.usb</key>
     <true/>
-
-    <!-- Network access (if needed for future features) -->
+    <key>com.apple.security.network.server</key>
+    <true/>
     <key>com.apple.security.network.client</key>
-    <true/>
-
-    <!-- File access - User selected files -->
-    <key>com.apple.security.files.user-selected.read-write</key>
-    <true/>
-
-    <!-- Access to Downloads folder -->
-    <key>com.apple.security.files.downloads.read-write</key>
     <true/>
 </dict>
 </plist>

@@ -1,6 +1,6 @@
 # Daemon API Overview
 
-The CoreDeck daemon (`coredeck-daemon`) is a background service that owns the HID connection to the CoreDeck macropad. It exposes HTTP REST and WebSocket APIs for controlling the device display, LEDs, alerts, and soft keys.
+The CoreDeck daemon (`coredeck`) is a background service that owns the HID connection to the CoreDeck macropad. It exposes HTTP REST and WebSocket APIs for controlling the device display, LEDs, alerts, and soft keys.
 
 For build instructions and project setup, see the [README](../README.md) and [Building from Source](Building.md).
 
@@ -24,8 +24,8 @@ The daemon receives structured events from Claude Code via HTTP hooks (`POST /ho
 
 The wrapper (`coredeck-claude`) connects on a separate WS endpoint (`/wrapper-ws`) for byte-injection and focus reporting; that channel is independent of the main `/ws` API.
 
-Install hooks: `coredeck-daemon hooks install` (writes `~/.claude/settings.json`)
-Uninstall hooks: `coredeck-daemon hooks uninstall`
+Install hooks: `coredeck hooks install` (writes `~/.claude/settings.json`)
+Uninstall hooks: `coredeck hooks uninstall`
 
 ## Quick Examples
 

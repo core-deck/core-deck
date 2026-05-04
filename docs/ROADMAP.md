@@ -1,8 +1,8 @@
 # CoreDeck Roadmap
 
 CoreDeck is a daemon-only architecture: one background daemon
-(`coredeck-daemon`) owns the HID device, the tray icon, the HTTP+WS
-APIs, and Claude Code hook endpoints. A thin wrapper binary
+(`coredeck`) owns the HID device, the tray icon, the HTTP+WS APIs,
+and Claude Code hook endpoints. A thin wrapper binary
 (`coredeck-claude`) runs `claude` under a PTY in any host terminal
 (Terminal.app, iTerm2, Ghostty, Kitty, tmux, …), registers with the
 daemon over WebSocket, and accepts byte-injection commands. There is
@@ -17,7 +17,7 @@ few architectural notes worth keeping handy.
 
 ```
 coredeck-protocol     ← wire types (serde only)
-coredeck-daemon       ← tray + HTTP/WS server + Claude Code hook endpoints + static settings page
+coredeck              ← tray + HTTP/WS server + Claude Code hook endpoints + static settings page
 coredeck-claude       ← thin PTY wrapper, registers with daemon
 ```
 
@@ -38,9 +38,11 @@ The daemon hosts every user-facing surface:
 
 ## Done (recent highlights)
 
-- **Daemon-only architecture.** `crates/coredeck/` GUI crate and its
-  egui/wezterm/glutin/eframe dep tree deleted; macOS app bundles
-  `coredeck-daemon` as the sole executable.
+- **Daemon-only architecture.** Old GUI crate and its
+  egui/wezterm/glutin/eframe dep tree deleted; the daemon
+  (`crates/coredeck`) is the sole executable referenced by
+  `CFBundleExecutable`. The wrapper (`coredeck-claude`) ships
+  alongside it inside `Contents/MacOS/`.
 - **`coredeck-claude` wrapper.** Thin PTY around `claude` in any host
   terminal, registers with the daemon over `/wrapper-ws`, accepts
   byte-injection commands. Smoke-tested in Terminal.app and iTerm2.
@@ -115,6 +117,18 @@ The daemon hosts every user-facing surface:
   hosts the soft-key editor; tray "Open Settings…" launches the
   default browser. Hooks install/uninstall is also exposed via
   `/api/hooks/*`.
+- **Daemon renamed `coredeck-daemon` → `coredeck`.** With no GUI app
+  the `-daemon` suffix was redundant. Crate dir, bin, CLI command,
+  log path (`~/Library/Logs/coredeck.log`), `CFBundleExecutable`,
+  and CI workflows updated. launchd label `com.coredeck.daemon` is
+  unchanged (it's the role descriptor, not the binary name).
+- **Signed/notarized macOS bundle.** Both binaries (daemon +
+  wrapper) ship inside `Contents/MacOS/` and are signed inside-out
+  with the hardened runtime. `LSUIElement` is set so the bundle is
+  truly tray-only (no Dock icon). Entitlements were tightened —
+  the cs.* relaxations (allow-jit, allow-unsigned-executable-memory,
+  disable-library-validation) were removed; a pure Rust daemon
+  doesn't need them and they only weaken hardened runtime.
 
 ---
 
@@ -124,9 +138,6 @@ The daemon hosts every user-facing surface:
   a wrapper, the wrapper learns the resumed session_id lazily via
   SessionStart. A small race window exists; could be closed by
   passing `--resume <id>` through to the wrapper and pre-binding.
-- **Optional rename: `coredeck-daemon` → `coredeck`.** With no GUI
-  app the `-daemon` suffix is redundant. Cosmetic; would need to
-  update launchd plist, bundle scripts, install docs.
 - **Remote daemon.** Wrapper already supports `COREDECK_DAEMON_ADDR`,
   so running claude on a remote dev box with local CoreDeck is
   theoretically possible. Not tested; would need TLS for anything

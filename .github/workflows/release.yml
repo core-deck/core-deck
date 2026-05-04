@@ -14,7 +14,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Build for each architecture on native runners
+  # Build daemon + wrapper for each architecture on native runners
   build-macos-arm64:
     runs-on: macos-14  # ARM64 runner
     steps:
@@ -25,13 +25,15 @@ jobs:
         uses: dtolnay/rust-action@stable
 
       - name: Build for ARM64
-        run: cargo build --release --target aarch64-apple-darwin
+        run: cargo build --release --workspace --target aarch64-apple-darwin
 
-      - name: Upload ARM64 binary
+      - name: Upload ARM64 binaries
         uses: actions/upload-artifact@v4
         with:
           name: binary-arm64
-          path: target/aarch64-apple-darwin/release/core-deck
+          path: |
+            target/aarch64-apple-darwin/release/coredeck
+            target/aarch64-apple-darwin/release/coredeck-claude
 
   build-macos-x86_64:
     runs-on: macos-13  # Intel runner
@@ -43,13 +45,15 @@ jobs:
         uses: dtolnay/rust-action@stable
 
       - name: Build for x86_64
-        run: cargo build --release --target x86_64-apple-darwin
+        run: cargo build --release --workspace --target x86_64-apple-darwin
 
-      - name: Upload x86_64 binary
+      - name: Upload x86_64 binaries
         uses: actions/upload-artifact@v4
         with:
           name: binary-x86_64
-          path: target/x86_64-apple-darwin/release/core-deck
+          path: |
+            target/x86_64-apple-darwin/release/coredeck
+            target/x86_64-apple-darwin/release/coredeck-claude
 
   # Combine binaries and create signed app bundle
   package-macos:
@@ -62,13 +66,13 @@ jobs:
       - name: Install dependencies
         run: brew install librsvg
 
-      - name: Download ARM64 binary
+      - name: Download ARM64 binaries
         uses: actions/download-artifact@v4
         with:
           name: binary-arm64
           path: target/aarch64-apple-darwin/release/
 
-      - name: Download x86_64 binary
+      - name: Download x86_64 binaries
         uses: actions/download-artifact@v4
         with:
           name: binary-x86_64
@@ -76,27 +80,30 @@ jobs:
 
       - name: Make binaries executable
         run: |
-          chmod +x target/aarch64-apple-darwin/release/core-deck
-          chmod +x target/x86_64-apple-darwin/release/core-deck
+          chmod +x target/aarch64-apple-darwin/release/coredeck
+          chmod +x target/aarch64-apple-darwin/release/coredeck-claude
+          chmod +x target/x86_64-apple-darwin/release/coredeck
+          chmod +x target/x86_64-apple-darwin/release/coredeck-claude
 
       - name: Verify binaries
         run: |
-          echo "ARM64 binary:"
-          file target/aarch64-apple-darwin/release/core-deck
-          echo "x86_64 binary:"
-          file target/x86_64-apple-darwin/release/core-deck
+          file target/aarch64-apple-darwin/release/coredeck
+          file target/aarch64-apple-darwin/release/coredeck-claude
+          file target/x86_64-apple-darwin/release/coredeck
+          file target/x86_64-apple-darwin/release/coredeck-claude
 
       - name: Generate app icon
         run: ./macos/scripts/generate-icon.sh
 
-      - name: Create universal binary and bundle
+      - name: Create universal binaries and bundle
         run: ./macos/scripts/bundle.sh --lipo-only
 
-      - name: Verify universal binary
+      - name: Verify universal binaries
         run: |
-          echo "Universal binary:"
-          file "dist/Core Deck.app/Contents/MacOS/core-deck"
-          lipo -info "dist/Core Deck.app/Contents/MacOS/core-deck"
+          file "dist/Core Deck.app/Contents/MacOS/coredeck"
+          file "dist/Core Deck.app/Contents/MacOS/coredeck-claude"
+          lipo -info "dist/Core Deck.app/Contents/MacOS/coredeck"
+          lipo -info "dist/Core Deck.app/Contents/MacOS/coredeck-claude"
 
       - name: Import signing certificate
         if: ${{ env.MACOS_CERTIFICATE != '' }}
@@ -166,7 +173,7 @@ jobs:
           elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           else
-            echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*\"\(.*\)\"/\1/')" >> $GITHUB_OUTPUT
+            echo "version=$(grep '^version' crates/coredeck/Cargo.toml | head -1 | sed 's/.*\"\(.*\)\"/\1/')" >> $GITHUB_OUTPUT
           fi
 
       - name: Upload DMG artifact

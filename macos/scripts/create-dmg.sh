@@ -10,7 +10,7 @@ DIST_DIR="$PROJECT_ROOT/dist"
 
 APP_NAME="Core Deck"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
-VERSION=$(grep '^version' "$PROJECT_ROOT/crates/coredeck-daemon/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+VERSION=$(grep '^version' "$PROJECT_ROOT/crates/coredeck/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
 DMG_NAME="CoreDeck-${VERSION}"
 DMG_PATH="$DIST_DIR/$DMG_NAME.dmg"
 

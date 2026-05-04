@@ -2,12 +2,12 @@
 resolver = "2"
 members = [
     "crates/coredeck-protocol",
-    "crates/coredeck-daemon",
+    "crates/coredeck",
     "crates/coredeck-claude",
 ]
 
 # Default members for `cargo build` / `cargo run`
-default-members = ["crates/coredeck-daemon"]
+default-members = ["crates/coredeck"]
 
 [profile.release]
 opt-level = 3

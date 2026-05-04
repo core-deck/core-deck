@@ -19,7 +19,7 @@
     <string>0.1.0</string>
 
     <key>CFBundleExecutable</key>
-    <string>coredeck-daemon</string>
+    <string>coredeck</string>
 
     <key>CFBundlePackageType</key>
     <string>APPL</string>
@@ -43,10 +43,10 @@
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
 
-    <!-- App is an agent (menu bar app without dock icon) -->
-    <!-- Uncomment if you want it to be a pure menu bar app -->
-    <!-- <key>LSUIElement</key>
-    <true/> -->
+    <!-- Tray-only app: no Dock icon, no app menu. Required for the
+         daemon, which has no GUI. -->
+    <key>LSUIElement</key>
+    <true/>
 
     <!-- Required for background execution -->
     <key>NSAppTransportSecurity</key>
@@ -57,23 +57,12 @@
         <true/>
     </dict>
 
-    <!-- Privacy Permission Descriptions (required for App Store) -->
-
-    <!-- Accessibility - Required for global hotkeys -->
-    <key>NSAccessibilityUsageDescription</key>
-    <string>Core Deck needs accessibility access to respond to global keyboard shortcuts (F15-F20) for quick actions.</string>
-
-    <!-- Input Monitoring - Alternative for hotkeys on some systems -->
-    <key>NSInputMonitoringUsageDescription</key>
-    <string>Core Deck monitors keyboard input to detect global hotkey presses for quick actions.</string>
-
-    <!-- USB Device Access - Required for HID communication -->
-    <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>Core Deck communicates with the Core Deck hardware macropad via USB HID.</string>
-
-    <!-- Apple Events - May be needed for automation -->
+    <!-- Privacy Permission Descriptions. The daemon doesn't capture
+         keystrokes (F-key events arrive over HID from the macropad,
+         not via global keyboard monitoring), but it does send Apple
+         Events to raise the focused wrapper's host terminal. -->
     <key>NSAppleEventsUsageDescription</key>
-    <string>Core Deck may need to send commands to other applications.</string>
+    <string>Core Deck raises the focused Claude wrapper's terminal window when you press F20 or cycle tabs.</string>
 
     <!-- Copyright -->
     <key>NSHumanReadableCopyright</key>

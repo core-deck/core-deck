@@ -10,7 +10,8 @@ MACOS_DIR="$PROJECT_ROOT/macos"
 
 APP_NAME="Core Deck"
 BUNDLE_ID="com.coredeck.CoreDeck"
-EXECUTABLE_NAME="coredeck-daemon"
+EXECUTABLE_NAME="coredeck"
+WRAPPER_NAME="coredeck-claude"
 
 # Parse arguments
 BUILD_TYPE="release"
@@ -72,54 +73,54 @@ echo "Universal binary: $UNIVERSAL"
 # Build the binary
 cd "$PROJECT_ROOT"
 
+lipo_binary() {
+    local name="$1"
+    local arm="$PROJECT_ROOT/target/aarch64-apple-darwin/$BUILD_TYPE/$name"
+    local x86="$PROJECT_ROOT/target/x86_64-apple-darwin/$BUILD_TYPE/$name"
+    if [ ! -f "$arm" ]; then
+        echo "Error: ARM64 binary not found at $arm"
+        exit 1
+    fi
+    if [ ! -f "$x86" ]; then
+        echo "Error: x86_64 binary not found at $x86"
+        exit 1
+    fi
+    mkdir -p "$TARGET_DIR"
+    lipo -create "$arm" "$x86" -output "$TARGET_DIR/$name"
+}
+
 if [ "$LIPO_ONLY" = true ]; then
     echo "Combining existing binaries with lipo..."
-
-    ARM_BINARY="$PROJECT_ROOT/target/aarch64-apple-darwin/$BUILD_TYPE/$EXECUTABLE_NAME"
-    X86_BINARY="$PROJECT_ROOT/target/x86_64-apple-darwin/$BUILD_TYPE/$EXECUTABLE_NAME"
-
-    if [ ! -f "$ARM_BINARY" ]; then
-        echo "Error: ARM64 binary not found at $ARM_BINARY"
-        exit 1
-    fi
-    if [ ! -f "$X86_BINARY" ]; then
-        echo "Error: x86_64 binary not found at $X86_BINARY"
-        exit 1
-    fi
-
-    mkdir -p "$TARGET_DIR"
-    lipo -create "$ARM_BINARY" "$X86_BINARY" -output "$TARGET_DIR/$EXECUTABLE_NAME"
-    echo "Universal binary created"
+    lipo_binary "$EXECUTABLE_NAME"
+    lipo_binary "$WRAPPER_NAME"
+    echo "Universal binaries created"
 
 elif [ "$UNIVERSAL" = true ]; then
-    echo "Building universal binary..."
+    echo "Building universal binaries..."
 
-    # Build for both architectures
-    cargo build $BUILD_FLAGS --target aarch64-apple-darwin
-    cargo build $BUILD_FLAGS --target x86_64-apple-darwin
+    cargo build $BUILD_FLAGS --workspace --target aarch64-apple-darwin
+    cargo build $BUILD_FLAGS --workspace --target x86_64-apple-darwin
 
-    # Create universal binary with lipo
-    mkdir -p "$TARGET_DIR"
-    lipo -create \
-        "$PROJECT_ROOT/target/aarch64-apple-darwin/$BUILD_TYPE/$EXECUTABLE_NAME" \
-        "$PROJECT_ROOT/target/x86_64-apple-darwin/$BUILD_TYPE/$EXECUTABLE_NAME" \
-        -output "$TARGET_DIR/$EXECUTABLE_NAME"
+    lipo_binary "$EXECUTABLE_NAME"
+    lipo_binary "$WRAPPER_NAME"
 
-    echo "Universal binary created"
+    echo "Universal binaries created"
 elif [ -n "$ARCH" ]; then
     echo "Building for architecture: $ARCH"
-    cargo build $BUILD_FLAGS --target "${ARCH}-apple-darwin"
+    cargo build $BUILD_FLAGS --workspace --target "${ARCH}-apple-darwin"
     TARGET_DIR="$PROJECT_ROOT/target/${ARCH}-apple-darwin/$BUILD_TYPE"
 else
     echo "Building for native architecture..."
-    cargo build $BUILD_FLAGS
+    cargo build $BUILD_FLAGS --workspace
 fi
 
-# Verify binary exists
-if [ ! -f "$TARGET_DIR/$EXECUTABLE_NAME" ]; then
-    echo "Error: Binary not found at $TARGET_DIR/$EXECUTABLE_NAME"
-    exit 1
-fi
+# Verify both binaries exist
+for binary in "$EXECUTABLE_NAME" "$WRAPPER_NAME"; do
+    if [ ! -f "$TARGET_DIR/$binary" ]; then
+        echo "Error: Binary not found at $TARGET_DIR/$binary"
+        exit 1
+    fi
+done
 
 echo "=== Creating App Bundle ==="
 
@@ -130,8 +131,9 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-# Copy executable
+# Copy daemon and wrapper executables
 cp "$TARGET_DIR/$EXECUTABLE_NAME" "$APP_BUNDLE/Contents/MacOS/"
+cp "$TARGET_DIR/$WRAPPER_NAME" "$APP_BUNDLE/Contents/MacOS/"
 
 # Copy Info.plist
 cp "$MACOS_DIR/Info.plist" "$APP_BUNDLE/Contents/"

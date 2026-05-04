@@ -344,7 +344,7 @@ The daemon replaces the session's tracked subagent list wholesale on every tick 
 
 > **Note:** Claude Code sends snake_case in request payloads but expects camelCase in the PermissionRequest response.
 
-**Hook installation:** Run `coredeck-daemon hooks install` to write hook config to `~/.claude/settings.json`. Run `coredeck-daemon hooks uninstall` to remove it. The same operations are also exposed over HTTP — see `/api/hooks/*` below.
+**Hook installation:** Run `coredeck hooks install` to write hook config to `~/.claude/settings.json`. Run `coredeck hooks uninstall` to remove it. The same operations are also exposed over HTTP — see `/api/hooks/*` below.
 
 ---
 
@@ -365,7 +365,7 @@ Report whether Claude Code hooks are currently installed in `~/.claude/settings.
 
 ### POST /api/hooks/install
 
-Install Claude Code hooks (equivalent to `coredeck-daemon hooks install`). Writes a curl-shim script to `~/.claude/coredeck-hook.sh` and merges hook entries into `~/.claude/settings.json`. Existing user-defined hook entries for the same event are preserved; only blocks the daemon previously wrote get replaced.
+Install Claude Code hooks (equivalent to `coredeck hooks install`). Writes a curl-shim script to `~/.claude/coredeck-hook.sh` and merges hook entries into `~/.claude/settings.json`. Existing user-defined hook entries for the same event are preserved; only blocks the daemon previously wrote get replaced.
 
 **Response: 200 OK** with the new install status.
 

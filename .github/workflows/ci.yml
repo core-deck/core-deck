@@ -38,10 +38,12 @@ jobs:
         uses: dtolnay/rust-action@stable
 
       - name: Build release (ARM64)
-        run: cargo build --release --target aarch64-apple-darwin
+        run: cargo build --release --workspace --target aarch64-apple-darwin
 
-      - name: Verify binary
-        run: file target/aarch64-apple-darwin/release/core-deck
+      - name: Verify binaries
+        run: |
+          file target/aarch64-apple-darwin/release/coredeck
+          file target/aarch64-apple-darwin/release/coredeck-claude
 
   build-x86_64:
     runs-on: macos-13  # Intel runner
@@ -52,7 +54,9 @@ jobs:
         uses: dtolnay/rust-action@stable
 
       - name: Build release (x86_64)
-        run: cargo build --release --target x86_64-apple-darwin
+        run: cargo build --release --workspace --target x86_64-apple-darwin
 
-      - name: Verify binary
-        run: file target/x86_64-apple-darwin/release/core-deck
+      - name: Verify binaries
+        run: |
+          file target/x86_64-apple-darwin/release/coredeck
+          file target/x86_64-apple-darwin/release/coredeck-claude

@@ -96,7 +96,7 @@ impl DaemonState {
 }
 
 #[derive(Parser)]
-#[command(name = "coredeck-daemon", about = "CoreDeck background daemon")]
+#[command(name = "coredeck", about = "CoreDeck background daemon")]
 struct Cli {
     /// Listen address
     #[arg(long, default_value = DEFAULT_DAEMON_ADDR)]
@@ -721,9 +721,9 @@ fn install_launchd(listen: &str) {
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>{home}/Library/Logs/coredeck-daemon.log</string>
+    <string>{home}/Library/Logs/coredeck.log</string>
     <key>StandardErrorPath</key>
-    <string>{home}/Library/Logs/coredeck-daemon.log</string>
+    <string>{home}/Library/Logs/coredeck.log</string>
 </dict>
 </plist>"#
         );

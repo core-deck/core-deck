@@ -42,11 +42,11 @@ The project is a Cargo workspace with 3 crates:
 ```
 crates/
   coredeck-protocol/   # Shared types & wire format (serde only, no system deps)
-  coredeck-daemon/     # Background daemon (HID, tray icon, axum server, hooks)
+  coredeck/            # Background daemon (HID, tray icon, axum server, hooks)
   coredeck-claude/     # `claude` PTY wrapper + daemon session registration
 ```
 
-The default member is `coredeck-daemon`, so a bare `cargo build` builds the daemon.
+The default member is `coredeck`, so a bare `cargo build` builds the daemon.
 
 ## Build Commands
 
@@ -60,7 +60,7 @@ cargo build --workspace
 
 ```bash
 # Daemon (default)
-cargo build -p coredeck-daemon
+cargo build -p coredeck
 # or just:
 cargo build
 
@@ -83,17 +83,17 @@ Output binaries:
 
 | Binary | Path |
 |--------|------|
-| `coredeck-daemon` | `target/release/coredeck-daemon` |
+| `coredeck` | `target/release/coredeck` |
 | `coredeck-claude` | `target/release/coredeck-claude` |
 
 ### Run
 
 ```bash
 # Run the daemon
-cargo run -p coredeck-daemon
+cargo run -p coredeck
 
 # Run the daemon on a custom port
-cargo run -p coredeck-daemon -- --listen 127.0.0.1:9000
+cargo run -p coredeck -- --listen 127.0.0.1:9000
 
 # Run the Claude wrapper (daemon must be up)
 cargo run -p coredeck-claude
@@ -112,6 +112,6 @@ cargo test --workspace
 Both binaries use `tracing` with `RUST_LOG` env filter:
 
 ```bash
-RUST_LOG=debug cargo run -p coredeck-daemon
+RUST_LOG=debug cargo run -p coredeck
 RUST_LOG=debug cargo run -p coredeck-claude
 ```

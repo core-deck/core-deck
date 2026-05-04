@@ -6,7 +6,7 @@ Companion software for the Core Deck macropad — a hardware control surface for
 
 The system consists of two binaries:
 
-- **`coredeck-daemon`** — Background service that owns the HID device, runs the tray icon, and serves the HTTP REST + WebSocket APIs on `127.0.0.1:19384`. The settings UI is browser-based, served by the daemon. This is the only binary needed to drive the device.
+- **`coredeck`** — Background daemon that owns the HID device, runs the tray icon, and serves the HTTP REST + WebSocket APIs on `127.0.0.1:19384`. The settings UI is browser-based, served by the daemon. This is the only binary needed to drive the device.
 - **`coredeck-claude`** — Thin wrapper that runs `claude` under a PTY and registers the session with the daemon (via `/wrapper-ws`) so soft keys, the rotary encoder, and tab cycling drive the active Claude session.
 
 Third-party tools can also integrate with the daemon directly via its REST API.
@@ -26,7 +26,7 @@ cargo build --workspace
 cargo build --workspace --release
 ```
 
-Output binaries: `target/release/coredeck-daemon` and `target/release/coredeck-claude`.
+Output binaries: `target/release/coredeck` and `target/release/coredeck-claude`.
 
 See [docs/Building.md](docs/Building.md) for Linux dependencies, individual crate builds, and detailed notes.
 
@@ -36,13 +36,13 @@ See [docs/Building.md](docs/Building.md) for Linux dependencies, individual crat
 # One-time: register Claude Code hooks (writes ~/.claude/settings.json
 # with HTTP hook entries pointing at the daemon, plus a tiny curl shim
 # so claude doesn't error when the daemon isn't running).
-coredeck-daemon hooks install
+coredeck hooks install
 
 # Start the daemon
-coredeck-daemon
+coredeck
 
 # Install as launchd service for auto-start (macOS)
-coredeck-daemon install
+coredeck install
 
 # In a separate terminal, launch Claude under the wrapper. Aliasing
 # `claude` to `coredeck-claude` is the smoothest path.
@@ -75,7 +75,7 @@ curl -X POST http://127.0.0.1:19384/api/alert \
 ```
 crates/
   coredeck-protocol/   # Shared types & wire format (serde only)
-  coredeck-daemon/     # Background daemon (HID, tray, axum server, hooks)
+  coredeck/            # Background daemon (HID, tray, axum server, hooks)
   coredeck-claude/     # `claude` PTY wrapper + daemon session registration
 docs/                   # API documentation
 ```
