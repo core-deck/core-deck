@@ -405,10 +405,13 @@ fn build_ssh_command(
     // env. Existing panes still have their original env — they need a
     // relaunch — but that's the standard tmux env-refresh limitation.
     //
-    // The block is gated on `tmux info` so we don't accidentally start a
-    // tmux server on a box that doesn't have one running. Errors are
-    // swallowed so a misconfigured tmux doesn't break login.
-    let tmux_propagate = r##"if command -v tmux >/dev/null 2>&1 && tmux info >/dev/null 2>&1; then
+    // The block is gated on `tmux ls` (returns 0 only when a server
+    // with sessions exists) so we don't accidentally spawn a tmux server
+    // on a box that doesn't have one running. We can't use `tmux info`:
+    // it exits 1 when invoked without an attached client (which is
+    // exactly our case — sshd command form has no tmux client). Errors
+    // are swallowed so a misconfigured tmux doesn't break login.
+    let tmux_propagate = r##"if command -v tmux >/dev/null 2>&1 && tmux ls >/dev/null 2>&1; then
     tmux setenv -g COREDECK_WRAPPER_ID "$COREDECK_WRAPPER_ID" 2>/dev/null || true
     tmux setenv -g COREDECK_DAEMON_URL "$COREDECK_DAEMON_URL" 2>/dev/null || true
     for s in $(tmux ls -F "#{session_name}" 2>/dev/null); do
