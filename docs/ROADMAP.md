@@ -76,13 +76,16 @@ The daemon hosts every user-facing surface:
   from claude's PTY output, with a leading-glyph and trailing
   ` Claude Code` strip) → right-truncated cwd. Tray menu uses a
   wider, segment-aligned cwd cap.
-- **Per-wrapper YOLO opt-in.** Global YOLO toggle still on the device,
-  but auto-approve is now gated on a per-wrapper opt-in set. The
-  wrapper that's focused at the moment YOLO flips on is auto-enrolled;
-  every other wrapper sees a "YOLO {tool}?" alert on its first
-  PermissionRequest. Allow enrolls + approves; Deny denies just that
-  request and the next PR re-prompts. Set is cleared on YOLO OFF and
-  HID disconnect; per-wrapper entries drop on wrapper disconnect.
+- **Per-wrapper Auto-approve enrollment.** Global Auto-approve toggle
+  is still a single hardware switch, but it's gated on a per-wrapper
+  enrollment set. The wrapper focused at the moment the toggle flips
+  on is auto-enrolled; every other wrapper sees an "Auto-approve this
+  tab?" alert on its first PermissionRequest. Allow enrolls (and
+  approves this and all future PRs in that wrapper); Deny declines
+  enrollment and falls back to Claude's terminal prompt — no specific
+  tool is named in the alert because enrollment covers everything. Set
+  clears on Auto-approve OFF and HID disconnect; per-wrapper entries
+  drop on wrapper disconnect.
 - **Robustness.** Wrapper has bounded-exponential WS reconnect
   backoff (1s→30s); daemon preserves prior `session_id` across
   re-register. YOLO gates on `device_status.connected && yolo` so a

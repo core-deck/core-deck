@@ -1019,12 +1019,17 @@ async fn handle_permission_request(
     }
 
     let session_label = compute_session_label(state, &session_id).await;
-    // Under Auto-approve mode the prompt is doing double duty: the
-    // device is asking both "allow this tool?" and "enroll this
-    // wrapper into auto-approve from now on?". The "Auto-approve" verb
-    // tells the user Allow has the opt-in side-effect.
+    // Two different prompts share this code path. When global
+    // Auto-approve is OFF, the alert is a per-tool decision —
+    // "Allow Bash?" — and Allow/Deny apply just to this PR. When
+    // Auto-approve is ON but this wrapper isn't enrolled yet, the
+    // alert is asking about the wrapper as a whole — Allow enrolls
+    // it (and implicitly approves this PR plus everything that
+    // follows), Deny declines enrollment and falls back to Claude's
+    // terminal prompt for this request. Naming a specific tool here
+    // would be misleading because Auto-approve covers all tools.
     let alert_text = if yolo {
-        format!("Auto-approve {}?", tool)
+        "Auto-approve this tab?".to_string()
     } else {
         format!("Allow {}?", tool)
     };
@@ -1066,21 +1071,36 @@ async fn handle_permission_request(
         claude.pending_permissions.remove(&session_id);
     }
 
+    // Capture the Auto-approve flag at alert-creation time. Whether
+    // Allow/Deny mean "enroll/decline" or "allow this PR/deny this PR"
+    // depends on what the user was being asked, not on the toggle's
+    // state at resolution time.
+    let was_enrollment_alert = yolo;
     match outcome {
         Ok(Ok(DecisionOutcome::Allow)) => {
-            // Under YOLO, an Allow on the opt-in alert also enrolls the
-            // wrapper so future PermissionRequests auto-approve silently.
-            // Re-read yolo here in case it was toggled mid-prompt.
-            let still_yolo = state.device_status.read().await.yolo;
-            if still_yolo {
-                if let Some(wid) = wrapper_id.as_deref() {
-                    crate::wrapper::mark_yolo_opt_in(state, wid).await;
-                    info!(wrapper = wid, "YOLO opt-in: wrapper enrolled");
+            if was_enrollment_alert {
+                // Re-check Auto-approve now — if it was turned off mid-
+                // prompt, don't enroll (the user clearly changed intent).
+                let still_yolo = state.device_status.read().await.yolo;
+                if still_yolo {
+                    if let Some(wid) = wrapper_id.as_deref() {
+                        crate::wrapper::mark_yolo_opt_in(state, wid).await;
+                        info!(wrapper = wid, "Auto-approve enrolled");
+                    }
                 }
             }
             Json(allow_response()).into_response()
         }
-        Ok(Ok(DecisionOutcome::Deny)) => Json(deny_response()).into_response(),
+        Ok(Ok(DecisionOutcome::Deny)) => {
+            if was_enrollment_alert {
+                // Deny on enrollment ≠ deny this PR. The user said
+                // "don't enroll this tab" — fall back to Claude's
+                // terminal prompt so they can decide per-PR there.
+                Json(serde_json::json!({})).into_response()
+            } else {
+                Json(deny_response()).into_response()
+            }
+        }
         Ok(Err(_)) => {
             debug!("permission oneshot dropped without decision");
             Json(serde_json::json!({})).into_response()
