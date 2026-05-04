@@ -612,6 +612,7 @@ dependencies = [
  "anyhow",
  "coredeck-protocol",
  "crossterm",
+ "directories",
  "futures-util",
  "libc",
  "portable-pty",

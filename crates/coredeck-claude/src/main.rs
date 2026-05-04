@@ -335,6 +335,49 @@ fn sh_quote(s: &str) -> String {
     out
 }
 
+/// Stable wrapper id for `--ssh <host>`. The first invocation against a
+/// host generates a fresh UUID and writes it under
+/// `<data_dir>/wrappers/<sanitized-host>`; subsequent invocations read
+/// it back so claude processes alive in remote tmux keep correlating to
+/// the same wrapper across reconnects.
+///
+/// On any IO failure we silently fall back to a random UUID — the
+/// reconnect-survival behaviour is a nice-to-have, not load-bearing for
+/// the common path.
+fn persistent_wrapper_id_for_host(host: &str) -> String {
+    let path = match wrapper_id_cache_path(host) {
+        Some(p) => p,
+        None => return Uuid::new_v4().to_string(),
+    };
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        let trimmed = s.trim();
+        if Uuid::parse_str(trimmed).is_ok() {
+            return trimmed.to_string();
+        }
+    }
+    let id = Uuid::new_v4().to_string();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, &id);
+    id
+}
+
+fn wrapper_id_cache_path(host: &str) -> Option<std::path::PathBuf> {
+    let dirs = directories::ProjectDirs::from("com", "coredeck", "CoreDeck")?;
+    let key: String = host
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(dirs.data_dir().join("wrappers").join(key))
+}
+
 /// Local TCP port the daemon listens on, parsed out of `daemon_addr`
 /// (`host:port` form). Falls back to 19384 on a parse miss.
 fn local_daemon_port(daemon_addr: &str) -> u16 {
@@ -481,7 +524,6 @@ fn init_tracing() {
 
 fn run() -> Result<i32> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let wrapper_id = Uuid::new_v4().to_string();
     let claude_bin =
         std::env::var(CLAUDE_BINARY_ENV).unwrap_or_else(|_| DEFAULT_CLAUDE_BINARY.to_string());
     let daemon_addr =
@@ -490,6 +532,13 @@ fn run() -> Result<i32> {
     // so a user can `export COREDECK_SSH_HOST=dev-box` and just type
     // `claude`. None = local mode (today's behaviour).
     let ssh_host = extract_ssh_host(&mut args).or_else(|| std::env::var(SSH_HOST_ENV).ok());
+    // Local mode rolls a fresh UUID per invocation. Remote mode uses a
+    // host-keyed persistent id so claude alive in remote tmux keeps
+    // correlating to the same wrapper across reconnect cycles.
+    let wrapper_id = match &ssh_host {
+        Some(host) => persistent_wrapper_id_for_host(host),
+        None => Uuid::new_v4().to_string(),
+    };
     let cwd = std::env::current_dir().context("getting cwd")?;
     let pid = std::process::id();
     let started_at_unix = std::time::SystemTime::now()
