@@ -76,6 +76,18 @@ The daemon hosts every user-facing surface:
   from claude's PTY output, with a leading-glyph and trailing
   ` Claude Code` strip) → right-truncated cwd. Tray menu uses a
   wider, segment-aligned cwd cap.
+- **New wrapper steals device focus on SessionStart.** Was a known
+  bug: opening a fresh `claude` in an already-focused terminal didn't
+  promote it on the device because the SessionStart bind only ran
+  `set_active_session` when nothing was active, and OSC 1004 focus-in
+  doesn't fire when there's no focus *transition* (the terminal was
+  already focused). Now every SessionStart promotes — running `claude`
+  requires typing into a focused terminal, so SessionStart itself is
+  the "user is here" signal. The accepted corner case is a wrapper
+  auto-spawned in a background pane (e.g. `tmux split-window claude`),
+  which will incorrectly steal focus on the device until the user
+  knob-cycles back. Compaction/resume forks promote correctly too —
+  the new session_id is the live one.
 - **Per-wrapper Auto-approve enrollment.** Global Auto-approve toggle
   is still a single hardware switch, but it's gated on a per-wrapper
   enrollment state — three values per wrapper: opted-in, opted-out,
@@ -104,13 +116,6 @@ The daemon hosts every user-facing surface:
 
 ## Open backlog
 
-- **Active-tab not switching when a new wrapper opens focused.**
-  Opening a new claude session in a freshly-focused terminal
-  sometimes leaves the device pointing at the previously-active
-  wrapper. Suspected race between Register / SessionStart / OSC 1004
-  focus-in. Repro is intermittent — capture the daemon log next time
-  and look for `set_active_wrapper from focus-in failed` or a late
-  FocusOut around the new wrapper's Register.
 - **Cross-restart session caching.** A daemon restart wipes the
   in-memory wrapper map, so cross-restart session correlation needs
   the next SessionStart hook to rebind. Possible fix: cache

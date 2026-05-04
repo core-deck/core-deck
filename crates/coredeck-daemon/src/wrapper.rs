@@ -223,20 +223,26 @@ pub async fn wrapper_register_session(
             session_id = %req.session_id,
             "wrapper bound to session"
         );
-        // Bootstrap active selection only when nothing is active yet —
-        // typically the very first wrapper to register. Subsequent
-        // wrappers wait for an OSC 1004 focus-in or tray click; we don't
-        // want a new wrapper to steal the device while the user is
-        // looking at something else.
+        // Promote the new session to active on every SessionStart.
+        // Running `claude` requires typing into a focused terminal, so
+        // SessionStart is itself a strong "user is here" signal — and
+        // OSC 1004 focus-in won't fire for a wrapper that opened in
+        // an already-focused terminal (no focus *transition*), so we
+        // can't rely on it to do the promotion. Compaction/resume forks
+        // also re-promote here, which is what we want — the new
+        // session_id is the live one. The corner case where this
+        // misfires is a wrapper auto-spawned in a background pane
+        // (tmux split with `claude` as default-command); the user can
+        // knob-cycle back. Worth accepting for the much commoner case
+        // where a freshly-started wrapper should immediately drive
+        // the device.
         let became_active = {
             let mut claude = state.claude_state.write().await;
             claude.touch_session(&req.session_id);
-            if claude.active_session_id.is_none() {
-                claude.set_active_session(&req.session_id);
-                true
-            } else {
-                false
-            }
+            let was_already_active =
+                claude.active_session_id.as_deref() == Some(req.session_id.as_str());
+            claude.set_active_session(&req.session_id);
+            !was_already_active
         };
         emit_tab_list(&state).await;
         if became_active {
