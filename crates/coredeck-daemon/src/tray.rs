@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use coredeck_protocol::{WrapperTab, WrapperTabList, TAB_STATE_WORKING};
 use tray_icon::{
-    menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    menu::{ContextMenu, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     TrayIcon as TrayIconHandle, TrayIconBuilder,
 };
 use tracing::{debug, error, info};
@@ -164,9 +164,10 @@ impl DaemonTrayManager {
             return;
         }
 
+        let mut subtitles: Vec<Option<String>> = Vec::with_capacity(list.tabs.len());
         for (idx, tab) in list.tabs.iter().enumerate() {
-            let label = format_tab_menu_label(tab, list.active_wrapper_id.as_deref());
-            let item = MenuItem::new(label, true, None);
+            let (title, subtitle) = format_tab_menu_label(tab, list.active_wrapper_id.as_deref());
+            let item = MenuItem::new(title, true, None);
             if let Ok(mut map) = self.tab_dispatch.lock() {
                 map.insert(item.id().clone(), tab.wrapper_id.clone());
             }
@@ -174,7 +175,9 @@ impl DaemonTrayManager {
                 error!("Failed to insert tab item {}: {}", idx, e);
             }
             self.tab_items.push(item);
+            subtitles.push(subtitle);
         }
+        decorate_tab_subtitles(&self.menu, DYNAMIC_OFFSET, &subtitles);
     }
 
     /// Update tray to reflect device presence state
@@ -225,25 +228,82 @@ impl DaemonTrayManager {
     }
 }
 
-/// Format a single tab as a menu label. The active wrapper gets a "● "
-/// prefix; everything else gets a leading bullet space so the entries
-/// line up. A short status hint (current task or "idle") is appended
-/// when available.
-fn format_tab_menu_label(tab: &WrapperTab, active_id: Option<&str>) -> String {
+/// Build the (title, subtitle) pair for a single tab row. The active
+/// wrapper gets a leading "● ", everything else gets a leading bullet
+/// space so the rows line up. The subtitle is the current task (or
+/// "working" if the session is in WORKING state with no task string),
+/// rendered as a smaller dimmed line by macOS 14.4+'s
+/// `NSMenuItem.subtitle`. On older macOS it's silently dropped.
+fn format_tab_menu_label(tab: &WrapperTab, active_id: Option<&str>) -> (String, Option<String>) {
     let is_active = active_id == Some(tab.wrapper_id.as_str());
     let bullet = if is_active { "● " } else { "  " };
 
     let name = crate::wrapper::tab_label_long(tab);
-    let status = tab
+    let title = format!("{bullet}{name}");
+    let subtitle = tab
         .current_task
         .clone()
         .or_else(|| if tab.tab_state == TAB_STATE_WORKING { Some("working".to_string()) } else { None });
+    (title, subtitle)
+}
 
-    match status {
-        Some(s) => format!("{bullet}{name}  —  {s}"),
-        None => format!("{bullet}{name}"),
+/// Apply per-tab subtitles via `NSMenuItem.setSubtitle:` (macOS 14.4+).
+/// Walks the underlying NSMenu through `muda::Menu::ns_menu()` and
+/// calls the selector on each tab row at `[offset, offset + subtitles.len())`.
+/// Silently no-ops on older macOS where the selector isn't supported,
+/// or on non-macOS builds — falls back to title-only rows.
+#[cfg(target_os = "macos")]
+fn decorate_tab_subtitles(menu: &Menu, offset: usize, subtitles: &[Option<String>]) {
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let ptr = menu.ns_menu();
+    if ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let ns_menu = ptr as id;
+        let item_array: id = msg_send![ns_menu, itemArray];
+        if item_array == nil {
+            return;
+        }
+        let count: usize = msg_send![item_array, count];
+
+        // Probe once — `setSubtitle:` is macOS 14.4+. Older systems
+        // just keep the title-only row.
+        let supported: bool = {
+            let resp: i8 = msg_send![class!(NSMenuItem), instancesRespondToSelector: sel!(setSubtitle:)];
+            resp != 0
+        };
+        if !supported {
+            return;
+        }
+
+        for (i, sub) in subtitles.iter().enumerate() {
+            let idx = offset + i;
+            if idx >= count {
+                break;
+            }
+            let item: id = msg_send![item_array, objectAtIndex: idx];
+            if item == nil {
+                continue;
+            }
+            match sub {
+                Some(s) if !s.is_empty() => {
+                    let ns: id = NSString::alloc(nil).init_str(s);
+                    let _: () = msg_send![item, setSubtitle: ns];
+                }
+                _ => {
+                    let _: () = msg_send![item, setSubtitle: nil];
+                }
+            }
+        }
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+fn decorate_tab_subtitles(_menu: &Menu, _offset: usize, _subtitles: &[Option<String>]) {}
 
 // ── Tray icons ─────────────────────────────────────────────────────
 
