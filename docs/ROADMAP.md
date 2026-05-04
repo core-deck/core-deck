@@ -111,16 +111,6 @@ The daemon hosts every user-facing surface:
   focus-in. Repro is intermittent — capture the daemon log next time
   and look for `set_active_wrapper from focus-in failed` or a late
   FocusOut around the new wrapper's Register.
-- **Statusline extras.** Currently used: `context_window`, `cost`,
-  `model`, `session_name`, `effort.level`, `thinking.enabled`. Available
-  but ignored: `rate_limits.{five_hour,seven_day}`, `agent.name`,
-  `worktree.*`, `exceeds_200k_tokens`. Best fit is non-task surfaces —
-  tray menu rows (rate-limit countdown), an alert when
-  `exceeds_200k_tokens` flips, the settings page for
-  worktree/agent metadata.
-- **Third source for session titles.** `session_name` and OSC 0/1/2
-  terminal title are wired; `worktree.branch` from statusline could
-  fill in for unnamed wrappers. Manual rename via tray is also open.
 - **Cross-restart session caching.** A daemon restart wipes the
   in-memory wrapper map, so cross-restart session correlation needs
   the next SessionStart hook to rebind. Possible fix: cache
@@ -142,9 +132,6 @@ The daemon hosts every user-facing surface:
 - **Installer ergonomics.** `brew install` + a `coredeck setup`
   command that installs the daemon, registers launchd, runs
   `hooks install`, sets up the `claude` alias. Today all manual.
-- **Multiple wrappers in same cwd.** Rare but possible. Today
-  distinguished only by `wrapper_id` (env-var correlation — `cwd`
-  was an earlier fallback that's no longer needed).
 
 ---
 
