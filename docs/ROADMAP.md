@@ -86,7 +86,8 @@ The daemon hosts every user-facing surface:
   future one in that wrapper). Deny records opt-out so the daemon
   doesn't re-prompt; subsequent PRs fall straight through to Claude's
   terminal until Auto-approve toggles, the device disconnects, or the
-  wrapper exits.
+  wrapper exits. (Possible polish later: fire the enrollment alert on
+  focus-in instead of on-PR. Current on-PR trigger is good enough.)
 - **Robustness.** Wrapper has bounded-exponential WS reconnect
   backoff (1s→30s); daemon preserves prior `session_id` across
   re-register. YOLO gates on `device_status.connected && yolo` so a
