@@ -137,6 +137,20 @@ The daemon hosts every user-facing surface:
   launchd agent and `--zap` clears hook config + logs. For users who
   install the .app from a DMG without brew, the tray menu surfaces an
   "⚠ Install Claude Code hooks…" item until hooks are present.
+- **Remote claude over SSH.** `coredeck-claude --ssh user@host` opens
+  an interactive remote shell with `COREDECK_WRAPPER_ID` and
+  `COREDECK_DAEMON_URL` exported and an `ssh -R` reverse tunnel
+  pointing at the local daemon. The user runs claude (or `tmux new`
+  then claude) from there; hooks fire back through the tunnel,
+  session correlation works the same as local. Pair with
+  `coredeck setup --remote user@host` (one-shot SSH-based hook
+  install on the remote box). Tunnel mirrors the local daemon port
+  (default 19384) so claude's baked-in URL stays valid across
+  reconnects. tmux env propagation handled via `tmux setenv -g/-t`
+  on connect — new panes in already-running tmux see the fresh env.
+  Trust boundary is SSH itself; no tokens, no TLS. Tradeoff: one
+  wrapper per remote host at a time (port collision is a clean
+  fast-fail thanks to `ExitOnForwardFailure=yes`).
 
 ---
 
@@ -146,10 +160,13 @@ The daemon hosts every user-facing surface:
   a wrapper, the wrapper learns the resumed session_id lazily via
   SessionStart. A small race window exists; could be closed by
   passing `--resume <id>` through to the wrapper and pre-binding.
-- **Remote daemon.** Wrapper already supports `COREDECK_DAEMON_ADDR`,
-  so running claude on a remote dev box with local CoreDeck is
-  theoretically possible. Not tested; would need TLS for anything
-  serious.
+- **Stable wrapper_id across reconnects (remote mode).** Each
+  `coredeck-claude --ssh` invocation generates a fresh UUID. Claude
+  processes alive in remote tmux still have the *old* wrapper_id
+  baked into their env, so after reconnect their hooks correlate
+  to a now-defunct wrapper. Persist wrapper_id per remote host on
+  disk and reuse so the new wrapper takes over the existing
+  session-bindings cleanly.
 - **Linux / Windows.** PTY + raw mode + SIGWINCH work on Unix via
   `portable-pty` + `crossterm`. Windows needs ConPTY validation;
   Linux should be fine but unverified.
