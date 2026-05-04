@@ -33,15 +33,23 @@ See [docs/Building.md](docs/Building.md) for Linux dependencies, individual crat
 ## Running
 
 ```bash
+# One-time: register Claude Code hooks (writes ~/.claude/settings.json
+# with HTTP hook entries pointing at the daemon, plus a tiny curl shim
+# so claude doesn't error when the daemon isn't running).
+coredeck-daemon hooks install
+
 # Start the daemon
 coredeck-daemon
 
-# Install as launchd service for auto-start
+# Install as launchd service for auto-start (macOS)
 coredeck-daemon install
 
-# In a separate terminal, launch Claude under the wrapper
+# In a separate terminal, launch Claude under the wrapper. Aliasing
+# `claude` to `coredeck-claude` is the smoothest path.
 coredeck-claude
 ```
+
+The wrapper sets `COREDECK_WRAPPER_ID` in claude's env; the SessionStart hook (installed by `hooks install`) correlates that wrapper to the live `session_id` so the daemon can route HID input and per-session state correctly.
 
 ## Quick API Test
 
@@ -80,6 +88,7 @@ docs/                   # API documentation
 - [WebSocket Protocol](docs/WebSocket-Protocol.md) — Binary WS protocol for real-time control
 - [Protocol Limits](docs/Protocol-Limits.md) — Hard limits on text, tabs, brightness, payloads
 - [Shared Types](docs/Types.md) — JSON schemas for all API types
+- [Roadmap](docs/ROADMAP.md) — Shipped features and the open backlog
 
 ## License
 

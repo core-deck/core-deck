@@ -2,6 +2,8 @@
 
 This directory contains everything needed to build, sign, and distribute Core Deck for macOS.
 
+The macOS bundle is the daemon (`coredeck-daemon`) packaged as a tray-only application — no GUI window, just a menu-bar icon. `CFBundleExecutable` points at `coredeck-daemon`, `LSUIElement` is true (accessory app, no Dock icon).
+
 ## Prerequisites
 
 1. **Xcode Command Line Tools**
@@ -153,23 +155,13 @@ Check the detailed assessment:
 spctl --assess --type execute -vvv "dist/Core Deck.app"
 ```
 
-## App Store Considerations
+## App Store
 
-For App Store distribution, note that:
-
-1. **Sandboxing is required** - Use `entitlements-appstore.plist`
-2. **USB HID access** - May require special approval from Apple
-3. **Global hotkeys** - May require accessibility permissions review
-4. **Review times** - Allow 1-2 weeks for initial review
-
-The App Store build process:
-```bash
-./macos/scripts/bundle.sh --release --universal
-./macos/scripts/sign.sh \
-    --identity "3rd Party Mac Developer Application: Your Name (TEAM_ID)" \
-    --appstore
-# Then use Xcode or Transporter to upload
-```
+Direct App Store distribution is out of scope right now — the daemon
+talks to a custom USB HID device and ships a CLI wrapper, neither of
+which fit the sandbox-first model cleanly. The `entitlements-appstore.plist`
+file is kept around in case that changes. Distribute via Developer ID
++ notarization (above) instead.
 
 ## Version Updates
 

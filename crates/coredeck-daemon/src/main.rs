@@ -108,9 +108,9 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum HooksAction {
-    /// Install Claude Code hooks in ~/.claude/settings.local.json
+    /// Install Claude Code hooks in ~/.claude/settings.json
     Install,
-    /// Remove Claude Code hooks from ~/.claude/settings.local.json
+    /// Remove Claude Code hooks from ~/.claude/settings.json
     Uninstall,
 }
 

@@ -269,9 +269,9 @@ curl -s http://127.0.0.1:19384/api/version
 
 ### POST /hooks/{event_type}
 
-Receives Claude Code hook events and statusline data. These endpoints are **not** subject to the WebSocket lock — they are called by Claude Code's hooks system, not by the app.
+Receives Claude Code hook events and statusline data. These endpoints are **not** subject to the WebSocket lock — they are called by Claude Code's hooks system, not by API consumers.
 
-Hook events are stored in daemon state, forwarded to the connected app via WebSocket (`ClaudeHookEvent`, tag `0x85`), and may trigger side effects (e.g., YOLO auto-approve).
+Hook events update per-session daemon state (which directly drives the device display), are broadcast to any connected WS client as `ClaudeHookEvent` (tag `0x85`), and may trigger side effects (e.g., YOLO auto-approve, raising the wrapper terminal on the active session).
 
 **Path parameters:**
 
@@ -344,7 +344,122 @@ The daemon replaces the session's tracked subagent list wholesale on every tick 
 
 > **Note:** Claude Code sends snake_case in request payloads but expects camelCase in the PermissionRequest response.
 
-**Hook installation:** Run `coredeck-daemon hooks install` to write hook config to `~/.claude/settings.json`. Run `coredeck-daemon hooks uninstall` to remove it.
+**Hook installation:** Run `coredeck-daemon hooks install` to write hook config to `~/.claude/settings.json`. Run `coredeck-daemon hooks uninstall` to remove it. The same operations are also exposed over HTTP — see `/api/hooks/*` below.
+
+---
+
+### GET /api/hooks/status
+
+Report whether Claude Code hooks are currently installed in `~/.claude/settings.json`.
+
+**Response: 200 OK**
+
+```json
+{
+  "installed": true,
+  "settings_path": "/Users/vden/.claude/settings.json"
+}
+```
+
+---
+
+### POST /api/hooks/install
+
+Install Claude Code hooks (equivalent to `coredeck-daemon hooks install`). Writes a curl-shim script to `~/.claude/coredeck-hook.sh` and merges hook entries into `~/.claude/settings.json`. Existing user-defined hook entries for the same event are preserved; only blocks the daemon previously wrote get replaced.
+
+**Response: 200 OK** with the new install status.
+
+---
+
+### POST /api/hooks/uninstall
+
+Remove the daemon's hook entries from `~/.claude/settings.json`. Symmetric with install — strips only entries the daemon owns and leaves user blocks alone.
+
+**Response: 200 OK** with the new install status.
+
+---
+
+### GET /api/wrappers
+
+Report the daemon's current wrapper / tab list — same data the device uses to draw its tab indicator.
+
+**Response: 200 OK** — see [WrapperTabList](Types.md#wrappertablist).
+
+---
+
+### GET /api/soft-keys
+
+Read all three soft-key configurations from the device.
+
+**Response: 200 OK**
+
+```json
+{
+  "keys": [
+    {"index": 0, "key_type": "Default", "data": []},
+    {"index": 1, "key_type": "Keycode", "data": [0, 40]},
+    {"index": 2, "key_type": "String", "data": [1, 104, 105]}
+  ]
+}
+```
+
+---
+
+### PUT /api/soft-keys/{index}
+
+Update a single soft key (index 0–2). Same payload semantics as the WebSocket `SetSoftKey` command but in JSON.
+
+```json
+{
+  "key_type": "Keycode",
+  "data": [0, 40],
+  "save": true
+}
+```
+
+---
+
+### POST /api/soft-keys/reset
+
+Reset all three soft keys to their keymap defaults.
+
+---
+
+### GET /api/soft-keys/presets
+
+List saved soft-key preset bundles. Presets are user-defined named groupings of all three keys.
+
+---
+
+### POST /api/soft-keys/presets/apply
+
+Apply a named preset to the device.
+
+```json
+{"name": "git workflow", "save": true}
+```
+
+---
+
+### POST /api/soft-keys/presets/save
+
+Save the current soft-key configuration as a named preset.
+
+```json
+{"name": "git workflow"}
+```
+
+---
+
+### DELETE /api/soft-keys/presets/{name}
+
+Delete a saved preset.
+
+---
+
+### GET / and GET /settings
+
+Static settings page — single-file HTML/CSS/JS embedded in the daemon binary, opened from the tray menu's "Open Settings…" entry. Hosts the soft-key editor and other configuration UI.
 
 ---
 

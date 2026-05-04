@@ -20,9 +20,11 @@ When no WebSocket client is connected, mutating HTTP endpoints transiently open 
 
 ### Claude Code Hooks
 
-The daemon receives structured events from Claude Code via HTTP hooks (`POST /hooks/{event_type}`). Hook data is stored in daemon state and forwarded to the connected app via WebSocket. The `PermissionRequest` hook supports YOLO auto-approve when the device hardware switch is on.
+The daemon receives structured events from Claude Code via HTTP hooks (`POST /hooks/{event_type}`). Hook data is stored in per-session daemon state and broadcast to any connected WebSocket client (`ClaudeHookEvent`, tag `0x85`). The daemon also drives the device display directly from this state — a connected WS client is optional, not required. The `PermissionRequest` hook supports YOLO auto-approve when the device hardware switch is on.
 
-Install hooks: `coredeck-daemon hooks install`
+The wrapper (`coredeck-claude`) connects on a separate WS endpoint (`/wrapper-ws`) for byte-injection and focus reporting; that channel is independent of the main `/ws` API.
+
+Install hooks: `coredeck-daemon hooks install` (writes `~/.claude/settings.json`)
 Uninstall hooks: `coredeck-daemon hooks uninstall`
 
 ## Quick Examples

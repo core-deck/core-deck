@@ -223,3 +223,65 @@ Constants for the tab state values used in `tabs` arrays:
 | 0 | Inactive | Tab exists but no active process |
 | 1 | Started | Process started, waiting |
 | 2 | Working | Process actively running |
+
+## WrapperTabList
+
+Returned by `GET /api/wrappers` and broadcast over the main WS as part of `ClaudeHookEvent` activity. Snapshot of every connected `coredeck-claude` wrapper, including the per-session metadata gathered from hooks.
+
+```json
+{
+  "tabs": [
+    {
+      "wrapper_id": "01HX...",
+      "session_id": "ba8fc727-...",
+      "cwd": "/Users/vden/work/agentdeck/app",
+      "pid": 49321,
+      "started_at_unix": 1746360000,
+      "session_name": "Coredeck Revive",
+      "terminal_title": "Coredeck Revive",
+      "model": "Sonnet",
+      "current_tool": "Bash",
+      "current_task": "Thinking…",
+      "last_tool_summary": "rg foo",
+      "permission_mode": "default",
+      "tab_state": 2,
+      "context_percent": 42.5,
+      "cost_usd": 1.23,
+      "subagent_label": null,
+      "subagent_count": 0
+    }
+  ],
+  "active_wrapper_id": "01HX..."
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `tabs` | array of [WrapperTab](#wrappertab) | One entry per live wrapper, sorted by start time |
+| `active_wrapper_id` | string \| null | Wrapper currently considered "focused" — target for HID input |
+
+## WrapperTab
+
+One row in the wrapper-tab snapshot. Most optional fields are `null` until the corresponding hook fires (e.g. `model` is unknown until the first statusline event).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `wrapper_id` | string | Stable id assigned by the wrapper at startup |
+| `session_id` | string \| null | Bound Claude session (set by `SessionStart` hook) |
+| `cwd` | string | Working directory at wrapper start |
+| `pid` | integer | Wrapper PID |
+| `started_at_unix` | u64 | Wrapper start time (Unix seconds) |
+| `session_name` | string \| null | Custom session name (`--name` flag or `/rename`) |
+| `terminal_title` | string \| null | Most recent OSC 0/1/2 title sniffed from claude's PTY |
+| `prompt_summary` | string \| null | Short summary of the most recent user prompt (kept for external consumers; no longer used as the device session label) |
+| `current_todo` | string \| null | In-progress TodoWrite item, if any |
+| `model` | string \| null | Model display name from the latest statusline |
+| `current_tool` | string \| null | Most recent tool name from PreToolUse |
+| `current_task` | string \| null | Headline activity ("Thinking…", or a TaskCreate subject) |
+| `last_tool_summary` | string \| null | Most recent tool's no-prefix summary, used for the device's task2 line |
+| `permission_mode` | string \| null | Latest hook-reported `permission_mode` |
+| `tab_state` | integer | Firmware tab-state value: 0=Inactive, 1=Started, 2=Working |
+| `context_percent` | float \| null | Context window usage percent |
+| `cost_usd` | float \| null | Session cost in USD |
+| `subagent_label` | string \| null | First in-flight subagent's label (with `(N)` prefix when more than one) |
+| `subagent_count` | u32 | Number of subagent rows reported in the latest tick |

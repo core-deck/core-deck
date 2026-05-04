@@ -6,6 +6,8 @@
 
 The WebSocket connection uses an exclusive lock model: only one client may be connected at a time. Attempting to connect while another client holds the lock returns HTTP **409 Conflict** on the upgrade request.
 
+> **Note:** This is the public WS API for third-party clients (status dashboards, automation tooling). The `coredeck-claude` wrapper uses a separate non-locking endpoint (`/wrapper-ws`) with a JSON message protocol — see `WrapperToDaemon` / `DaemonToWrapper` in `coredeck-protocol`. The two WS surfaces are independent.
+
 ### Connection Lifecycle
 
 **On connect:**
@@ -37,13 +39,13 @@ All WebSocket messages use binary frames with a 3-byte header:
 
 ### Sequence Number Rules
 
-- **Events** (Daemon → App, unsolicited): always `seq = 0`
-- **Commands** (App → Daemon): must use `seq > 0` (u16, range 1–65535)
-- **Responses** (Daemon → App, to a command): echo the `seq` from the original command
+- **Events** (Daemon → Client, unsolicited): always `seq = 0`
+- **Commands** (Client → Daemon): must use `seq > 0` (u16, range 1–65535)
+- **Responses** (Daemon → Client, to a command): echo the `seq` from the original command
 
-## Commands (App → Daemon)
+## Commands (Client → Daemon)
 
-Commands are sent by the client to control the device. Each command receives either a `CommandAck` (success with no data) or a tag-specific response, or a `CommandError` on failure.
+Commands are sent by the connected WS client to control the device. Each command receives either a `CommandAck` (success with no data), a tag-specific response, or a `CommandError` on failure.
 
 ### 0x01 — UpdateDisplay
 
@@ -162,7 +164,7 @@ Clear the alert for a specific tab.
 
 **Response:** `CommandAck` (0x87)
 
-## Events (Daemon → App)
+## Events (Daemon → Client)
 
 Events are unsolicited messages from the daemon. They always use `seq = 0`.
 
@@ -218,7 +220,7 @@ A soft key configured as String type was pressed.
 
 ### 0x85 — ClaudeHookEvent
 
-Claude Code hook event forwarded from the daemon. The daemon receives hook events via HTTP (`POST /hooks/{event_type}`) and forwards them to the connected app over WebSocket.
+Claude Code hook event broadcast by the daemon. The daemon receives hook events via HTTP (`POST /hooks/{event_type}`) and broadcasts them to the connected WS client. The daemon also drives the device display directly from internal state, so this event is informational — clients can mirror or inspect activity but don't need to handle it for the device to work.
 
 **Payload:** JSON-encoded envelope
 
@@ -255,18 +257,11 @@ Claude Code hook event forwarded from the daemon. The daemon receives hook event
 
 > **Note:** Tag `0x85` is shared with `SoftKeyResponse` — they are distinguished by context (events use `seq = 0`, responses echo the command's `seq > 0`).
 
-### 0x89 — AppControl
+### 0x89 — AppControl (deprecated, never emitted)
 
-Tray menu action directed at the app.
+Reserved tag from the previous "embedded GUI app" architecture; the daemon no longer emits this event. Documented for completeness because the tag value is still in `coredeck-protocol` enums. Clients can safely ignore tag `0x89`.
 
-**Payload:** 1 byte — action
-
-| Value | Action |
-|-------|--------|
-| 0x01 | ShowWindow |
-| 0x02 | HideWindow |
-
-## Responses (Daemon → App)
+## Responses (Daemon → Client, replies to commands)
 
 Responses echo the sequence number from the command they reply to.
 
@@ -290,23 +285,23 @@ Command failed. Payload is the error message as UTF-8 bytes.
 
 | Tag | Hex | Direction | Name |
 |-----|-----|-----------|------|
-| 0x01 | `01` | App → Daemon | UpdateDisplay |
-| 0x02 | `02` | App → Daemon | Ping |
-| 0x03 | `03` | App → Daemon | SetBrightness |
-| 0x04 | `04` | App → Daemon | SetSoftKey |
-| 0x05 | `05` | App → Daemon | GetSoftKey |
-| 0x06 | `06` | App → Daemon | ResetSoftKeys |
-| 0x07 | `07` | App → Daemon | SetMode |
-| 0x08 | `08` | App → Daemon | Alert |
-| 0x09 | `09` | App → Daemon | GetVersion |
-| 0x0A | `0A` | App → Daemon | ClearAlert |
-| 0x80 | `80` | Daemon → App | DeviceConnected |
-| 0x81 | `81` | Daemon → App | DeviceDisconnected |
-| 0x82 | `82` | Daemon → App | StateChanged |
-| 0x83 | `83` | Daemon → App | KeyEvent |
-| 0x84 | `84` | Daemon → App | TypeString |
-| 0x85 | `85` | Daemon → App | ClaudeHookEvent / SoftKeyResponse |
-| 0x86 | `86` | Daemon → App | VersionResponse |
-| 0x87 | `87` | Daemon → App | CommandAck |
-| 0x88 | `88` | Daemon → App | CommandError |
-| 0x89 | `89` | Daemon → App | AppControl |
+| 0x01 | `01` | Client → Daemon | UpdateDisplay |
+| 0x02 | `02` | Client → Daemon | Ping |
+| 0x03 | `03` | Client → Daemon | SetBrightness |
+| 0x04 | `04` | Client → Daemon | SetSoftKey |
+| 0x05 | `05` | Client → Daemon | GetSoftKey |
+| 0x06 | `06` | Client → Daemon | ResetSoftKeys |
+| 0x07 | `07` | Client → Daemon | SetMode |
+| 0x08 | `08` | Client → Daemon | Alert |
+| 0x09 | `09` | Client → Daemon | GetVersion |
+| 0x0A | `0A` | Client → Daemon | ClearAlert |
+| 0x80 | `80` | Daemon → Client | DeviceConnected |
+| 0x81 | `81` | Daemon → Client | DeviceDisconnected |
+| 0x82 | `82` | Daemon → Client | StateChanged |
+| 0x83 | `83` | Daemon → Client | KeyEvent |
+| 0x84 | `84` | Daemon → Client | TypeString |
+| 0x85 | `85` | Daemon → Client | ClaudeHookEvent / SoftKeyResponse |
+| 0x86 | `86` | Daemon → Client | VersionResponse |
+| 0x87 | `87` | Daemon → Client | CommandAck |
+| 0x88 | `88` | Daemon → Client | CommandError |
+| 0x89 | `89` | (deprecated) | AppControl — never emitted |
