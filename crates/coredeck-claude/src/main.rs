@@ -382,7 +382,7 @@ fn build_ssh_command(
     // (.zshrc, .bashrc — interactive-only on most setups) is available.
     // With no command, it drops into a prompt. With -c, it runs the
     // command and exits when it does.
-    let inner = if claude_args.is_empty() {
+    let exec_part = if claude_args.is_empty() {
         "exec \"$SHELL\" -li".to_string()
     } else {
         let argv = claude_args
@@ -393,16 +393,39 @@ fn build_ssh_command(
         format!("exec \"$SHELL\" -lic {}", sh_quote(&argv))
     };
 
-    // Shell prefix-assignment: `VAR=val exec cmd` exports VAR for the
-    // duration of the exec. Works in bash/zsh/dash. We can't do `env
-    // VAR=val exec ...` here because `env` doesn't accept the `exec`
-    // shell builtin as its program argument — that's what produced the
-    // first reported failure.
+    // tmux propagation. tmux servers capture env at *first-server-start*
+    // time and don't refresh it for subsequent client attaches. So if the
+    // user already has a tmux server running on the remote (very common
+    // — a tmux user's server outlives any single ssh session), claude
+    // launched inside any tmux pane gets stale (or empty) COREDECK_*.
+    //
+    // On every wrapper connect we push the fresh values into the running
+    // server's global session env *and* into every existing session. New
+    // panes anywhere (incl. inside an attached session) see the fresh
+    // env. Existing panes still have their original env — they need a
+    // relaunch — but that's the standard tmux env-refresh limitation.
+    //
+    // The block is gated on `tmux info` so we don't accidentally start a
+    // tmux server on a box that doesn't have one running. Errors are
+    // swallowed so a misconfigured tmux doesn't break login.
+    let tmux_propagate = r##"if command -v tmux >/dev/null 2>&1 && tmux info >/dev/null 2>&1; then
+    tmux setenv -g COREDECK_WRAPPER_ID "$COREDECK_WRAPPER_ID" 2>/dev/null || true
+    tmux setenv -g COREDECK_DAEMON_URL "$COREDECK_DAEMON_URL" 2>/dev/null || true
+    for s in $(tmux ls -F "#{session_name}" 2>/dev/null); do
+        tmux setenv -t "$s" COREDECK_WRAPPER_ID "$COREDECK_WRAPPER_ID" 2>/dev/null || true
+        tmux setenv -t "$s" COREDECK_DAEMON_URL "$COREDECK_DAEMON_URL" 2>/dev/null || true
+    done
+fi"##;
+
+    // `export VAR=val` (with no command after) exports the var into the
+    // current shell so subsequent commands (and the eventually-exec'd
+    // user shell) see it. POSIX-portable across bash/zsh/dash.
     let remote_cmd = format!(
-        "COREDECK_WRAPPER_ID={} COREDECK_DAEMON_URL=http://127.0.0.1:{} {}",
+        "export COREDECK_WRAPPER_ID={}; export COREDECK_DAEMON_URL=http://127.0.0.1:{}; {} {}",
         sh_quote(wrapper_id),
         remote_port,
-        inner,
+        tmux_propagate,
+        exec_part,
     );
 
     let mut cmd = CommandBuilder::new("ssh");
