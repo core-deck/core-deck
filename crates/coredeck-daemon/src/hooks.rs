@@ -1019,12 +1019,12 @@ async fn handle_permission_request(
     }
 
     let session_label = compute_session_label(state, &session_id).await;
-    // Under YOLO, the prompt is doing double duty: the device is asking
-    // both "allow this tool?" and "opt this wrapper into auto-approve
-    // from now on?". Title the alert so the user knows Allow has the
-    // opt-in side-effect.
+    // Under Auto-approve mode the prompt is doing double duty: the
+    // device is asking both "allow this tool?" and "enroll this
+    // wrapper into auto-approve from now on?". The "Auto-approve" verb
+    // tells the user Allow has the opt-in side-effect.
     let alert_text = if yolo {
-        format!("YOLO {}?", tool)
+        format!("Auto-approve {}?", tool)
     } else {
         format!("Allow {}?", tool)
     };
