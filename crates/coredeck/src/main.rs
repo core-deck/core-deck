@@ -117,8 +117,17 @@ enum Commands {
         #[command(subcommand)]
         action: HooksAction,
     },
-    /// One-shot setup: install hooks, register launchd, print alias hint
-    Setup,
+    /// One-shot setup. Without `--remote`: installs hooks + launchd
+    /// locally and prints the alias hint. With `--remote <user@host>`:
+    /// installs only the hooks on that SSH host (no launchd) — used to
+    /// pair `coredeck-claude --ssh <host>` with hook coverage on the
+    /// remote box.
+    Setup {
+        /// SSH host (e.g. `vden@dev-box`). When set, installs hooks on
+        /// the remote instead of locally.
+        #[arg(long)]
+        remote: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -155,8 +164,11 @@ fn main() {
             }
             return;
         }
-        Some(Commands::Setup) => {
-            run_setup(&cli.listen);
+        Some(Commands::Setup { remote }) => {
+            match remote {
+                Some(host) => run_remote_setup(&host, &cli.listen),
+                None => run_setup(&cli.listen),
+            }
             return;
         }
         None => {}
@@ -791,6 +803,24 @@ fn install_launchd(listen: &str) {
         let _ = listen;
         eprintln!("launchd is only available on macOS");
     }
+}
+
+/// Remote variant of `run_setup`. Installs only the hook shim scripts +
+/// settings.json on `<user>@<host>` over SSH. Doesn't touch local state.
+/// Pair with `coredeck-claude --ssh <host>` to get full hook coverage
+/// on the remote box.
+fn run_remote_setup(host: &str, listen: &str) {
+    println!("=== CoreDeck remote setup ({}) ===\n", host);
+    println!("Installing Claude Code hooks on {}…", host);
+    hooks::install_claude_hooks_remote(host, listen);
+    println!();
+    println!("Done. To use this remote box:");
+    println!();
+    println!("  coredeck-claude --ssh {}", host);
+    println!();
+    println!("From the remote shell, run `claude` (or `tmux new -s w` then claude");
+    println!("to survive transient disconnects). Hooks will fire back through the");
+    println!("reverse tunnel to the daemon on this Mac.");
 }
 
 /// One-shot setup: install Claude Code hooks, register launchd, and tell

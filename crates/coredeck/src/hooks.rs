@@ -1455,8 +1455,197 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
         serde_json::json!({})
     };
 
+    apply_hook_entries(&mut settings, &register_path_str, &hook_shim_path_str, &base_url);
+
+    if let Some(parent) = settings_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+    }
+
+    let json = serde_json::to_string_pretty(&settings).expect("Failed to serialize settings");
+    std::fs::write(&settings_path, json)
+        .map_err(|e| format!("Failed to write {}: {}", settings_path.display(), e))
+}
+
+/// Install hooks on a remote SSH host. Mirror of `install_hooks_result`
+/// for the case where claude lives on `<user>@<host>` reached over the
+/// reverse-tunnel that `coredeck-claude --ssh` opens.
+///
+/// `daemon_addr` is the *local* daemon's listen address (e.g.
+/// `127.0.0.1:19384`). The remote shim and statusLine entries point
+/// at `127.0.0.1:<port>` because the wrapper's reverse tunnel mirrors
+/// that exact port on the remote.
+pub fn install_hooks_remote_result(host: &str, daemon_addr: &str) -> Result<(), String> {
+    // Probe remote $HOME so we can bake absolute paths into the merged
+    // settings.json. (Matching what the local install does — Claude Code
+    // wants absolute command paths in hook entries.)
+    let remote_home = ssh_capture(host, "echo $HOME")?;
+    let remote_home = remote_home.trim();
+    if remote_home.is_empty() {
+        return Err(format!("ssh {}: empty $HOME", host));
+    }
+
+    let claude_dir = format!("{}/.claude", remote_home);
+    let register_path = format!("{}/coredeck-register.sh", claude_dir);
+    let shim_path = format!("{}/coredeck-hook.sh", claude_dir);
+    let settings_path = format!("{}/settings.json", claude_dir);
+
+    // Ensure ~/.claude exists; push the two shim scripts; chmod +x.
+    ssh_run(host, &format!("mkdir -p {}", sh_quote(&claude_dir)))?;
+    ssh_push_file(host, &register_path, REGISTER_SCRIPT)?;
+    ssh_push_file(host, &shim_path, HOOK_SHIM_SCRIPT)?;
+    ssh_run(
+        host,
+        &format!(
+            "chmod +x {} {}",
+            sh_quote(&register_path),
+            sh_quote(&shim_path)
+        ),
+    )?;
+
+    // Read remote settings.json, default to {} if absent or unparseable.
+    let raw = ssh_capture(
+        host,
+        &format!(
+            "cat {} 2>/dev/null || echo '{{}}'",
+            sh_quote(&settings_path)
+        ),
+    )
+    .unwrap_or_else(|_| "{}".to_string());
+    let mut settings: serde_json::Value = serde_json::from_str(raw.trim())
+        .unwrap_or_else(|_| serde_json::json!({}));
+
+    let base_url = format!("http://{}", daemon_addr);
+    apply_hook_entries(&mut settings, &register_path, &shim_path, &base_url);
+
+    let json = serde_json::to_string_pretty(&settings).expect("Failed to serialize settings");
+    ssh_push_file(host, &settings_path, &json)?;
+
+    println!("Remote hooks installed: {}:{}", host, settings_path);
+    Ok(())
+}
+
+/// Single-quote `s` for safe inclusion in a POSIX shell command line.
+/// (Same logic as the wrapper's `sh_quote` — duplicated here to keep
+/// the dependency graph clean; both crates only need a few lines.)
+fn sh_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Run `ssh <host> <cmd>`, capturing stdout. Stderr is forwarded so
+/// auth prompts and errors surface to the user.
+fn ssh_capture(host: &str, cmd: &str) -> Result<String, String> {
+    use std::process::{Command, Stdio};
+    let output = Command::new("ssh")
+        .args(["-o", "BatchMode=no", "-o", "ConnectTimeout=10", host, cmd])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("spawning ssh: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "ssh {} `{}` exited with {}",
+            host,
+            cmd,
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Run `ssh <host> <cmd>`, ignore stdout. Used for mkdir/chmod where
+/// only the exit status matters.
+fn ssh_run(host: &str, cmd: &str) -> Result<(), String> {
+    use std::process::Stdio;
+    let status = std::process::Command::new("ssh")
+        .args(["-o", "BatchMode=no", "-o", "ConnectTimeout=10", host, cmd])
+        .stdin(Stdio::null())
+        .status()
+        .map_err(|e| format!("spawning ssh: {}", e))?;
+    if !status.success() {
+        return Err(format!(
+            "ssh {} `{}` exited with {}",
+            host,
+            cmd,
+            status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(())
+}
+
+/// Pipe `contents` into `cat > <remote_path>` over ssh. Used to push
+/// shim scripts and settings.json.
+fn ssh_push_file(host: &str, remote_path: &str, contents: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=no",
+            "-o",
+            "ConnectTimeout=10",
+            host,
+            &format!("cat > {}", sh_quote(remote_path)),
+        ])
+        .stdin(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("spawning ssh: {}", e))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "ssh stdin missing".to_string())?;
+        stdin
+            .write_all(contents.as_bytes())
+            .map_err(|e| format!("writing to ssh stdin: {}", e))?;
+    }
+    let status = child.wait().map_err(|e| format!("waiting on ssh: {}", e))?;
+    if !status.success() {
+        return Err(format!(
+            "ssh {} push {} exited with {}",
+            host,
+            remote_path,
+            status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(())
+}
+
+/// CLI entry point — install remote hooks, exit on error.
+pub fn install_claude_hooks_remote(host: &str, daemon_addr: &str) {
+    match install_hooks_remote_result(host, daemon_addr) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Pure merge: take a settings.json `Value`, three absolute paths/URL
+/// (where the shim scripts live + the base URL the curl-only
+/// statusLine entries should hit), and rewrite the `hooks`,
+/// `statusLine`, and `subagentStatusLine` keys to point at us.
+///
+/// Non-destructive against unrelated hook entries the user maintains
+/// for the same events. Returns nothing — caller persists `settings`.
+pub fn apply_hook_entries(
+    settings: &mut serde_json::Value,
+    register_script_path: &str,
+    hook_shim_path: &str,
+    base_url: &str,
+) {
     if !settings.is_object() {
-        settings = serde_json::json!({});
+        *settings = serde_json::json!({});
     }
 
     // Tool-matching hooks (PreToolUse, PostToolUse, PermissionRequest) require
@@ -1487,7 +1676,7 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
         .and_then(|v| v.as_object_mut())
         .expect("hooks just ensured to be an object");
 
-    let shim_command = |event: &str| format!("{} {}", hook_shim_path_str, event);
+    let shim_command = |event: &str| format!("{} {}", hook_shim_path, event);
 
     for event_name in &tool_hook_events {
         merge_managed_hook(
@@ -1524,7 +1713,7 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
         "SessionStart",
         serde_json::json!({
             "hooks": [
-                { "type": "command", "command": register_path_str },
+                { "type": "command", "command": register_script_path },
                 { "type": "command", "command": shim_command("SessionStart") },
             ]
         }),
@@ -1558,15 +1747,6 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
     );
     settings["statusLine"] = new_statusline;
     settings["subagentStatusLine"] = new_subagent_statusline;
-
-    if let Some(parent) = settings_path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
-    }
-
-    let json = serde_json::to_string_pretty(&settings).expect("Failed to serialize settings");
-    std::fs::write(&settings_path, json)
-        .map_err(|e| format!("Failed to write {}: {}", settings_path.display(), e))
 }
 
 /// True if a hook block (a single matcher entry inside an event's array)
