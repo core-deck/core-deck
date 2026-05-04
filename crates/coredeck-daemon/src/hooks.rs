@@ -550,15 +550,15 @@ const MAX_TASK_LINE_CHARS: usize = 30;
 /// Tool-specific glyph prefix for the device. Some tools have long
 /// names that would steal too many of the 30 task-line characters
 /// from the actual detail; we replace `Tool: ` with a single-glyph
-/// pictogram instead. The glyphs are picked to be monochrome BMP
-/// chars that read at a glance: `☐`/`☑` for to-do create/complete,
-/// `◎` (bullseye) for Monitor's watch-and-wait. Returns `None` for
+/// pictogram instead. Constrained to glyphs the firmware's Terminus
+/// embedded font actually carries — `○`/`✓` for to-do create/complete,
+/// `●` (filled disc) for Monitor's watch-and-wait. Returns `None` for
 /// tools that should keep the standard `Name: detail` format.
 fn glyph_prefix(tool: &str) -> Option<&'static str> {
     match tool {
-        "TaskCreate" => Some("☐ "),
-        "TaskComplete" => Some("☑ "),
-        "Monitor" => Some("◎ "),
+        "TaskCreate" => Some("○ "),
+        "TaskComplete" => Some("✓ "),
+        "Monitor" => Some("● "),
         _ => None,
     }
 }
