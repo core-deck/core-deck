@@ -165,8 +165,10 @@ impl DaemonTrayManager {
         }
 
         let mut subtitles: Vec<Option<String>> = Vec::with_capacity(list.tabs.len());
+        let mut actives: Vec<bool> = Vec::with_capacity(list.tabs.len());
         for (idx, tab) in list.tabs.iter().enumerate() {
-            let (title, subtitle) = format_tab_menu_label(tab, list.active_wrapper_id.as_deref());
+            let (title, subtitle, is_active) =
+                format_tab_menu_label(tab, list.active_wrapper_id.as_deref());
             let item = MenuItem::new(title, true, None);
             if let Ok(mut map) = self.tab_dispatch.lock() {
                 map.insert(item.id().clone(), tab.wrapper_id.clone());
@@ -176,8 +178,9 @@ impl DaemonTrayManager {
             }
             self.tab_items.push(item);
             subtitles.push(subtitle);
+            actives.push(is_active);
         }
-        decorate_tab_subtitles(&self.menu, DYNAMIC_OFFSET, &subtitles);
+        decorate_tab_rows(&self.menu, DYNAMIC_OFFSET, &subtitles, &actives);
     }
 
     /// Update tray to reflect device presence state
@@ -228,32 +231,40 @@ impl DaemonTrayManager {
     }
 }
 
-/// Build the (title, subtitle) pair for a single tab row. The active
-/// wrapper gets a leading "● ", everything else gets a leading bullet
-/// space so the rows line up. The subtitle is the current task (or
-/// "working" if the session is in WORKING state with no task string),
-/// rendered as a smaller dimmed line by macOS 14.4+'s
-/// `NSMenuItem.subtitle`. On older macOS it's silently dropped.
-fn format_tab_menu_label(tab: &WrapperTab, active_id: Option<&str>) -> (String, Option<String>) {
+/// Build the (title, subtitle, is_active) tuple for a single tab row.
+/// The title is just the session name — alignment between rows comes
+/// from NSMenuItem's built-in state column (a checkmark for the active
+/// row), not a leading bullet character, so the title and subtitle
+/// always start at the same x position. The subtitle is the current
+/// task (or "working" if the session is in WORKING state with no task
+/// string), rendered by macOS 14.4+'s `NSMenuItem.subtitle`. On older
+/// macOS it's silently dropped.
+fn format_tab_menu_label(tab: &WrapperTab, active_id: Option<&str>) -> (String, Option<String>, bool) {
     let is_active = active_id == Some(tab.wrapper_id.as_str());
-    let bullet = if is_active { "● " } else { "  " };
-
     let name = crate::wrapper::tab_label_long(tab);
-    let title = format!("{bullet}{name}");
     let subtitle = tab
         .current_task
         .clone()
         .or_else(|| if tab.tab_state == TAB_STATE_WORKING { Some("working".to_string()) } else { None });
-    (title, subtitle)
+    (name, subtitle, is_active)
 }
 
-/// Apply per-tab subtitles via `NSMenuItem.setSubtitle:` (macOS 14.4+).
-/// Walks the underlying NSMenu through `muda::Menu::ns_menu()` and
-/// calls the selector on each tab row at `[offset, offset + subtitles.len())`.
-/// Silently no-ops on older macOS where the selector isn't supported,
-/// or on non-macOS builds — falls back to title-only rows.
+/// Decorate each tab row's NSMenuItem with a subtitle (macOS 14.4+'s
+/// `setSubtitle:`) and a state checkmark (`setState:` for the active
+/// row). The state column gives consistent left-alignment across rows
+/// without needing a leading bullet character in the title — important
+/// because proportional menu fonts mean a literal "● " vs. "  " prefix
+/// don't line up to the same x. Walks the underlying NSMenu via
+/// `muda::Menu::ns_menu()`. On older macOS where `setSubtitle:` isn't
+/// supported, the subtitle is dropped but the state column still
+/// works. No-op on non-macOS.
 #[cfg(target_os = "macos")]
-fn decorate_tab_subtitles(menu: &Menu, offset: usize, subtitles: &[Option<String>]) {
+fn decorate_tab_rows(
+    menu: &Menu,
+    offset: usize,
+    subtitles: &[Option<String>],
+    actives: &[bool],
+) {
     use cocoa::base::{id, nil};
     use cocoa::foundation::NSString;
     use objc::{class, msg_send, sel, sel_impl};
@@ -262,6 +273,9 @@ fn decorate_tab_subtitles(menu: &Menu, offset: usize, subtitles: &[Option<String
     if ptr.is_null() {
         return;
     }
+    // NSControlStateValueOn = 1, Off = 0.
+    const STATE_ON: i64 = 1;
+    const STATE_OFF: i64 = 0;
     unsafe {
         let ns_menu = ptr as id;
         let item_array: id = msg_send![ns_menu, itemArray];
@@ -270,17 +284,18 @@ fn decorate_tab_subtitles(menu: &Menu, offset: usize, subtitles: &[Option<String
         }
         let count: usize = msg_send![item_array, count];
 
-        // Probe once — `setSubtitle:` is macOS 14.4+. Older systems
-        // just keep the title-only row.
-        let supported: bool = {
-            let resp: i8 = msg_send![class!(NSMenuItem), instancesRespondToSelector: sel!(setSubtitle:)];
+        // `setSubtitle:` is macOS 14.4+; `setState:` has been around
+        // since 10.0. Probe the subtitle selector and skip just that
+        // call on older systems.
+        let subtitle_supported: bool = {
+            let resp: i8 = msg_send![
+                class!(NSMenuItem),
+                instancesRespondToSelector: sel!(setSubtitle:)
+            ];
             resp != 0
         };
-        if !supported {
-            return;
-        }
 
-        for (i, sub) in subtitles.iter().enumerate() {
+        for (i, (sub, on)) in subtitles.iter().zip(actives.iter()).enumerate() {
             let idx = offset + i;
             if idx >= count {
                 break;
@@ -289,13 +304,18 @@ fn decorate_tab_subtitles(menu: &Menu, offset: usize, subtitles: &[Option<String
             if item == nil {
                 continue;
             }
-            match sub {
-                Some(s) if !s.is_empty() => {
-                    let ns: id = NSString::alloc(nil).init_str(s);
-                    let _: () = msg_send![item, setSubtitle: ns];
-                }
-                _ => {
-                    let _: () = msg_send![item, setSubtitle: nil];
+            let state: i64 = if *on { STATE_ON } else { STATE_OFF };
+            let _: () = msg_send![item, setState: state];
+
+            if subtitle_supported {
+                match sub {
+                    Some(s) if !s.is_empty() => {
+                        let ns: id = NSString::alloc(nil).init_str(s);
+                        let _: () = msg_send![item, setSubtitle: ns];
+                    }
+                    _ => {
+                        let _: () = msg_send![item, setSubtitle: nil];
+                    }
                 }
             }
         }
@@ -303,7 +323,13 @@ fn decorate_tab_subtitles(menu: &Menu, offset: usize, subtitles: &[Option<String
 }
 
 #[cfg(not(target_os = "macos"))]
-fn decorate_tab_subtitles(_menu: &Menu, _offset: usize, _subtitles: &[Option<String>]) {}
+fn decorate_tab_rows(
+    _menu: &Menu,
+    _offset: usize,
+    _subtitles: &[Option<String>],
+    _actives: &[bool],
+) {
+}
 
 // ── Tray icons ─────────────────────────────────────────────────────
 
