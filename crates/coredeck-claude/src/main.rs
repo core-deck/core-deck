@@ -34,7 +34,7 @@ use futures_util::{SinkExt, StreamExt};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{debug, info, warn};
+use tracing::debug;
 use uuid::Uuid;
 
 /// OSC 1004 focus tracking: ask the host terminal to send `ESC [ I` on
@@ -585,8 +585,11 @@ async fn run_ws(
         let (ws_stream, _) = match tokio_tungstenite::connect_async(&url).await {
             Ok(v) => v,
             Err(e) => {
+                // Daemon-down is a routine state during restart; never
+                // a WARN. Anyone debugging this sets COREDECK_LOG=debug
+                // and gets the full retry chatter.
                 if !announced_offline {
-                    warn!(error = %e, url = %url, "wrapper WS connect failed; running without daemon (will keep retrying)");
+                    debug!(error = %e, url = %url, "wrapper WS connect failed; running without daemon (will keep retrying)");
                     announced_offline = true;
                 } else {
                     debug!(error = %e, "wrapper WS reconnect attempt failed");
@@ -596,10 +599,10 @@ async fn run_ws(
             }
         };
         if announced_offline {
-            info!(url = %url, "wrapper WS reconnected");
+            debug!(url = %url, "wrapper WS reconnected");
             announced_offline = false;
         } else {
-            info!(url = %url, "wrapper WS connected");
+            debug!(url = %url, "wrapper WS connected");
         }
 
         let (mut ws_tx, mut ws_rx) = ws_stream.split();
