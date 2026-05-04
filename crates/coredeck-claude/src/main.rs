@@ -224,6 +224,9 @@ fn keep_title_hint(title: &str) -> Option<String> {
 const DEFAULT_CLAUDE_BINARY: &str = "claude";
 const CLAUDE_BINARY_ENV: &str = "COREDECK_CLAUDE_BIN";
 const DAEMON_ADDR_ENV: &str = "COREDECK_DAEMON_ADDR";
+const SSH_HOST_ENV: &str = "COREDECK_SSH_HOST";
+const REMOTE_PORT_MIN: u16 = 49152;
+const REMOTE_PORT_MAX: u16 = 65535;
 
 /// Best-effort detection of which terminal application hosts this wrapper,
 /// from environment variables set by the host. Order matters: tmux is
@@ -292,6 +295,113 @@ fn detect_host_terminal() -> HostTerminal {
     }
 }
 
+/// Pull `--ssh <host>` (or `--ssh=<host>`) out of `args`, returning the
+/// host string. Anything else stays in `args` for pass-through to claude.
+fn extract_ssh_host(args: &mut Vec<String>) -> Option<String> {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--ssh" {
+            if i + 1 < args.len() {
+                let host = args.remove(i + 1);
+                args.remove(i);
+                return Some(host);
+            }
+            args.remove(i);
+            return None;
+        }
+        if let Some(value) = args[i].strip_prefix("--ssh=") {
+            let host = value.to_string();
+            args.remove(i);
+            return Some(host);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Single-quote `s` for safe inclusion in a POSIX shell command. Embeds
+/// any internal `'` via the `'\''` escape, the same way printf %q does
+/// for sh/bash. We can't use shell-words/shlex here without pulling a
+/// dep just for one helper.
+fn sh_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// Pick a port in the IANA dynamic range. We don't care if it's free on
+/// the remote — sshd binds with `ExitOnForwardFailure=yes`, so a
+/// collision exits ssh fast and the user re-runs. Cryptographic
+/// randomness isn't needed; nanos are fine and cheap.
+fn pick_remote_port() -> u16 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let span = (REMOTE_PORT_MAX - REMOTE_PORT_MIN) as u32;
+    REMOTE_PORT_MIN + (nanos % span) as u16
+}
+
+/// Local TCP port the daemon listens on, parsed out of `daemon_addr`
+/// (`host:port` form). Falls back to 19384 on a parse miss.
+fn local_daemon_port(daemon_addr: &str) -> u16 {
+    daemon_addr
+        .rsplit(':')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(19384)
+}
+
+/// Build the `ssh -t -R <port>:localhost:<daemon_port> <host> "<cmd>"`
+/// invocation for remote-claude mode. The remote command sets
+/// `COREDECK_WRAPPER_ID` and `COREDECK_DAEMON_URL` inline, then exec's
+/// `claude` with the user's pass-through args. We don't rely on
+/// SendEnv/AcceptEnv — those vary by sshd config; inline env always
+/// works.
+fn build_ssh_command(
+    host: &str,
+    wrapper_id: &str,
+    claude_args: &[String],
+    local_daemon_port: u16,
+) -> (CommandBuilder, u16) {
+    let remote_port = pick_remote_port();
+    let claude_argv = claude_args
+        .iter()
+        .map(|a| sh_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let remote_cmd = format!(
+        "COREDECK_WRAPPER_ID={} COREDECK_DAEMON_URL=http://127.0.0.1:{} exec claude {}",
+        sh_quote(wrapper_id),
+        remote_port,
+        claude_argv,
+    );
+
+    let mut cmd = CommandBuilder::new("ssh");
+    cmd.arg("-t");
+    cmd.arg("-R");
+    cmd.arg(format!("{}:localhost:{}", remote_port, local_daemon_port));
+    cmd.arg("-o");
+    cmd.arg("ExitOnForwardFailure=yes");
+    // Quieter ssh: skip the "Welcome to Ubuntu…" MOTD and the banner. Auth
+    // prompts (passwords, passphrases) still surface — they go through the
+    // PTY, not stderr.
+    cmd.arg("-o");
+    cmd.arg("LogLevel=ERROR");
+    cmd.arg(host);
+    cmd.arg(remote_cmd);
+    (cmd, remote_port)
+}
+
 /// Shared writer to the child PTY's master end. Both the user's stdin
 /// thread and the daemon-WS task write into this.
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
@@ -325,12 +435,16 @@ fn init_tracing() {
 }
 
 fn run() -> Result<i32> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
     let wrapper_id = Uuid::new_v4().to_string();
     let claude_bin =
         std::env::var(CLAUDE_BINARY_ENV).unwrap_or_else(|_| DEFAULT_CLAUDE_BINARY.to_string());
     let daemon_addr =
         std::env::var(DAEMON_ADDR_ENV).unwrap_or_else(|_| DEFAULT_DAEMON_ADDR.to_string());
+    // --ssh <host> on the CLI takes precedence; fall back to the env var
+    // so a user can `export COREDECK_SSH_HOST=dev-box` and just type
+    // `claude`. None = local mode (today's behaviour).
+    let ssh_host = extract_ssh_host(&mut args).or_else(|| std::env::var(SSH_HOST_ENV).ok());
     let cwd = std::env::current_dir().context("getting cwd")?;
     let pid = std::process::id();
     let started_at_unix = std::time::SystemTime::now()
@@ -342,6 +456,7 @@ fn run() -> Result<i32> {
     debug!(
         wrapper_id = %wrapper_id,
         claude_bin = %claude_bin,
+        ssh_host = ?ssh_host,
         host_terminal = ?host_terminal.kind,
         "starting wrapper",
     );
@@ -359,17 +474,33 @@ fn run() -> Result<i32> {
         })
         .context("openpty")?;
 
-    let mut cmd = CommandBuilder::new(&claude_bin);
-    for a in &args {
-        cmd.arg(a);
-    }
-    cmd.env(WRAPPER_ENV_VAR, &wrapper_id);
+    let (mut cmd, spawn_label) = match &ssh_host {
+        Some(host) => {
+            let port = local_daemon_port(&daemon_addr);
+            let (cmd, remote_port) = build_ssh_command(host, &wrapper_id, &args, port);
+            debug!(
+                ssh_host = %host,
+                remote_port,
+                local_daemon_port = port,
+                "wrapper using SSH reverse tunnel for remote claude",
+            );
+            (cmd, format!("ssh {}", host))
+        }
+        None => {
+            let mut cmd = CommandBuilder::new(&claude_bin);
+            for a in &args {
+                cmd.arg(a);
+            }
+            cmd.env(WRAPPER_ENV_VAR, &wrapper_id);
+            (cmd, claude_bin.clone())
+        }
+    };
     cmd.cwd(&cwd);
 
     let child = pair
         .slave
         .spawn_command(cmd)
-        .with_context(|| format!("spawning {}", claude_bin))?;
+        .with_context(|| format!("spawning {}", spawn_label))?;
     // Close our handle to the slave end; the child still owns its own.
     drop(pair.slave);
 
