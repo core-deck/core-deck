@@ -410,6 +410,24 @@ async fn handle_claude_hook(
             "UserPromptSubmit" => {
                 crate::alerts::cancel_for_session_progress(state, sid).await;
             }
+            // Tool-scoped progress: PreToolUse / PostToolUse fire
+            // per-tool. For parallel tool calls Claude interleaves them
+            // with PermissionRequests (e.g. PreA → PR_A → PreB → PR_B);
+            // an unconditional cancel here would evict alert A as soon
+            // as PreB arrives, forcing the user back to claude's
+            // terminal prompt. Match by tool_name so only the same-tool
+            // signal cancels.
+            "PreToolUse" | "PostToolUse" => {
+                crate::alerts::cancel_pending_for_tool(
+                    state,
+                    sid,
+                    event.tool_name.as_deref(),
+                )
+                .await;
+            }
+            // Coarse session-progress: Stop, SessionStart/End,
+            // PreCompact, etc. — clear any pending alert and drain
+            // queued ones for this session.
             _ => {
                 crate::alerts::cancel_pending_for_session(state, sid).await;
             }

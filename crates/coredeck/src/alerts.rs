@@ -489,19 +489,63 @@ pub async fn cancel_idle_for_session(state: &DaemonState, session_id: &str) {
     try_install_next_pending(state).await;
 }
 
-/// Cancel only a *Pending* permission alert for `session_id`. Use on
-/// non-`UserPromptSubmit` activity hooks (PreToolUse, PostToolUse, Stop,
-/// Notification): if Claude is moving past the permission point, the
-/// pending prompt is stale (user probably answered in their terminal).
+/// Cancel a *Pending* permission alert for `session_id`. Use on
+/// coarse session-progress hooks (Stop, SessionStart/End, PreCompact)
+/// where the user has clearly moved past the permission point.
+///
+/// Tool-scoped progress hooks (PreToolUse, PostToolUse) must call
+/// `cancel_pending_for_tool` instead — they fire per-tool and would
+/// otherwise evict an active alert when a *sibling* parallel tool
+/// call advances. See the function for the parallel-tools rationale.
+///
 /// Idle alerts must persist through all of these — they only become
 /// stale when the user actually submits a new prompt.
 pub async fn cancel_pending_for_session(state: &DaemonState, session_id: &str) {
+    cancel_pending_inner(state, session_id, /* require_tool_match */ None).await;
+}
+
+/// Variant of `cancel_pending_for_session` that only cancels when the
+/// hook's `tool_name` matches the active Pending's `tool_name`.
+///
+/// Why: Claude Code fires PreToolUse and PostToolUse per-tool, and for
+/// parallel tool calls it interleaves them with the matching
+/// PermissionRequests — e.g. `PreA → PR_A → PreB → PR_B`. An
+/// unconditional cancel would evict alert A when PreB fires (same
+/// session, different tool), forcing the user back to claude's
+/// terminal prompt for A even though our Pending is still valid.
+///
+/// `tool` of `None` is treated as "no information" — never cancels.
+/// Callers that genuinely want session-wide cancel should use
+/// `cancel_pending_for_session` instead.
+pub async fn cancel_pending_for_tool(
+    state: &DaemonState,
+    session_id: &str,
+    tool: Option<&str>,
+) {
+    let Some(tool) = tool else {
+        return;
+    };
+    cancel_pending_inner(state, session_id, Some(tool)).await;
+}
+
+async fn cancel_pending_inner(
+    state: &DaemonState,
+    session_id: &str,
+    require_tool_match: Option<&str>,
+) {
     let cleared = {
         let mut guard = state.alert_state.lock().await;
-        let should_clear = matches!(
-            &*guard,
-            AlertState::Pending { session_id: sid, .. } if sid == session_id,
-        );
+        let should_clear = match &*guard {
+            AlertState::Pending {
+                session_id: sid,
+                tool_name,
+                ..
+            } if sid == session_id => match require_tool_match {
+                None => true,
+                Some(want) => tool_name.as_deref() == Some(want),
+            },
+            _ => false,
+        };
         if !should_clear {
             None
         } else {
@@ -519,9 +563,12 @@ pub async fn cancel_pending_for_session(state: &DaemonState, session_id: &str) {
         debug!(session = %session_id, "pending alert cancelled by session progress");
     }
 
-    // The hook signalling progress past the permission point also
-    // makes any queued Pending requests for this session stale.
-    drop_queued_for_session(state, session_id).await;
+    // Coarse-progress callers (require_tool_match=None) also drop
+    // queued PRs for this session — they're stale. Tool-scoped callers
+    // leave the queue alone; sibling tool calls aren't a stale signal.
+    if require_tool_match.is_none() {
+        drop_queued_for_session(state, session_id).await;
+    }
 
     if cleared.is_some() {
         try_install_next_pending(state).await;
