@@ -1060,6 +1060,7 @@ async fn handle_permission_request(
         &session_label,
         &alert_text,
         Some(&task),
+        yolo,
     )
     .await
     {

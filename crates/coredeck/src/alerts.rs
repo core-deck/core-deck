@@ -64,6 +64,13 @@ pub enum AlertState {
         label: String,
         text: String,
         details: Option<String>,
+        /// True when this prompt asked the user to enroll the wrapper
+        /// in Auto-approve (text "Auto-approve this tab?" rather than
+        /// per-tool "Allow Bash?"). On resolution we apply the decision
+        /// to the wrapper's enrollment state *before* draining the
+        /// queue, so sibling PRs from the same wrapper auto-resolve
+        /// without re-prompting.
+        is_enrollment: bool,
     },
 }
 
@@ -106,6 +113,10 @@ pub struct QueuedPending {
     pub text: String,
     pub details: Option<String>,
     pub tx: oneshot::Sender<DecisionOutcome>,
+    /// See `AlertState::Pending::is_enrollment`. Carried through the
+    /// queue so a queued enrollment prompt that sits behind a live one
+    /// still applies enrollment semantics when it pops to the front.
+    pub is_enrollment: bool,
 }
 
 impl std::fmt::Debug for QueuedPending {
@@ -206,6 +217,7 @@ pub async fn install_pending_alert(
     session_label: &str,
     text: &str,
     details: Option<&str>,
+    is_enrollment: bool,
 ) -> Option<oneshot::Receiver<DecisionOutcome>> {
     let busy = {
         let guard = state.alert_state.lock().await;
@@ -226,6 +238,7 @@ pub async fn install_pending_alert(
             text: text.to_string(),
             details: details.map(|s| s.to_string()),
             tx,
+            is_enrollment,
         });
         debug!(
             session = %session_id,
@@ -261,6 +274,7 @@ pub async fn install_pending_alert(
         label: session_label.to_string(),
         text: text.to_string(),
         details: details.map(|s| s.to_string()),
+        is_enrollment,
     };
     Some(rx)
 }
@@ -270,6 +284,14 @@ pub async fn install_pending_alert(
 /// or the send fails, the queued tx is dropped (which wakes the hook
 /// handler with `Err` and falls it back to Claude's terminal prompt),
 /// and we move on to the next entry.
+///
+/// Before installing, re-checks the wrapper's enrollment state — if
+/// the live alert that just resolved enrolled the wrapper, sibling
+/// queued PRs auto-resolve as Allow without re-prompting; if it
+/// declined, queued entries from the same wrapper drop their tx
+/// (parked hook handlers fall back to Claude's terminal prompt). This
+/// is the layer that keeps a single Allow tap from turning into N
+/// taps when claude fires N parallel tool calls.
 pub async fn try_install_next_pending(state: &DaemonState) {
     loop {
         let q = {
@@ -279,6 +301,30 @@ pub async fn try_install_next_pending(state: &DaemonState) {
         let Some(q) = q else {
             return;
         };
+
+        // Skip past queued entries the user has already implicitly
+        // answered via the active alert's enrollment decision.
+        let wrapper_id = crate::wrapper::wrapper_id_for_session(state, &q.session_id).await;
+        if let Some(ref wid) = wrapper_id {
+            if crate::wrapper::is_yolo_opted_in(state, wid).await {
+                debug!(
+                    session = %q.session_id,
+                    "queued PR auto-allowed: wrapper now enrolled in Auto-approve",
+                );
+                let _ = q.tx.send(DecisionOutcome::Allow);
+                continue;
+            }
+            if crate::wrapper::is_yolo_opted_out(state, wid).await {
+                debug!(
+                    session = %q.session_id,
+                    "queued PR dropped: wrapper opted out of Auto-approve",
+                );
+                // Drop tx → hook handler sees Err → falls back to
+                // Claude's terminal prompt for this PR.
+                drop(q.tx);
+                continue;
+            }
+        }
 
         let tab_index = crate::wrapper::tab_index_for_session(state, &q.session_id)
             .await
@@ -319,6 +365,7 @@ pub async fn try_install_next_pending(state: &DaemonState) {
             label: q.label,
             text: q.text,
             details: q.details,
+            is_enrollment: q.is_enrollment,
         };
         debug!("queued permission alert promoted to active");
         return;
@@ -584,9 +631,11 @@ pub async fn consume_input_for_decision(
         AlertState::None => return AlertOutcome::Passthrough,
         AlertState::Idle { tab_index, .. } => (false, tab_index),
         AlertState::Pending {
+            session_id: alert_sid,
             tool_name,
             tx,
             tab_index,
+            is_enrollment,
             ..
         } => {
             // Dismiss (Esc) on a Pending alert is treated as Deny —
@@ -600,6 +649,30 @@ pub async fn consume_input_for_decision(
                 outcome = ?outcome,
                 "permission decision from device",
             );
+            // For enrollment prompts, apply the decision to the
+            // wrapper's opt-in/opt-out state *before* waking the
+            // parked hook handler — so the queue drain that runs
+            // synchronously below picks up the new state and
+            // auto-resolves any sibling parallel-tool PRs instead of
+            // re-prompting the user once per parallel call. The hook
+            // handler still re-marks idempotently on its own resume.
+            if is_enrollment {
+                let still_yolo = state.device_status.read().await.yolo;
+                if still_yolo {
+                    if let Some(wid) =
+                        crate::wrapper::wrapper_id_for_session(state, &alert_sid).await
+                    {
+                        match outcome {
+                            DecisionOutcome::Allow => {
+                                crate::wrapper::mark_yolo_opt_in(state, &wid).await;
+                            }
+                            DecisionOutcome::Deny => {
+                                crate::wrapper::mark_yolo_opt_out(state, &wid).await;
+                            }
+                        }
+                    }
+                }
+            }
             let _ = tx.send(outcome);
             (true, tab_index)
         }
