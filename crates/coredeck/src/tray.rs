@@ -328,7 +328,7 @@ fn decorate_tab_rows(
     actives: &[bool],
 ) {
     use cocoa::base::{id, nil};
-    use cocoa::foundation::NSString;
+    use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
     use objc::{class, msg_send, sel, sel_impl};
 
     let ptr = menu.ns_menu();
@@ -357,6 +357,17 @@ fn decorate_tab_rows(
             resp != 0
         };
 
+        // One shared on-state image: a small filled circle drawn near
+        // the top of a tall canvas. AppKit centers the state image in
+        // the (taller-than-usual, because of the subtitle) row, but
+        // the canvas height plus the upward bias on the circle make
+        // it land at the title's vertical level rather than between
+        // title and subtitle. labelColor gives us automatic light/dark
+        // adaptation. Replaces the system ✓ — feels more like a
+        // "now playing" indicator than a check, which matches the
+        // semantic ("this tab is active") better.
+        let on_image = make_active_indicator_image();
+
         for (i, (sub, on)) in subtitles.iter().zip(actives.iter()).enumerate() {
             let idx = offset + i;
             if idx >= count {
@@ -368,6 +379,10 @@ fn decorate_tab_rows(
             }
             let state: i64 = if *on { STATE_ON } else { STATE_OFF };
             let _: () = msg_send![item, setState: state];
+            // Setting the on-state image on every row (not just active
+            // ones) so subsequent state flips reuse the same indicator
+            // without another round through this function.
+            let _: () = msg_send![item, setOnStateImage: on_image];
 
             if subtitle_supported {
                 match sub {
@@ -381,6 +396,49 @@ fn decorate_tab_rows(
                 }
             }
         }
+
+        // The menu items each retain `on_image` via setOnStateImage:;
+        // release our local +1 from `alloc/init`.
+        let _: () = msg_send![on_image, release];
+    }
+
+    /// Build a top-biased filled-circle NSImage to use as the
+    /// active-row indicator. Caller owns one +1 retain (from
+    /// `alloc/init`); release after handing to AppKit.
+    unsafe fn make_active_indicator_image() -> id {
+        let nsimage_class = class!(NSImage);
+        let image: id = msg_send![nsimage_class, alloc];
+        let image: id = msg_send![
+            image,
+            initWithSize: NSSize::new(14.0, 32.0)
+        ];
+
+        let _: () = msg_send![image, lockFocus];
+
+        // labelColor adapts to light/dark and respects accessibility
+        // settings — same source the system ✓ uses.
+        let color: id = msg_send![class!(NSColor), labelColor];
+        let _: () = msg_send![color, set];
+
+        // Image coords are non-flipped (Y-up). Place the 8x8 circle in
+        // the upper portion: y=20 means circle bottom is 20 from image
+        // bottom, so the circle occupies y=20..28 of a 32-tall image —
+        // visually the upper third. Combined with AppKit's vertical
+        // centering of the state image in the row, this puts the dot
+        // at roughly the title's baseline rather than centered between
+        // title and subtitle.
+        let circle_rect = NSRect::new(
+            NSPoint::new(3.0, 20.0),
+            NSSize::new(8.0, 8.0),
+        );
+        let path: id = msg_send![
+            class!(NSBezierPath),
+            bezierPathWithOvalInRect: circle_rect
+        ];
+        let _: () = msg_send![path, fill];
+
+        let _: () = msg_send![image, unlockFocus];
+        image
     }
 }
 
