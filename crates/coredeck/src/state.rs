@@ -204,6 +204,13 @@ pub struct Wrapper {
     /// box, hooks come back through an SSH reverse tunnel). Used by tray
     /// + device label code to prefix the title with `↦`.
     pub is_remote: bool,
+    /// Last OSC 1004 focus state — true while the host terminal has OS
+    /// focus, false otherwise. Drives idle-alert suppression: if the
+    /// user is already looking at this session's window we skip the
+    /// device alert (the in-terminal prompt is enough). Defaults to
+    /// false on connect; the wrapper sends a FocusChanged frame as
+    /// soon as it sees the first OSC 1004 report.
+    pub is_focused: bool,
     /// Channel for sending DaemonToWrapper messages back over the wrapper's WS.
     pub tx: mpsc::UnboundedSender<DaemonToWrapper>,
 }

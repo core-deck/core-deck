@@ -161,12 +161,32 @@ pub enum AlertOutcome {
 /// Show an Idle alert (Claude waiting for input). No-op if another alert
 /// is already live — we don't want a slow idle prompt to clobber a
 /// PermissionRequest that the user is in the middle of answering.
+///
+/// Also a no-op if the alerting session's wrapper currently has OS
+/// focus on its host terminal — claude itself shows the idle prompt
+/// in the terminal the user is looking at, so a duplicate device
+/// alert is just noise. (If the user later switches focus away and
+/// claude is still idle, the next idle Notification re-fires and
+/// surfaces the alert then.)
 pub async fn show_idle_alert(
     state: &DaemonState,
     session_id: &str,
     session_label: &str,
     text: &str,
 ) {
+    {
+        let wrappers = state.wrappers.read().await;
+        let already_attending = wrappers
+            .values()
+            .any(|w| w.session_id.as_deref() == Some(session_id) && w.is_focused);
+        if already_attending {
+            debug!(
+                session = %session_id,
+                "Idle alert suppressed; user is already focused on this session's terminal",
+            );
+            return;
+        }
+    }
     {
         let guard = state.alert_state.lock().await;
         if guard.is_some() {

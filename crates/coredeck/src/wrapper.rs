@@ -145,6 +145,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                 host_terminal,
                 terminal_title: preserved_terminal_title,
                 is_remote,
+                is_focused: false,
                 tx: cmd_tx.clone(),
             },
         );
@@ -201,10 +202,18 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                     break;
                 }
                 Ok(WrapperToDaemon::FocusChanged { focused, .. }) => {
+                    {
+                        let mut wrappers = state.wrappers.write().await;
+                        if let Some(w) = wrappers.get_mut(&wrapper_id) {
+                            w.is_focused = focused;
+                        }
+                    }
                     if focused {
                         handle_wrapper_focused(&state, &wrapper_id).await;
                     }
-                    // Focus-out is currently informational only.
+                    // No focus-out side-effects beyond the bookkeeping
+                    // above — losing focus shouldn't drop alerts or
+                    // unset the device's active tab.
                 }
                 Ok(WrapperToDaemon::TitleHint { title, .. }) => {
                     handle_title_hint(&state, &wrapper_id, title).await;
