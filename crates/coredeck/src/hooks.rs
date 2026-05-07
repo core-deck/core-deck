@@ -939,7 +939,16 @@ async fn handle_pre_tool_use(
         if s.active_task_id.is_none() {
             s.current_task = Some("Thinking…".to_string());
         }
-        s.last_tool_summary = Some(summary);
+        // AskUserQuestion's surface is the question itself (raised as
+        // an Idle alert below) — duplicating it on line 2 as
+        // "AskUserQuestion: …" would just steal characters from the
+        // alert overlay it sits behind. Clear line 2 so the alert
+        // owns the screen until the user answers in the terminal.
+        if event.tool_name.as_deref() == Some("AskUserQuestion") {
+            s.last_tool_summary = None;
+        } else {
+            s.last_tool_summary = Some(summary);
+        }
         s.tool_count_this_turn = s.tool_count_this_turn.saturating_add(1);
         s.active = true;
         s.phase_started_at_unix = Some(now_unix());
