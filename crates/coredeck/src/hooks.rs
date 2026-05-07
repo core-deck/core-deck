@@ -1667,10 +1667,13 @@ pub fn apply_hook_entries(
         *settings = serde_json::json!({});
     }
 
-    // Tool-matching hooks (PreToolUse, PostToolUse, PermissionRequest) require
-    // a "matcher" field — without it they silently don't fire. Use "*" for all.
-    // Non-tool hooks (Stop, Notification) don't use matchers.
-    let tool_hook_events = ["PreToolUse", "PostToolUse", "PermissionRequest"];
+    // Tool-matching hooks (PreToolUse, PostToolUse) require a "matcher"
+    // field — without it they silently don't fire. Use "*" for all.
+    // PermissionRequest also takes a matcher but is installed
+    // separately below because its shim needs a much longer curl
+    // timeout (the user might take minutes to react) and a `timeout`
+    // field so Claude's own 60s default doesn't bail first.
+    let tool_hook_events = ["PreToolUse", "PostToolUse"];
     let plain_hook_events = [
         "Stop",
         "Notification",
@@ -1710,6 +1713,25 @@ pub fn apply_hook_entries(
             }),
         );
     }
+
+    // PermissionRequest needs human-scale wait times. The shim runs
+    // `curl -m 1800` so curl doesn't bail before the user taps, and
+    // the entry sets `timeout: 1800` so Claude itself doesn't give up
+    // at its default 60s. The daemon's own 5-minute internal timeout
+    // is the actual outer limit; the longer values above just keep
+    // the transport from prematurely abandoning the request.
+    merge_managed_hook(
+        hooks_map,
+        "PermissionRequest",
+        serde_json::json!({
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": format!("{} PermissionRequest 1800", hook_shim_path),
+                "timeout": 1800,
+            }]
+        }),
+    );
 
     for event_name in &plain_hook_events {
         merge_managed_hook(
