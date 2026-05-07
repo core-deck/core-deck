@@ -1038,8 +1038,10 @@ async fn handle_permission_request(
     }
 
     // YOLO gating, with three guardrails:
-    //   1. ExitPlanMode never auto-approves — the whole point of plan
-    //      mode is human review before execution.
+    //   1. Tools whose whole purpose is to wait on the user
+    //      (`ExitPlanMode`, `AskUserQuestion`) never auto-approve —
+    //      "approving" them just lets Claude resume with an empty
+    //      answer, which silently corrupts the turn.
     //   2. Only auto-approve while the device is actually connected.
     //      A cable pull / USB flake drops the kill-switch out of reach,
     //      so we fall back to an explicit prompt.
@@ -1058,7 +1060,8 @@ async fn handle_permission_request(
         Some(sid) => crate::wrapper::wrapper_id_for_session(state, sid).await,
         None => None,
     };
-    if yolo && connected && tool != "ExitPlanMode" {
+    let user_input_tool = matches!(tool, "ExitPlanMode" | "AskUserQuestion");
+    if yolo && connected && !user_input_tool {
         let (opted_in, opted_out) = match &wrapper_id {
             Some(wid) => (
                 crate::wrapper::is_yolo_opted_in(state, wid).await,
