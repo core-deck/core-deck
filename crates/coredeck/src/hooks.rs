@@ -642,6 +642,44 @@ fn strip_url_scheme(s: &str) -> &str {
         .unwrap_or(s)
 }
 
+/// Build a richer `TaskUpdate` summary by joining the cached task
+/// subject (populated on `TaskCreated`) with a status-specific glyph.
+/// `None` when the event has no resolvable task_id or the registry
+/// doesn't know it (e.g., out-of-order hooks). Caller falls back to
+/// the generic summary in that case.
+async fn enrich_task_update(state: &DaemonState, event: &HookEvent) -> Option<String> {
+    let sid = event.session_id.as_deref()?;
+    let input = event.tool_input.as_ref()?;
+    let task_id = input.get("task_id").and_then(|v| v.as_str())?;
+    let status = input.get("status").and_then(|v| v.as_str()).unwrap_or("");
+
+    let subject = {
+        let claude = state.claude_state.read().await;
+        claude
+            .sessions
+            .get(sid)
+            .and_then(|s| s.task_registry.get(task_id).cloned())?
+    };
+
+    // Glyphs constrained to Terminus' coverage on the device. `in_progress`
+    // takes the dedicated `current_task` line via the earlier branch in
+    // handle_pre_tool_use; this path covers status changes that surface
+    // via `last_tool_summary` (line 2).
+    let glyph = match status {
+        "completed" | "complete" | "done" => "✓ ",
+        "cancelled" | "canceled" | "failed" | "blocked" => "✗ ",
+        // pending / unknown: same circle TaskCreate uses
+        _ => "○ ",
+    };
+    let prefix_chars = glyph.chars().count();
+    let detail_budget = MAX_TASK_LINE_CHARS.saturating_sub(prefix_chars);
+    if detail_budget == 0 {
+        return Some(glyph.trim_end().to_string());
+    }
+    let detail_short = truncate_for_display(&subject, detail_budget);
+    Some(format!("{glyph}{detail_short}"))
+}
+
 /// Tool-specific picker: which `tool_input` field carries the most
 /// informative single-string summary for the device. Falls through to
 /// `generic_pick` for tools we don't special-case.
@@ -875,7 +913,19 @@ async fn handle_pre_tool_use(
         return StatusCode::OK.into_response();
     }
 
-    let summary = extract_tool_summary(event.tool_name.as_deref(), event.tool_input.as_ref());
+    let mut summary = extract_tool_summary(event.tool_name.as_deref(), event.tool_input.as_ref());
+
+    // TaskUpdate (non-in_progress branches) carries only `task_id` +
+    // `status`, so the generic summary collapses to a bare "TaskUpdate"
+    // — useless on a 30-char line. Substitute the cached subject from
+    // TaskCreated and prefix with a status glyph so the user can tell
+    // what changed without raising the terminal.
+    if event.tool_name.as_deref() == Some("TaskUpdate") {
+        if let Some(rich) = enrich_task_update(state, event).await {
+            summary = rich;
+        }
+    }
+
     debug!("PreToolUse: {} ({})", event.tool_name.as_deref().unwrap_or("?"), summary);
 
     if let Some(ref sid) = event.session_id {
