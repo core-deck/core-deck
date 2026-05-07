@@ -216,6 +216,12 @@ pub fn qmk_keycode_to_terminal_bytes(keycode: u16) -> Option<Vec<u8>> {
 /// daemon so it doesn't inject an F20 escape sequence into the wrapper.
 pub const KEYCODE_F20: u16 = 0x006F;
 
+/// QMK keycode for F24. The firmware emits this when the Claude button
+/// is held while the Stop button is tapped (instead of the usual
+/// LCTL(KC_C)) — the daemon treats it as "open a fresh claude in the
+/// currently-focused session's cwd."
+pub const KEYCODE_FRESH_SESSION: u16 = 0x0073;
+
 /// Knob press+rotate clockwise → cycle to NEXT wrapper.
 /// Firmware encoder Layer 1 (encoder held) CW rotation emits `LCTL(KC_TAB)`.
 /// Daemon special-cases this so it doesn't fall through to the wrapper PTY

@@ -10,6 +10,7 @@ mod keymap;
 mod presets;
 mod raise;
 mod rpc;
+mod spawn;
 mod state;
 mod tray;
 mod wrapper;
@@ -475,6 +476,18 @@ async fn run_async(
             //     don't route
             //   - RaiseActive: F20 with no alert — raise the currently-
             //     active session's terminal, don't route
+            // F20+Stop chord (firmware emits KC_F24 / 0x0073) — open a
+            // fresh `coredeck-claude` in the focused wrapper's cwd via
+            // its host terminal. Has to short-circuit *before* the
+            // alert dispatcher so the chord isn't misread as an
+            // Allow/Deny gesture when an alert happens to be up.
+            if let DaemonEvent::HidKeyEvent { keycode } = &event {
+                if *keycode == keymap::KEYCODE_FRESH_SESSION {
+                    spawn::fresh_session_in_focused_cwd(&state_for_events).await;
+                    continue;
+                }
+            }
+
             if matches!(
                 &event,
                 DaemonEvent::HidKeyEvent { .. } | DaemonEvent::HidTypeString { .. }
