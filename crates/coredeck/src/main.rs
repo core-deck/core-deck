@@ -15,6 +15,7 @@ mod state;
 mod tray;
 mod updates;
 mod wrapper;
+mod wrapper_state;
 mod ws;
 
 use coredeck_protocol::DEFAULT_DAEMON_ADDR;
@@ -89,6 +90,12 @@ pub struct DaemonState {
     pub yolo_opt_out: Mutex<std::collections::HashSet<String>>,
     /// Listen address (for hooks install to know the URL)
     pub listen_addr: String,
+    /// Disk-backed cache of last-known per-wrapper state (currently
+    /// just `permission_mode`). Loaded once at startup; updated when
+    /// hooks report a mode change. Lets the device's mode LED show a
+    /// sensible value for sessions the daemon hasn't yet seen any
+    /// hooks for after a restart.
+    pub wrapper_state: wrapper_state::WrapperStateStore,
 }
 
 impl DaemonState {
@@ -241,6 +248,7 @@ fn main() {
         yolo_opt_in: Mutex::new(std::collections::HashSet::new()),
         yolo_opt_out: Mutex::new(std::collections::HashSet::new()),
         listen_addr: cli.listen.clone(),
+        wrapper_state: wrapper_state::WrapperStateStore::load(),
     });
 
     // Emit initial DeviceAvailable event if device was found during enumeration.

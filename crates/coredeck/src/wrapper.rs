@@ -134,6 +134,10 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                 "wrapper reconnect adopted cached session_id (daemon restart path)"
             );
         }
+        // Seed last_permission_mode from disk so the LED can show
+        // something sensible after a daemon restart, before any
+        // statusLine hook has fired for this wrapper's session.
+        let last_permission_mode = state.wrapper_state.permission_mode(&wrapper_id);
         wrappers.insert(
             wrapper_id.clone(),
             Wrapper {
@@ -146,6 +150,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                 terminal_title: preserved_terminal_title,
                 is_remote,
                 is_focused: false,
+                last_permission_mode,
                 tx: cmd_tx.clone(),
             },
         );
@@ -790,19 +795,39 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
 /// mode-button tap and trigger a Shift+Tab injection.
 pub async fn sync_active_mode_to_device(state: &DaemonState) {
     let target_mode = {
+        // Lock order matches `active_wrapper_id`: wrappers → claude.
+        let wrappers = state.wrappers.read().await;
         let claude = state.claude_state.read().await;
-        let pm = claude
-            .active_session_id
-            .as_deref()
+        let active_sid = claude.active_session_id.as_deref();
+        let session_mode = active_sid
             .and_then(|sid| claude.sessions.get(sid))
             .and_then(|s| s.permission_mode.as_deref())
             .map(map_permission_mode);
-        // No active session, or it has no permission_mode yet — leave
-        // the device alone. Pushing Default here would fight whatever
-        // the user just set with the mode button.
-        match pm {
+        match session_mode {
             Some(m) => m,
-            None => return,
+            None => {
+                // Fall back to the wrapper's last-known mode loaded
+                // from `wrapper_state.json` on register. Typical hit
+                // path: daemon restart, the user switches active to a
+                // wrapper whose statusLine hasn't fired yet. Without
+                // this fallback the LED stays stuck at whatever the
+                // last touched session set.
+                let wrapper_mode = active_sid
+                    .and_then(|sid| {
+                        wrappers
+                            .values()
+                            .find(|w| w.session_id.as_deref() == Some(sid))
+                    })
+                    .and_then(|w| w.last_permission_mode.as_deref())
+                    .map(map_permission_mode);
+                match wrapper_mode {
+                    Some(m) => m,
+                    // Truly nothing on hand — leave the device alone.
+                    // Pushing Default here would fight whatever the
+                    // user just set with the mode button.
+                    None => return,
+                }
+            }
         }
     };
 

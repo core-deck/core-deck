@@ -204,6 +204,13 @@ pub struct Wrapper {
     /// box, hooks come back through an SSH reverse tunnel). Used by tray
     /// + device label code to prefix the title with `↦`.
     pub is_remote: bool,
+    /// Last `permission_mode` we've seen for this wrapper, seeded from
+    /// the on-disk `wrapper_state.json` cache when the wrapper
+    /// re-registers (typically right after a daemon restart). Used as
+    /// the fallback in `sync_active_mode_to_device` when the active
+    /// session's `permission_mode` is still `None` because no
+    /// `statusLine` hook has fired yet.
+    pub last_permission_mode: Option<String>,
     /// Last OSC 1004 focus state — true while the host terminal has OS
     /// focus, false otherwise. Drives idle-alert suppression: if the
     /// user is already looking at this session's window we skip the

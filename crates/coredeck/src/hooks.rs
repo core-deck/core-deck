@@ -372,7 +372,9 @@ async fn handle_claude_hook(
     // Touch the session and stash permission_mode (every hook carries
     // it). When the hook is for the *active* session and the mode
     // actually changed, push it to the device's mode LED right after.
-    let mode_changed_for_active = if let Some(ref sid) = event.session_id {
+    // Also persist the new mode keyed by wrapper_id so the LED can be
+    // seeded correctly after a daemon restart.
+    let (mode_changed_for_active, persist) = if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
         let s = claude.touch_session(sid);
         let prev = s.permission_mode.clone();
@@ -380,10 +382,39 @@ async fn handle_claude_hook(
             s.permission_mode = event.permission_mode.clone();
         }
         let is_active = claude.active_session_id.as_deref() == Some(sid.as_str());
-        is_active && prev != event.permission_mode
+        let changed = is_active && prev != event.permission_mode;
+        // Only persist when the event carries a real value AND it
+        // differs from what we had — saves disk writes on the common
+        // "every hook re-asserts the same mode" case.
+        let persist = match (&prev, &event.permission_mode) {
+            (a, Some(b)) if a.as_deref() != Some(b.as_str()) => {
+                Some((sid.clone(), b.clone()))
+            }
+            _ => None,
+        };
+        (changed, persist)
     } else {
-        false
+        (false, None)
     };
+    if let Some((sid, new_mode)) = persist {
+        // Look up the wrapper bound to this session, update its
+        // in-memory cache, and persist to disk. Lock order matches
+        // `active_wrapper_id` (wrappers first); the claude lock from
+        // above has already been dropped at scope exit.
+        let mut wrappers = state.wrappers.write().await;
+        if let Some(w) = wrappers
+            .values_mut()
+            .find(|w| w.session_id.as_deref() == Some(sid.as_str()))
+        {
+            w.last_permission_mode = Some(new_mode.clone());
+            let wrapper_id = w.wrapper_id.clone();
+            // Drop the lock before disk I/O — the file write is the
+            // slow part of this path and we don't need to hold the
+            // wrapper map across it.
+            drop(wrappers);
+            state.wrapper_state.set_permission_mode(&wrapper_id, &new_mode);
+        }
+    }
     if mode_changed_for_active {
         crate::wrapper::sync_active_mode_to_device(state).await;
     }
