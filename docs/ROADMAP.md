@@ -4,11 +4,12 @@ CoreDeck is a daemon-only architecture: one background daemon
 (`coredeck`) owns the HID device, the tray icon, the HTTP+WS APIs,
 and Claude Code hook endpoints. A thin wrapper binary
 (`coredeck-claude`) runs `claude` under a PTY in any host terminal
-(Terminal.app, iTerm2, Ghostty, Kitty, tmux, …), registers with the
-daemon over WebSocket, and accepts byte-injection commands. There is
-no GUI app — soft-key editing and other configuration live on a
-static settings page served by the daemon at `http://127.0.0.1:19384/`
-and opened in the user's default browser.
+(Terminal.app, iTerm2, Ghostty, WezTerm, Kitty, tmux, JetBrains-family
+embedded terminals, …), registers with the daemon over WebSocket,
+and accepts byte-injection commands. There is no GUI app — soft-key
+editing and other configuration live on a static settings page served
+by the daemon at `http://127.0.0.1:19384/` and opened in the user's
+default browser.
 
 This document records open backlog, recently-shipped features, and a
 few architectural notes worth keeping handy.
@@ -100,8 +101,25 @@ The daemon hosts every user-facing surface:
   future one in that wrapper). Deny records opt-out so the daemon
   doesn't re-prompt; subsequent PRs fall straight through to Claude's
   terminal until Auto-approve toggles, the device disconnects, or the
-  wrapper exits. (Possible polish later: fire the enrollment alert on
-  focus-in instead of on-PR. Current on-PR trigger is good enough.)
+  wrapper exits. Refinements landed since the original drop: a single
+  Allow tap auto-resolves every sibling parallel-tool PR (the queue
+  re-checks enrollment on each pop, so N parallel Bash calls clear
+  with one tap instead of N), and `PreToolUse`/`PostToolUse` only
+  cancel the active alert when their `tool_name` matches — sibling
+  parallel hooks no longer evict each other.
+- **Tools that wait on the user skip auto-approve.** `ExitPlanMode`
+  was already excluded; `AskUserQuestion` joined it after we noticed
+  the daemon was happily approving questions with no answer attached
+  (Claude resumed with an empty result). Generalised to a
+  `user_input_tool` predicate so the next tool of this shape is one
+  match-arm away.
+- **PermissionRequest gets a long timeout.** The shim was running
+  `curl -m 5` for every hook; fine for observational ones, fatal for
+  PRs since the user's reaction time is naturally longer. Now the
+  shim takes an optional `max-time` argument (default 5s) and the
+  PermissionRequest entry passes `1800` plus a matching `timeout: 1800`
+  on the hook entry so Claude's own 60s default doesn't bail first.
+  The daemon's internal 5-min timeout remains the outer limit.
 - **Robustness.** Wrapper has bounded-exponential WS reconnect
   backoff (1s→30s); daemon preserves prior `session_id` across
   re-register. Cross-restart session caching: the daemon pushes a
@@ -148,9 +166,66 @@ The daemon hosts every user-facing surface:
   (default 19384) so claude's baked-in URL stays valid across
   reconnects. tmux env propagation handled via `tmux setenv -g/-t`
   on connect — new panes in already-running tmux see the fresh env.
-  Trust boundary is SSH itself; no tokens, no TLS. Tradeoff: one
-  wrapper per remote host at a time (port collision is a clean
-  fast-fail thanks to `ExitOnForwardFailure=yes`).
+  Remote tabs are marked with a leading `↦` (U+21A6, in Terminus'
+  coverage) on both the tray menu and the device's session label so
+  they're easy to spot. Trust boundary is SSH itself; no tokens, no
+  TLS. Tradeoff: one wrapper per remote host at a time (port
+  collision is a clean fast-fail thanks to `ExitOnForwardFailure=yes`).
+- **Persistent wrapper_id per --ssh host.** Each `coredeck-claude
+  --ssh` invocation reads/writes `<data_dir>/wrappers/<host>` for a
+  stable UUID, so claude processes alive in remote tmux keep
+  correlating to the same wrapper across reconnect cycles.
+- **F20+Stop opens a fresh claude in the focused cwd.** Firmware
+  (in the sibling firmware repo) tracks the Claude button's held
+  state and emits `KC_F24` when Stop is tapped while it's down —
+  `Ctrl-C` is unchanged for plain Stop. The daemon's new `spawn`
+  module mirrors `raise.rs` with per-host adapters
+  (Terminal.app/iTerm2 via AppleScript, WezTerm/Kitty/tmux via
+  their CLIs, Ghostty via `open -na`); local sessions only for v1
+  — `--ssh` falls back to a debug log. The wrapper binary path is
+  derived from `current_exe()`'s sibling so dev builds running out
+  of `target/debug/` spawn the same binary that started the daemon
+  rather than whatever's on `PATH`.
+- **JetBrains terminal support** (IntelliJ, Android Studio, PyCharm,
+  GoLand, …). Wrapper detects the embedded JediTerm via
+  `$TERMINAL_EMULATOR=JetBrains-JediTerm` and stuffs
+  `$__CFBundleIdentifier` into `pane_id` so the daemon knows which
+  IDE to bring forward (Android Studio vs IntelliJ vs …). JediTerm
+  explicitly stubs OSC 1004 in `JediEmulator.java` — no focus
+  reports — so the daemon (1) suppresses idle alerts for these
+  sessions (no way for the user to clear them via focus) via a
+  `supports_focus_reporting()` predicate on `HostTerminalKind`,
+  (2) raises by bundle id on F20 (`tell application id "<bundle>"
+  to activate`), and (3) polls `NSWorkspace.frontmostApplication`
+  every 500 ms to promote the matching JetBrains wrapper when the
+  user Cmd-Tabs into the IDE. Polling is short-circuited when no
+  JetBrains wrappers are connected. No new entitlements — these are
+  unprivileged AppKit APIs. Caveat: two project windows of the same
+  IDE share a bundle id, so the watcher picks the first match.
+- **Idle alert quality of life.** Tracked `is_focused` on each
+  Wrapper from the OSC 1004 frames the wrapper already sent
+  (focus-out was previously dropped); `show_idle_alert`
+  short-circuits when the alerting session's terminal is currently
+  focused — claude's in-terminal prompt is enough, the device
+  alert was just noise. Combined with the JetBrains
+  `supports_focus_reporting()` skip, idle alerts only surface when
+  they can actually help.
+- **Tray active-row indicator.** Replaced the system ✓ with a
+  filled circle drawn into a custom NSImage. Two variants are built
+  per render: a 14×32 top-biased canvas for two-line rows (so the
+  dot lands at the title's vertical level rather than between title
+  and subtitle) and a 14×14 centered canvas for single-line rows
+  (so the dot stays mid-row). `labelColor` keeps light/dark and
+  accessibility contrast working.
+- **Device task2 enrichment.** `TaskUpdate(status=…)` events used
+  to render as a bare "TaskUpdate" on line 2 because the payload
+  carries only `task_id` + `status`. Daemon now joins the cached
+  subject from `TaskCreated` with a status-specific glyph
+  (`✓ Subject` for completed, `✗ Subject` for cancelled/failed,
+  `○ Subject` otherwise). The `in_progress` branch is unchanged —
+  it still pins the subject to line 1 via `current_task`.
+  `AskUserQuestion` clears line 2 instead of writing
+  "AskUserQuestion: …" so the Idle alert overlay owns the screen.
 
 ---
 
@@ -160,16 +235,21 @@ The daemon hosts every user-facing surface:
   a wrapper, the wrapper learns the resumed session_id lazily via
   SessionStart. A small race window exists; could be closed by
   passing `--resume <id>` through to the wrapper and pre-binding.
-- **Stable wrapper_id across reconnects (remote mode).** Each
-  `coredeck-claude --ssh` invocation generates a fresh UUID. Claude
-  processes alive in remote tmux still have the *old* wrapper_id
-  baked into their env, so after reconnect their hooks correlate
-  to a now-defunct wrapper. Persist wrapper_id per remote host on
-  disk and reuse so the new wrapper takes over the existing
-  session-bindings cleanly.
+- **JetBrains: disambiguate multi-window same-IDE.** Two IntelliJ
+  project windows share a bundle id, so the frontmost-app watcher
+  promotes whichever wrapper it finds first. Process-tree walk
+  (parent-PID up to the IDE process, match wrapper PIDs to specific
+  windows) would close this. Low priority — the common case is one
+  wrapper per IDE.
+- **F20+Stop on remote (`--ssh`) sessions.** The chord currently
+  short-circuits with a debug log. A proper remote-spawn flow
+  (open a new tmux window or a new ssh-tunneled wrapper, depending
+  on what the user actually wants) is its own slice.
 - **Linux / Windows.** PTY + raw mode + SIGWINCH work on Unix via
   `portable-pty` + `crossterm`. Windows needs ConPTY validation;
-  Linux should be fine but unverified.
+  Linux should be fine but unverified. Per-host adapters in
+  `raise.rs` and `spawn.rs` are macOS-first today (X11 `wmctrl`
+  paths exist for raise but not for spawn).
 
 ---
 
