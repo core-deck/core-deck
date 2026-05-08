@@ -4,12 +4,12 @@ CoreDeck is a daemon-only architecture: one background daemon
 (`coredeck`) owns the HID device, the tray icon, the HTTP+WS APIs,
 and Claude Code hook endpoints. A thin wrapper binary
 (`coredeck-claude`) runs `claude` under a PTY in any host terminal
-(Terminal.app, iTerm2, Ghostty, WezTerm, Kitty, tmux, JetBrains-family
-embedded terminals, …), registers with the daemon over WebSocket,
-and accepts byte-injection commands. There is no GUI app — soft-key
-editing and other configuration live on a static settings page served
-by the daemon at `http://127.0.0.1:19384/` and opened in the user's
-default browser.
+(Terminal.app, iTerm2, Ghostty, WezTerm, Kitty, tmux, GNOME Terminal,
+Konsole, Alacritty, JetBrains-family embedded terminals, …),
+registers with the daemon over WebSocket, and accepts byte-injection
+commands. There is no GUI app — soft-key editing and other
+configuration live on a static settings page served by the daemon at
+`http://127.0.0.1:19384/` and opened in the user's default browser.
 
 This document records open backlog, recently-shipped features, and a
 few architectural notes worth keeping handy.
@@ -226,6 +226,21 @@ The daemon hosts every user-facing surface:
   it still pins the subject to line 1 via `current_task`.
   `AskUserQuestion` clears line 2 instead of writing
   "AskUserQuestion: …" so the Idle alert overlay owns the screen.
+- **Linux daemon parity.** Workspace builds cleanly on Ubuntu
+  (apt: `libudev-dev`, `libhidapi-dev`). `coredeck install` writes
+  a systemd user unit at `~/.config/systemd/user/coredeck.service`
+  (no root, journald handles logs) and runs `daemon-reload`+
+  `enable --now`; `coredeck uninstall` reverses it. `coredeck setup`
+  branches on platform — launchd on macOS, systemd on Linux. Spawn
+  adapters cover GNOME Terminal (`--working-directory= -- cmd`),
+  Konsole (`--new-tab --workdir`), and Alacritty
+  (`--working-directory -e`); WezTerm/Kitty/tmux already worked via
+  their cross-platform CLIs. Raise uses `$WINDOWID` via
+  `wmctrl -ia` when the terminal sets it, falling back to
+  `wmctrl -x -a <class>` keyed off `WM_CLASS`. Wrapper detects
+  Linux terminals via `$KONSOLE_VERSION`, `$ALACRITTY_LOG`, and
+  `$GNOME_TERMINAL_SCREEN`/`$VTE_VERSION`. HID hot-plug uses the
+  poll-based fallback (the IOKit watcher is macOS-only).
 
 ---
 
@@ -241,11 +256,24 @@ The daemon hosts every user-facing surface:
   short-circuits with a debug log. A proper remote-spawn flow
   (open a new tmux window or a new ssh-tunneled wrapper, depending
   on what the user actually wants) is its own slice.
-- **Linux / Windows.** PTY + raw mode + SIGWINCH work on Unix via
-  `portable-pty` + `crossterm`. Windows needs ConPTY validation;
-  Linux should be fine but unverified. Per-host adapters in
-  `raise.rs` and `spawn.rs` are macOS-first today (X11 `wmctrl`
-  paths exist for raise but not for spawn).
+- **Linux frontmost-app watcher.** macOS uses
+  `NSWorkspace.frontmostApplication` to follow Cmd-Tab into
+  JetBrains IDEs (and any other terminal whose embedded session
+  doesn't emit OSC 1004). The X11 equivalent is polling
+  `_NET_ACTIVE_WINDOW` + reading `WM_CLASS`; on pure Wayland this
+  is per-DE (GNOME Shell extensions, KDE D-Bus, Sway IPC) with no
+  cross-DE primitive. Out of scope until a user actually hits it.
+- **Linux JetBrains raise.** Bundle-id raise relies on the macOS
+  `__CFBundleIdentifier` env var. Linux JetBrains apps don't set
+  it; would need to capture the IDE's `WM_CLASS` instead and raise
+  via `wmctrl -x -a <class>` (we already have the helper). Trivial
+  but unverified; needs a Linux box with an IDE installed to test.
+- **Windows.** PTY + raw mode work via `portable-pty` + `crossterm`
+  in theory but ConPTY hasn't been validated. No raise/spawn
+  adapters yet (`SetForegroundWindow` + each terminal's CLI would
+  cover most). HID device access works through the same `hidapi`
+  crate but service registration would need `sc create` or a
+  Win32 Service wrapper instead of launchd/systemd.
 
 ---
 
