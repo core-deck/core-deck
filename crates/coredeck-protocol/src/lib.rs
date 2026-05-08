@@ -385,8 +385,30 @@ pub enum HostTerminalKind {
     Kitty,
     Tmux,
     AppleTerminal,
+    /// JetBrains-family embedded terminals (IntelliJ, Android Studio,
+    /// PyCharm, Goland, …). Detected via `TERMINAL_EMULATOR=
+    /// JetBrains-JediTerm`. They don't emit OSC 1004 focus reports, so
+    /// the daemon suppresses idle alerts for sessions hosted in them
+    /// (the user has no way to clear those alerts beyond F20).
+    JetBrains,
     #[default]
     Unknown,
+}
+
+impl HostTerminalKind {
+    /// True when the terminal is known to emit OSC 1004 focus reports.
+    /// Drives whether the daemon raises an Idle alert for this session
+    /// — without focus reporting, idle alerts can't be cleared by
+    /// looking at the terminal, so they get stuck on the device until
+    /// the user mashes F20. We err on the side of "supports" for
+    /// `Unknown` because we'd rather show a clearable alert than miss
+    /// one in a terminal we just haven't taught the daemon about.
+    pub fn supports_focus_reporting(&self) -> bool {
+        match self {
+            HostTerminalKind::JetBrains => false,
+            _ => true,
+        }
+    }
 }
 
 /// Snapshot of the wrapper's host-terminal context at startup.

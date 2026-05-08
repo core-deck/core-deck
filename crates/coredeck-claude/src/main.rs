@@ -277,6 +277,23 @@ fn detect_host_terminal() -> HostTerminal {
             window_id,
         };
     }
+    // JetBrains family (IntelliJ, Android Studio, PyCharm, Goland, …)
+    // exposes `$TERMINAL_EMULATOR=JetBrains-JediTerm`. They don't emit
+    // OSC 1004; the daemon uses this to suppress idle alerts that the
+    // user couldn't otherwise clear by focusing the terminal. We
+    // borrow `pane_id` to carry the macOS bundle id from
+    // `__CFBundleIdentifier` so the daemon's F20-raise adapter can
+    // bring the correct IDE forward (e.g. `com.google.android.studio`
+    // vs `com.jetbrains.intellij`).
+    if env("TERMINAL_EMULATOR").as_deref() == Some("JetBrains-JediTerm") {
+        return HostTerminal {
+            kind: HostTerminalKind::JetBrains,
+            pane_id: env("__CFBundleIdentifier"),
+            program_version,
+            tmux_socket: None,
+            window_id,
+        };
+    }
     let kind = match term_program.as_str() {
         "ghostty" | "Ghostty" => HostTerminalKind::Ghostty,
         "iTerm.app" => HostTerminalKind::ITerm2,

@@ -119,8 +119,15 @@ async fn spawn_in(host: &HostTerminal, cwd: &str, wrapper: &PathBuf) -> Result<(
         HostTerminalKind::ITerm2 => spawn_iterm2(cwd, wrapper).await,
         HostTerminalKind::AppleTerminal => spawn_apple_terminal(cwd, wrapper).await,
         HostTerminalKind::Ghostty => spawn_ghostty(cwd, wrapper).await,
-        HostTerminalKind::Unknown => {
-            debug!("fresh-session: unknown host terminal — no spawn adapter");
+        // JetBrains IDEs embed the terminal in a non-scriptable pane —
+        // no public CLI to ask the IDE to open a fresh tab. Skip; the
+        // user can drop a fresh wrapper into a regular terminal app
+        // if they need one.
+        HostTerminalKind::Unknown | HostTerminalKind::JetBrains => {
+            debug!(
+                kind = ?host.kind,
+                "fresh-session: no spawn adapter for this host terminal",
+            );
             Ok(())
         }
     }

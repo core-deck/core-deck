@@ -73,6 +73,14 @@ async fn raise_for_host(host: &HostTerminal) {
         HostTerminalKind::ITerm2 => raise_iterm2(host).await,
         HostTerminalKind::Kitty => raise_kitty(host).await,
         HostTerminalKind::Tmux => raise_tmux(host).await,
+        // JetBrains-family IDEs: focus the IDE app itself by its
+        // macOS bundle id. The user's wrapper passes
+        // `__CFBundleIdentifier` through `pane_id` (e.g.
+        // `com.google.android.studio`). We don't try to focus the
+        // specific terminal tool window — `activate` brings the IDE
+        // forward and the embedded terminal usually retains keyboard
+        // focus from where the user left it.
+        HostTerminalKind::JetBrains => raise_jetbrains(host).await,
     };
     if let Err(e) = result {
         warn!(error = %e, kind = ?host.kind, "raise failed");
@@ -140,6 +148,26 @@ async fn raise_kitty(host: &HostTerminal) -> Result<(), String> {
     run("kitty", &["@", "focus-window", "--match", &matcher]).await
 }
 
+/// JetBrains-family IDE: activate by macOS bundle id (passed through
+/// `pane_id` on the wrapper side from `$__CFBundleIdentifier`). On
+/// other platforms this is a no-op for now — Linux/Windows would need
+/// a different focusing primitive (wmctrl by class, etc.).
+#[cfg(target_os = "macos")]
+async fn raise_jetbrains(host: &HostTerminal) -> Result<(), String> {
+    let Some(bundle) = host.pane_id.as_deref().filter(|s| !s.is_empty()) else {
+        debug!("raise: JetBrains terminal but no bundle id captured; skipping");
+        return Ok(());
+    };
+    let script = format!(r#"tell application id "{bundle}" to activate"#);
+    run("osascript", &["-e", &script]).await
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn raise_jetbrains(_host: &HostTerminal) -> Result<(), String> {
+    debug!("JetBrains raise requested on non-macOS — ignoring");
+    Ok(())
+}
+
 /// Tmux is nested inside another terminal. We can select the right tmux
 /// pane from outside via the recorded socket, but we don't yet know the
 /// *outer* terminal — the wrapper sees `$TMUX` and stops detecting at
@@ -176,7 +204,9 @@ async fn activate_outer(host: &HostTerminal) -> Result<(), String> {
         HostTerminalKind::ITerm2 => "iTerm",
         HostTerminalKind::Kitty => "kitty",
         HostTerminalKind::AppleTerminal => "Terminal",
-        HostTerminalKind::Tmux | HostTerminalKind::Unknown => return Ok(()),
+        HostTerminalKind::Tmux
+        | HostTerminalKind::Unknown
+        | HostTerminalKind::JetBrains => return Ok(()),
     };
     activate_macos_app(app).await
 }

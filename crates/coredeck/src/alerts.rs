@@ -176,15 +176,34 @@ pub async fn show_idle_alert(
 ) {
     {
         let wrappers = state.wrappers.read().await;
-        let already_attending = wrappers
+        let alerting_wrapper = wrappers
             .values()
-            .any(|w| w.session_id.as_deref() == Some(session_id) && w.is_focused);
-        if already_attending {
-            debug!(
-                session = %session_id,
-                "Idle alert suppressed; user is already focused on this session's terminal",
-            );
-            return;
+            .find(|w| w.session_id.as_deref() == Some(session_id));
+        if let Some(w) = alerting_wrapper {
+            if w.is_focused {
+                debug!(
+                    session = %session_id,
+                    "Idle alert suppressed; user is already focused on this session's terminal",
+                );
+                return;
+            }
+            // No OSC 1004 from the host terminal means we'd never see
+            // a focus-in event to clear the alert — and the user
+            // doesn't have a non-F20 way to dismiss it. Skip the
+            // install entirely; the in-terminal prompt is enough.
+            let kind_supports_focus = w
+                .host_terminal
+                .as_ref()
+                .map(|h| h.kind.supports_focus_reporting())
+                .unwrap_or(true);
+            if !kind_supports_focus {
+                debug!(
+                    session = %session_id,
+                    kind = ?w.host_terminal.as_ref().map(|h| &h.kind),
+                    "Idle alert suppressed; host terminal doesn't emit OSC 1004 focus reports",
+                );
+                return;
+            }
         }
     }
     {
