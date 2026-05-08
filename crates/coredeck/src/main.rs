@@ -345,6 +345,18 @@ async fn run_async(
         wrapper::run_display_ticker(ticker_state).await;
     });
 
+    // macOS-only: poll the frontmost app and promote the matching
+    // JetBrains wrapper. JediTerm doesn't emit OSC 1004, so without
+    // this the device's active tab can't follow the user when they
+    // Cmd-Tab into the IDE.
+    #[cfg(target_os = "macos")]
+    {
+        let watcher_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            wrapper::run_frontmost_app_watcher(watcher_state).await;
+        });
+    }
+
     // Process HID events and forward to WS client
     let state_for_events = Arc::clone(&state);
     let event_handler = tokio::spawn(async move {

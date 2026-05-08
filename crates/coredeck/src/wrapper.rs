@@ -618,6 +618,102 @@ pub async fn run_display_ticker(state: Arc<DaemonState>) {
     }
 }
 
+/// Poll macOS' frontmost-app bundle id. When it matches a known
+/// JetBrains wrapper's stored bundle id, promote that wrapper to the
+/// device's active tab.
+///
+/// Why polling instead of NSWorkspace activation notifications:
+/// subscribing in Rust+objc means bridging an Objective-C block (no
+/// `block` crate in tree) and dispatching back into tokio from the
+/// AppKit main thread. A 500ms tick is invisible to the user and lets
+/// us reuse the standard tokio interval pattern. The poll short-
+/// circuits when no JetBrains wrappers are connected, so steady-state
+/// cost in the common case is one read-lock per tick.
+#[cfg(target_os = "macos")]
+pub async fn run_frontmost_app_watcher(state: Arc<DaemonState>) {
+    use coredeck_protocol::HostTerminalKind;
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(500));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_bundle: Option<String> = None;
+    loop {
+        interval.tick().await;
+
+        // Skip the Cocoa call entirely when no JetBrains wrappers are
+        // attached — there's nothing this watcher could promote.
+        let any_jetbrains = {
+            let wrappers = state.wrappers.read().await;
+            wrappers
+                .values()
+                .any(|w| match &w.host_terminal {
+                    Some(h) => matches!(h.kind, HostTerminalKind::JetBrains),
+                    None => false,
+                })
+        };
+        if !any_jetbrains {
+            last_bundle = None;
+            continue;
+        }
+
+        let bundle = unsafe { frontmost_bundle_id() };
+        if bundle == last_bundle {
+            continue;
+        }
+        last_bundle.clone_from(&bundle);
+        let Some(bid) = bundle else {
+            continue;
+        };
+
+        let wrapper_id = {
+            let wrappers = state.wrappers.read().await;
+            wrappers
+                .values()
+                .find(|w| match &w.host_terminal {
+                    Some(h) => {
+                        matches!(h.kind, HostTerminalKind::JetBrains)
+                            && h.pane_id.as_deref() == Some(bid.as_str())
+                    }
+                    None => false,
+                })
+                .map(|w| w.wrapper_id.clone())
+        };
+        let Some(wid) = wrapper_id else {
+            continue;
+        };
+        debug!(bundle = %bid, wrapper = %wid, "frontmost app matches JetBrains wrapper — promoting");
+        if let Err(e) = set_active_wrapper(&state, &wid).await {
+            debug!(error = %e, wrapper = %wid, "set_active_wrapper from frontmost-app watcher failed");
+        }
+    }
+}
+
+/// Bundle id of the macOS frontmost application, or `None` when there
+/// is no frontmost app or the call fails. Calling Cocoa from a tokio
+/// task: `NSWorkspace` is documented thread-safe; `frontmostApplication`
+/// is a property read with no UI side-effects.
+#[cfg(target_os = "macos")]
+unsafe fn frontmost_bundle_id() -> Option<String> {
+    use cocoa::base::{id, nil};
+    use objc::{class, msg_send, sel, sel_impl};
+
+    let workspace: id = msg_send![class!(NSWorkspace), sharedWorkspace];
+    if workspace == nil {
+        return None;
+    }
+    let app: id = msg_send![workspace, frontmostApplication];
+    if app == nil {
+        return None;
+    }
+    let bundle_id: id = msg_send![app, bundleIdentifier];
+    if bundle_id == nil {
+        return None;
+    }
+    let utf8: *const std::os::raw::c_char = msg_send![bundle_id, UTF8String];
+    if utf8.is_null() {
+        return None;
+    }
+    Some(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
+}
+
 async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
     let wrappers = state.wrappers.read().await;
     let claude = state.claude_state.read().await;
