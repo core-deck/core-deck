@@ -37,6 +37,7 @@ curl -s http://127.0.0.1:19384/api/status | jq
 
 ```json
 {
+  "daemon_version": "0.1.0",
   "device_available": true,
   "device_connected": false,
   "device_name": "Core Deck",

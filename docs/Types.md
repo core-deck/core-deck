@@ -8,6 +8,7 @@ Returned by `GET /api/status`.
 
 ```json
 {
+  "daemon_version": "0.1.0",
   "device_available": true,
   "device_connected": true,
   "device_name": "Core Deck",
@@ -20,6 +21,7 @@ Returned by `GET /api/status`.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `daemon_version` | string | Daemon binary version (`CARGO_PKG_VERSION` at compile time). Empty string when missing from older daemons that predate the field |
 | `device_available` | boolean | USB device is physically present (enumerated on the bus) |
 | `device_connected` | boolean | HID interface is open and communicating |
 | `device_name` | string \| null | Device product name (if available) |

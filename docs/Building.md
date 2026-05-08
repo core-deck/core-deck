@@ -35,6 +35,10 @@ sudo dnf install gcc pkg-config systemd-devel hidapi-devel
 
 The daemon also draws the tray icon via `tray-icon`/`winit`, which on Linux needs an X11 or Wayland session at runtime but no extra build packages beyond what is listed above.
 
+After building, see [linux-setup.md](linux-setup.md) for the runtime
+setup — udev rules, `coredeck setup` (systemd user unit + Claude
+Code hooks), and the `claude` alias.
+
 ## Workspace Structure
 
 The project is a Cargo workspace with 3 crates:

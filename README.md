@@ -32,7 +32,9 @@ See [docs/Building.md](docs/Building.md) for Linux dependencies, individual crat
 
 ## Install
 
-The fastest path on macOS is via Homebrew:
+### macOS
+
+The fastest path is via Homebrew:
 
 ```bash
 brew install --cask core-deck/coredeck/coredeck
@@ -48,7 +50,48 @@ agent. After that, alias `claude` to the wrapper in your shell rc:
 alias claude="coredeck-claude"
 ```
 
-If you'd rather drive things by hand:
+### Linux
+
+Two paths: the prebuilt tarball (recommended) or build from source.
+
+**Tarball.** Each tagged release uploads
+`coredeck-<version>-linux-x86_64.tar.gz` to GitHub Releases. Extract,
+run the bundled `install.sh`, and you're done — it copies the
+binaries to `~/.local/bin/`, installs the udev rules, and runs
+`coredeck setup` (which writes a systemd user unit and registers the
+Claude Code hooks):
+
+```bash
+tar -xzf coredeck-*-linux-x86_64.tar.gz
+cd coredeck-*-linux-x86_64
+./install.sh
+```
+
+**From source.** See [docs/Building.md](docs/Building.md) for the
+build, then [docs/linux-setup.md](docs/linux-setup.md) for the udev
+rules and `coredeck setup` (systemd user unit + Claude Code hooks).
+The short version:
+
+```bash
+sudo apt install build-essential pkg-config libudev-dev libhidapi-dev
+cargo build --workspace --release
+
+# Drop binaries on PATH and install udev rules — see docs/linux-setup.md
+# for the rule contents and the `udevadm reload` dance.
+install -m 0755 target/release/coredeck target/release/coredeck-claude ~/.local/bin/
+
+coredeck setup
+```
+
+After either path, alias `claude` in your shell rc:
+
+```bash
+alias claude="coredeck-claude"
+```
+
+### By hand (any platform)
+
+If you'd rather drive things piecewise:
 
 ```bash
 # One-time: register Claude Code hooks (writes ~/.claude/settings.json
@@ -59,7 +102,7 @@ coredeck hooks install
 # Start the daemon
 coredeck
 
-# Install as launchd service for auto-start (macOS)
+# Install as auto-start agent (launchd on macOS, systemd user unit on Linux)
 coredeck install
 
 # In a separate terminal, launch Claude under the wrapper.
@@ -126,6 +169,7 @@ docs/                   # API documentation
 ## Documentation
 
 - [Building from Source](docs/Building.md) — Prerequisites, build commands, workspace layout
+- [Linux Setup Guide](docs/linux-setup.md) — End-to-end install/run flow, udev rules, systemd day-2
 - [Daemon API Overview](docs/API.md) — How the daemon works, access modes, quick examples
 - [REST API Reference](docs/REST-API.md) — All HTTP endpoints with request/response schemas
 - [WebSocket Protocol](docs/WebSocket-Protocol.md) — Binary WS protocol for real-time control

@@ -22,6 +22,7 @@ Returns current daemon and device state. Always available regardless of lock sta
 
 ```json
 {
+  "daemon_version": "0.1.0",
   "device_available": true,
   "device_connected": true,
   "device_name": "Core Deck",
