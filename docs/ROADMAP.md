@@ -231,10 +231,6 @@ The daemon hosts every user-facing surface:
 
 ## Open backlog
 
-- **Resume mapping.** When a user runs `claude --resume <id>` inside
-  a wrapper, the wrapper learns the resumed session_id lazily via
-  SessionStart. A small race window exists; could be closed by
-  passing `--resume <id>` through to the wrapper and pre-binding.
 - **JetBrains: disambiguate multi-window same-IDE.** Two IntelliJ
   project windows share a bundle id, so the frontmost-app watcher
   promotes whichever wrapper it finds first. Process-tree walk
