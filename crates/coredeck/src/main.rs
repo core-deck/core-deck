@@ -13,6 +13,7 @@ mod rpc;
 mod spawn;
 mod state;
 mod tray;
+mod updates;
 mod wrapper;
 mod ws;
 
@@ -346,6 +347,14 @@ async fn run_async(
         wrapper::run_display_ticker(ticker_state).await;
     });
 
+    // Daily check for daemon + firmware releases on GitHub. Surfaces
+    // results via a `TrayUpdate::UpdatesAvailable` so the tray menu
+    // can offer a click-to-open row.
+    let updates_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        updates::run_update_checker(updates_state).await;
+    });
+
     // macOS-only: poll the frontmost app and promote the matching
     // JetBrains wrapper. JediTerm doesn't emit OSC 1004, so without
     // this the device's active tab can't follow the user when they
@@ -644,6 +653,9 @@ fn run_main_event_loop(
                         TrayUpdate::HooksInstalled(installed) => {
                             tray.set_hooks_installed(installed);
                         }
+                        TrayUpdate::UpdatesAvailable { daemon, firmware } => {
+                            tray.set_updates(daemon, firmware);
+                        }
                     }
                 }
             }
@@ -682,6 +694,10 @@ fn run_main_event_loop(
                                 let installed = hooks::are_hooks_installed();
                                 state.send_tray_update(TrayUpdate::HooksInstalled(installed));
                             });
+                        }
+                        tray::DaemonTrayAction::OpenUrl(url) => {
+                            info!(url = %url, "opening URL from tray");
+                            open_url_in_browser(&url);
                         }
                         tray::DaemonTrayAction::Quit => {
                             info!("Quit requested from tray");

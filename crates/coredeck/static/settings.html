@@ -295,6 +295,11 @@ async function refreshStatus() {
       $('#device-info-row').style.display = '';
       $('#device-hw').textContent = `${s.device_name || '?'} · fw ${s.firmware_version || '?'}`;
     }
+    // Header version pill identifies the daemon (the thing serving
+    // this page). Firmware version stays in the device-info row above.
+    if (s.daemon_version) {
+      $('#version').textContent = `v${s.daemon_version}`;
+    }
     currentMode = s.device_mode;
     document.querySelectorAll('.mode-group button').forEach(b => {
       b.classList.toggle('active', b.dataset.mode === currentMode);
@@ -305,15 +310,6 @@ async function refreshStatus() {
       : '<span class="pill warn">disabled</span>';
   } catch (e) {
     $('#device-status').innerHTML = `<span class="pill bad">${e.message}</span>`;
-  }
-}
-
-async function refreshVersion() {
-  try {
-    const v = await api('GET', '/api/version');
-    if (v && v.version) $('#version').textContent = `v${v.version}`;
-  } catch (_) {
-    $('#version').textContent = '';
   }
 }
 
@@ -908,7 +904,6 @@ function escapeHtml(s) {
 async function loadAll() {
   await Promise.all([
     refreshStatus(),
-    refreshVersion(),
     refreshHooks(),
     refreshSoftkeys(),
     refreshWrappers(),

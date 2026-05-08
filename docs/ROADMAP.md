@@ -239,8 +239,21 @@ The daemon hosts every user-facing surface:
   `wmctrl -ia` when the terminal sets it, falling back to
   `wmctrl -x -a <class>` keyed off `WM_CLASS`. Wrapper detects
   Linux terminals via `$KONSOLE_VERSION`, `$ALACRITTY_LOG`, and
-  `$GNOME_TERMINAL_SCREEN`/`$VTE_VERSION`. HID hot-plug uses the
-  poll-based fallback (the IOKit watcher is macOS-only).
+  `$GNOME_TERMINAL_SCREEN`/`$VTE_VERSION`. HID hot-plug is
+  event-driven via libudev (`MonitorBuilder.match_subsystem_devtype
+  ("usb", "usb_device")`) so plug/unplug doesn't wait for the 2s
+  poll tick — same UX as the macOS IOKit watcher.
+- **Update checker.** Daemon polls
+  `https://api.github.com/repos/core-deck/{core-deck,firmware}/releases/latest`
+  once on startup (after a 60s grace window) and every 24h
+  thereafter. Newer-than-current tags surface as "Update available:
+  daemon vX.Y.Z" / "firmware vX.Y.Z" rows in the tray menu, sitting
+  just above the "Install hooks…" / Settings rows. Click opens the
+  release page in the user's default browser. No autoupdate, no
+  signature verification — Homebrew handles macOS upgrades, the
+  user reflashes the device by hand. Firmware row only appears
+  once the device has reported a parseable version. No opt-out
+  toggle yet (add when someone asks).
 
 ---
 

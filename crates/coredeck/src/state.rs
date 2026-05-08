@@ -231,4 +231,19 @@ pub enum TrayUpdate {
     /// Whether Claude Code hooks are installed in ~/.claude/settings.json.
     /// Drives the "Install Claude Code hooks…" tray menu item.
     HooksInstalled(bool),
+    /// Latest known update status (daemon + firmware). The poll task
+    /// in `updates.rs` emits this once on startup and whenever the
+    /// 24h tick refreshes the cache.
+    UpdatesAvailable {
+        daemon: Option<UpdateInfo>,
+        firmware: Option<UpdateInfo>,
+    },
+}
+
+/// Minimal description of an available update — version string the
+/// user sees and the URL to open when they click the menu row.
+#[derive(Debug, Clone)]
+pub struct UpdateInfo {
+    pub latest_version: String,
+    pub html_url: String,
 }

@@ -13,6 +13,8 @@ use tray_icon::{
 };
 use tracing::{debug, error, info};
 
+use crate::state::UpdateInfo;
+
 /// Device presence for tray display
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DevicePresence {
@@ -33,6 +35,9 @@ pub enum DaemonTrayAction {
     OpenSettings,
     /// Install Claude Code hooks (only shown when not already installed).
     InstallHooks,
+    /// Open a URL in the user's default browser. Used by the daemon /
+    /// firmware "Update available" rows.
+    OpenUrl(String),
     /// Quit the daemon
     Quit,
 }
@@ -59,6 +64,17 @@ pub struct DaemonTrayManager {
     /// MenuId of the install-hooks item when present, so the event
     /// thread can recognise its click.
     install_hooks_id: Arc<Mutex<Option<MenuId>>>,
+    /// "Update available: daemon vX.Y.Z" menu item — shown when the
+    /// poll task in `updates.rs` finds a newer release tag than the
+    /// running binary's `CARGO_PKG_VERSION`.
+    daemon_update_item: Option<MenuItem>,
+    /// "Update available: firmware vX.Y.Z" menu item — same idea, but
+    /// against the device-reported firmware version.
+    firmware_update_item: Option<MenuItem>,
+    /// MenuId → release URL for the two update rows. Read by the menu
+    /// event thread so a click on either row turns into an
+    /// `OpenUrl(release_page)` action.
+    update_dispatch: Arc<Mutex<HashMap<MenuId, String>>>,
 }
 
 impl DaemonTrayManager {
@@ -67,6 +83,14 @@ impl DaemonTrayManager {
 
         let menu = Menu::new();
 
+        // Static "About" header showing the daemon version. Disabled
+        // (informational only); the firmware version sits on its own
+        // line below the device-name row.
+        let about_item = MenuItem::new(
+            format!("CoreDeck v{}", env!("CARGO_PKG_VERSION")),
+            false,
+            None,
+        );
         let device_name_item = MenuItem::new("No device", false, None);
         let device_firmware_item = MenuItem::new("Firmware —", false, None);
 
@@ -76,11 +100,11 @@ impl DaemonTrayManager {
         let quit_item = MenuItem::new("Quit Daemon", true, None);
         let quit_id = quit_item.id().clone();
 
-        // Initial layout: [device name, firmware, separator, empty placeholder,
-        // separator, Settings, Quit]. Tab entries replace the placeholder
-        // on the first `set_tabs` call (DYNAMIC_OFFSET = 3, so Settings/Quit
-        // stay after the second separator regardless of how many tabs).
+        // Initial layout: [about, device name, firmware, separator, empty
+        // placeholder, separator, Settings, Quit]. Tab entries replace
+        // the placeholder on the first `set_tabs` call.
         let empty = MenuItem::new("No Claude sessions", false, None);
+        menu.append(&about_item)?;
         menu.append(&device_name_item)?;
         menu.append(&device_firmware_item)?;
         menu.append(&PredefinedMenuItem::separator())?;
@@ -101,12 +125,15 @@ impl DaemonTrayManager {
         let (action_tx, action_rx) = std::sync::mpsc::channel();
         let tab_dispatch: Arc<Mutex<HashMap<MenuId, String>>> = Arc::new(Mutex::new(HashMap::new()));
         let install_hooks_id: Arc<Mutex<Option<MenuId>>> = Arc::new(Mutex::new(None));
+        let update_dispatch: Arc<Mutex<HashMap<MenuId, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
 
         // Menu event handler thread
         let quit_id_clone = quit_id.clone();
         let settings_id_clone = settings_id.clone();
         let tab_dispatch_clone = Arc::clone(&tab_dispatch);
         let install_hooks_id_clone = Arc::clone(&install_hooks_id);
+        let update_dispatch_clone = Arc::clone(&update_dispatch);
         std::thread::spawn(move || {
             let receiver = MenuEvent::receiver();
             loop {
@@ -118,12 +145,18 @@ impl DaemonTrayManager {
                         .and_then(|g| g.clone())
                         .map(|id| id == event.id)
                         .unwrap_or(false);
+                    let update_url = update_dispatch_clone
+                        .lock()
+                        .ok()
+                        .and_then(|m| m.get(&event.id).cloned());
                     let action = if event.id == quit_id_clone {
                         Some(DaemonTrayAction::Quit)
                     } else if event.id == settings_id_clone {
                         Some(DaemonTrayAction::OpenSettings)
                     } else if install_hooks_match {
                         Some(DaemonTrayAction::InstallHooks)
+                    } else if let Some(url) = update_url {
+                        Some(DaemonTrayAction::OpenUrl(url))
                     } else {
                         tab_dispatch_clone
                             .lock()
@@ -151,6 +184,9 @@ impl DaemonTrayManager {
             tab_dispatch,
             install_hooks_item: None,
             install_hooks_id,
+            daemon_update_item: None,
+            firmware_update_item: None,
+            update_dispatch,
         };
 
         Ok((manager, action_rx))
@@ -160,8 +196,9 @@ impl DaemonTrayManager {
     /// active wrapper is marked with a leading "● ". When the list is
     /// empty, restore a disabled "No Claude sessions" placeholder.
     pub fn set_tabs(&mut self, list: &WrapperTabList) {
-        // Insert below the device-info section: [name, firmware, separator, ...].
-        const DYNAMIC_OFFSET: usize = 3;
+        // Insert below the device-info section:
+        // [about, name, firmware, separator, ...].
+        const DYNAMIC_OFFSET: usize = 4;
 
         // Remove existing dynamic items (placeholder or previous tabs).
         if let Some(item) = self.empty_placeholder.take() {
@@ -271,7 +308,7 @@ impl DaemonTrayManager {
         if let Ok(mut g) = self.install_hooks_id.lock() {
             *g = Some(item.id().clone());
         }
-        let position = self.settings_position();
+        let position = self.install_hooks_insert_position();
         if let Err(e) = self.menu.insert(&item, position) {
             error!("Failed to insert install-hooks item: {}", e);
             return;
@@ -279,17 +316,80 @@ impl DaemonTrayManager {
         self.install_hooks_item = Some(item);
     }
 
-    /// Index of the Settings menu item in the current menu. Used as the
-    /// insertion point for the "Install hooks" warning row.
-    fn settings_position(&self) -> usize {
-        // Layout: [name, firmware, sep, dynamic_tabs|placeholder, sep, settings, quit]
+    /// Replace the "Update available" rows for the daemon and firmware.
+    /// Either side may be `None` to indicate "no update". The poll task
+    /// in `updates.rs` calls this with both sides on every refresh, so
+    /// we just rebuild the section from scratch each time. Update rows
+    /// sit between the wrapper-tab section and the "Install hooks" /
+    /// Settings rows.
+    pub fn set_updates(
+        &mut self,
+        daemon: Option<UpdateInfo>,
+        firmware: Option<UpdateInfo>,
+    ) {
+        // Tear down whatever's currently in the update slot.
+        if let Some(item) = self.daemon_update_item.take() {
+            let _ = self.menu.remove(&item as &dyn IsMenuItem);
+        }
+        if let Some(item) = self.firmware_update_item.take() {
+            let _ = self.menu.remove(&item as &dyn IsMenuItem);
+        }
+        if let Ok(mut map) = self.update_dispatch.lock() {
+            map.clear();
+        }
+
+        // Re-insert from the base position upward. Each successful insert
+        // shifts everything below by one, so we step the position too.
+        let mut pos = self.extras_base_position();
+        if let Some(info) = daemon {
+            let label = format!("Update available: daemon v{}", info.latest_version);
+            let item = MenuItem::new(label, true, None);
+            if let Ok(mut map) = self.update_dispatch.lock() {
+                map.insert(item.id().clone(), info.html_url);
+            }
+            if let Err(e) = self.menu.insert(&item, pos) {
+                error!("Failed to insert daemon update item: {}", e);
+            } else {
+                pos += 1;
+                self.daemon_update_item = Some(item);
+            }
+        }
+        if let Some(info) = firmware {
+            let label = format!("Update available: firmware v{}", info.latest_version);
+            let item = MenuItem::new(label, true, None);
+            if let Ok(mut map) = self.update_dispatch.lock() {
+                map.insert(item.id().clone(), info.html_url);
+            }
+            if let Err(e) = self.menu.insert(&item, pos) {
+                error!("Failed to insert firmware update item: {}", e);
+            } else {
+                self.firmware_update_item = Some(item);
+            }
+        }
+    }
+
+    /// First slot in the "extras" section that lives between the
+    /// second separator and the trailing Settings/Quit pair. Update
+    /// rows are inserted here, pushing any existing install-hooks /
+    /// settings rows down.
+    fn extras_base_position(&self) -> usize {
+        // Layout: [about, name, firmware, sep, dynamic_tabs|placeholder, sep,
+        //          ...extras..., settings, quit]
         let dynamic = if self.tab_items.is_empty() {
             if self.empty_placeholder.is_some() { 1 } else { 0 }
         } else {
             self.tab_items.len()
         };
-        // 3 = name + firmware + first separator. +1 = second separator.
-        3 + dynamic + 1
+        // 4 = about + name + firmware + first separator. +1 = second separator.
+        4 + dynamic + 1
+    }
+
+    /// Insertion point for the "Install hooks" row — sits below any
+    /// active update rows.
+    fn install_hooks_insert_position(&self) -> usize {
+        self.extras_base_position()
+            + (self.daemon_update_item.is_some() as usize)
+            + (self.firmware_update_item.is_some() as usize)
     }
 }
 

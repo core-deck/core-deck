@@ -45,6 +45,7 @@ pub async fn get_status(State(state): State<Arc<DaemonState>>) -> impl IntoRespo
     let ws_locked = state.ws_client.lock().await.is_some();
 
     Json(DaemonStatus {
+        daemon_version: env!("CARGO_PKG_VERSION").to_string(),
         device_available: status.available,
         device_connected: status.connected,
         device_name: status.device_name.clone(),

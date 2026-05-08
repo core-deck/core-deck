@@ -290,6 +290,12 @@ pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:19384";
 /// Response for GET /api/status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    /// Daemon binary version (`CARGO_PKG_VERSION`). Sent so the
+    /// settings page and any other consumer can render an "About"
+    /// line without a second round-trip. `#[serde(default)]` keeps
+    /// older clients deserializing cleanly when this field is absent.
+    #[serde(default)]
+    pub daemon_version: String,
     /// Whether the USB device is physically present (enumerated)
     #[serde(default)]
     pub device_available: bool,
@@ -721,6 +727,7 @@ mod tests {
     #[test]
     fn test_daemon_status_json() {
         let status = DaemonStatus {
+            daemon_version: "0.1.0".to_string(),
             device_available: true,
             device_connected: true,
             device_name: Some("Core Deck".to_string()),
