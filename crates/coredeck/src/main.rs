@@ -760,22 +760,41 @@ fn install_signal_handler() {
     }
 }
 
-// ── launchd install/uninstall ──────────────────────────────────────
+// ── launchd / systemd install + uninstall ──────────────────────────
 
+/// Install the platform-native auto-start agent for the daemon.
+/// macOS uses launchd via a LaunchAgents plist; Linux uses a systemd
+/// user unit. Other platforms get a stderr warning. Idempotent —
+/// re-running re-writes the unit and reloads.
 fn install_launchd(listen: &str) {
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").expect("HOME not set");
-        let plist_dir = format!("{}/Library/LaunchAgents", home);
-        let plist_path = format!("{}/com.coredeck.daemon.plist", plist_dir);
+        install_launchd_macos(listen);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        install_systemd_linux(listen);
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = listen;
+        eprintln!("auto-start is only supported on macOS (launchd) and Linux (systemd) at the moment");
+    }
+}
 
-        let exe = std::env::current_exe()
-            .expect("Failed to get current exe path")
-            .to_string_lossy()
-            .to_string();
+#[cfg(target_os = "macos")]
+fn install_launchd_macos(listen: &str) {
+    let home = std::env::var("HOME").expect("HOME not set");
+    let plist_dir = format!("{}/Library/LaunchAgents", home);
+    let plist_path = format!("{}/com.coredeck.daemon.plist", plist_dir);
 
-        let plist = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
+    let exe = std::env::current_exe()
+        .expect("Failed to get current exe path")
+        .to_string_lossy()
+        .to_string();
+
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -797,36 +816,92 @@ fn install_launchd(listen: &str) {
     <string>{home}/Library/Logs/coredeck.log</string>
 </dict>
 </plist>"#
-        );
+    );
 
-        std::fs::create_dir_all(&plist_dir).expect("Failed to create LaunchAgents dir");
-        std::fs::write(&plist_path, plist).expect("Failed to write plist");
+    std::fs::create_dir_all(&plist_dir).expect("Failed to create LaunchAgents dir");
+    std::fs::write(&plist_path, plist).expect("Failed to write plist");
 
-        // Idempotent reload: unload silently first (no-op if not loaded), then
-        // load the (possibly updated) plist. Using `bootout`+`bootstrap` would
-        // be cleaner on modern macOS but requires the per-uid domain spelled
-        // out, and `load`/`unload` still works.
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", &plist_path])
-            .stderr(std::process::Stdio::null())
-            .status();
+    // Idempotent reload: unload silently first (no-op if not loaded), then
+    // load the (possibly updated) plist. Using `bootout`+`bootstrap` would
+    // be cleaner on modern macOS but requires the per-uid domain spelled
+    // out, and `load`/`unload` still works.
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", &plist_path])
+        .stderr(std::process::Stdio::null())
+        .status();
 
-        let status = std::process::Command::new("launchctl")
-            .args(["load", &plist_path])
-            .status()
-            .expect("Failed to run launchctl");
+    let status = std::process::Command::new("launchctl")
+        .args(["load", &plist_path])
+        .status()
+        .expect("Failed to run launchctl");
 
-        if status.success() {
-            println!("Installed and loaded: {}", plist_path);
-        } else {
-            eprintln!("launchctl load failed (exit {})", status.code().unwrap_or(-1));
-        }
+    if status.success() {
+        println!("Installed and loaded: {}", plist_path);
+    } else {
+        eprintln!("launchctl load failed (exit {})", status.code().unwrap_or(-1));
     }
+}
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = listen;
-        eprintln!("launchd is only available on macOS");
+/// systemd user unit lives under `~/.config/systemd/user/coredeck.service`
+/// — no root needed. journald handles logs (so no redirect stanza is
+/// required). The unit `Restart=on-failure` mirrors launchd's
+/// `KeepAlive=true` for crash recovery; intentional `coredeck quit`
+/// exits cleanly so it doesn't loop. `WantedBy=default.target` ties
+/// activation to the user's graphical/login session so the daemon
+/// comes up when the user logs in (no need for a display manager
+/// integration).
+#[cfg(target_os = "linux")]
+fn install_systemd_linux(listen: &str) {
+    let home = std::env::var("HOME").expect("HOME not set");
+    let unit_dir = format!("{}/.config/systemd/user", home);
+    let unit_path = format!("{}/coredeck.service", unit_dir);
+
+    let exe = std::env::current_exe()
+        .expect("Failed to get current exe path")
+        .to_string_lossy()
+        .to_string();
+
+    let unit = format!(
+        r#"[Unit]
+Description=CoreDeck daemon
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart={exe} --listen {listen}
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+"#
+    );
+
+    std::fs::create_dir_all(&unit_dir).expect("Failed to create systemd user dir");
+    std::fs::write(&unit_path, unit).expect("Failed to write systemd unit");
+
+    // daemon-reload picks up the new/changed unit; enable --now starts
+    // it immediately *and* enables auto-start at next login. If the
+    // unit was already running, restart it to pick up the new ExecStart.
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status();
+    let status = std::process::Command::new("systemctl")
+        .args(["--user", "enable", "--now", "coredeck.service"])
+        .status();
+    let _ = std::process::Command::new("systemctl")
+        .args(["--user", "restart", "coredeck.service"])
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match status {
+        Ok(s) if s.success() => println!("Installed and started: {}", unit_path),
+        Ok(s) => eprintln!(
+            "systemctl --user enable --now failed (exit {})",
+            s.code().unwrap_or(-1)
+        ),
+        Err(e) => eprintln!("systemctl invocation failed: {e}"),
     }
 }
 
@@ -857,7 +932,12 @@ fn run_setup(listen: &str) {
     println!("1/2 Installing Claude Code hooks…");
     hooks::install_claude_hooks(listen);
 
-    println!("\n2/2 Registering launchd auto-start…");
+    let auto_start_label = if cfg!(target_os = "linux") {
+        "systemd user service"
+    } else {
+        "launchd auto-start"
+    };
+    println!("\n2/2 Registering {auto_start_label}…");
     install_launchd(listen);
 
     println!();
@@ -886,8 +966,32 @@ fn uninstall_launchd() {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        eprintln!("launchd is only available on macOS");
+        let home = std::env::var("HOME").expect("HOME not set");
+        let unit_path = format!("{}/.config/systemd/user/coredeck.service", home);
+
+        // disable --now stops + un-symlinks; no-op on a non-existent
+        // unit so we don't have to special-case the not-installed
+        // path.
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", "--now", "coredeck.service"])
+            .stderr(std::process::Stdio::null())
+            .status();
+
+        if std::path::Path::new(&unit_path).exists() {
+            std::fs::remove_file(&unit_path).expect("Failed to remove unit file");
+            let _ = std::process::Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+            println!("Uninstalled: {}", unit_path);
+        } else {
+            println!("Unit not found: {}", unit_path);
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        eprintln!("auto-start uninstall is only supported on macOS and Linux at the moment");
     }
 }
