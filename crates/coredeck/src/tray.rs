@@ -357,16 +357,19 @@ fn decorate_tab_rows(
             resp != 0
         };
 
-        // One shared on-state image: a small filled circle drawn near
-        // the top of a tall canvas. AppKit centers the state image in
-        // the (taller-than-usual, because of the subtitle) row, but
-        // the canvas height plus the upward bias on the circle make
-        // it land at the title's vertical level rather than between
-        // title and subtitle. labelColor gives us automatic light/dark
-        // adaptation. Replaces the system ✓ — feels more like a
-        // "now playing" indicator than a check, which matches the
-        // semantic ("this tab is active") better.
-        let on_image = make_active_indicator_image();
+        // Two flavours of the active-row indicator:
+        //   - `tall`: 14×32 with the dot biased toward the top, used
+        //     for two-line rows (title + subtitle). AppKit centers the
+        //     state image vertically in the row; the upward bias inside
+        //     the canvas lands the dot at the title's baseline rather
+        //     than between the lines.
+        //   - `short`: 14×14 with the dot centered, used for one-line
+        //     rows. AppKit centers it; we just want a centered dot.
+        // Without the split, single-line rows would inherit the
+        // tall canvas and AppKit's centering would put the dot above
+        // the title text.
+        let tall = make_active_indicator_image(IndicatorVariant::TwoLine);
+        let short = make_active_indicator_image(IndicatorVariant::OneLine);
 
         for (i, (sub, on)) in subtitles.iter().zip(actives.iter()).enumerate() {
             let idx = offset + i;
@@ -379,6 +382,12 @@ fn decorate_tab_rows(
             }
             let state: i64 = if *on { STATE_ON } else { STATE_OFF };
             let _: () = msg_send![item, setState: state];
+            let has_subtitle = sub.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+            let on_image = if has_subtitle && subtitle_supported {
+                tall
+            } else {
+                short
+            };
             // Setting the on-state image on every row (not just active
             // ones) so subsequent state flips reuse the same indicator
             // without another round through this function.
@@ -397,21 +406,34 @@ fn decorate_tab_rows(
             }
         }
 
-        // The menu items each retain `on_image` via setOnStateImage:;
-        // release our local +1 from `alloc/init`.
-        let _: () = msg_send![on_image, release];
+        // The menu items each retain whichever image they got via
+        // setOnStateImage:; release our local +1 from `alloc/init`.
+        let _: () = msg_send![tall, release];
+        let _: () = msg_send![short, release];
     }
 
-    /// Build a top-biased filled-circle NSImage to use as the
-    /// active-row indicator. Caller owns one +1 retain (from
-    /// `alloc/init`); release after handing to AppKit.
-    unsafe fn make_active_indicator_image() -> id {
+    enum IndicatorVariant {
+        OneLine,
+        TwoLine,
+    }
+
+    /// Build the filled-circle NSImage used as the active-row
+    /// indicator. Caller owns one +1 retain (from `alloc/init`);
+    /// release after handing to AppKit. See the call site for why
+    /// two variants exist.
+    unsafe fn make_active_indicator_image(variant: IndicatorVariant) -> id {
         let nsimage_class = class!(NSImage);
         let image: id = msg_send![nsimage_class, alloc];
-        let image: id = msg_send![
-            image,
-            initWithSize: NSSize::new(14.0, 32.0)
-        ];
+
+        // Image coords are non-flipped (Y-up). For TwoLine we use a
+        // tall canvas (32) and bias the dot near the top so AppKit's
+        // vertical centering lands it at the title's baseline; for
+        // OneLine we use a square 14×14 canvas with the dot centered.
+        let (size, circle_origin) = match variant {
+            IndicatorVariant::TwoLine => (NSSize::new(14.0, 32.0), NSPoint::new(3.0, 20.0)),
+            IndicatorVariant::OneLine => (NSSize::new(14.0, 14.0), NSPoint::new(3.0, 3.0)),
+        };
+        let image: id = msg_send![image, initWithSize: size];
 
         let _: () = msg_send![image, lockFocus];
 
@@ -420,17 +442,7 @@ fn decorate_tab_rows(
         let color: id = msg_send![class!(NSColor), labelColor];
         let _: () = msg_send![color, set];
 
-        // Image coords are non-flipped (Y-up). Place the 8x8 circle in
-        // the upper portion: y=20 means circle bottom is 20 from image
-        // bottom, so the circle occupies y=20..28 of a 32-tall image —
-        // visually the upper third. Combined with AppKit's vertical
-        // centering of the state image in the row, this puts the dot
-        // at roughly the title's baseline rather than centered between
-        // title and subtitle.
-        let circle_rect = NSRect::new(
-            NSPoint::new(3.0, 20.0),
-            NSSize::new(8.0, 8.0),
-        );
+        let circle_rect = NSRect::new(circle_origin, NSSize::new(8.0, 8.0));
         let path: id = msg_send![
             class!(NSBezierPath),
             bezierPathWithOvalInRect: circle_rect
