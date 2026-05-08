@@ -7,4 +7,7 @@ pub mod protocol;
 #[cfg(target_os = "macos")]
 mod hotplug_macos;
 
+#[cfg(target_os = "linux")]
+mod hotplug_linux;
+
 pub use device::HidManager;

@@ -16,17 +16,21 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+// Native USB hotplug — IOKit on macOS, libudev on Linux. Both
+// backends export the same `HotplugEvent` enum + `HotplugWatcher`
+// shape so the consumer below doesn't have to branch.
 #[cfg(target_os = "macos")]
 use super::hotplug_macos::{HotplugEvent, HotplugWatcher};
+#[cfg(target_os = "linux")]
+use super::hotplug_linux::{HotplugEvent, HotplugWatcher};
 
 /// Number of consecutive ping failures before declaring disconnection
 const DISCONNECT_THRESHOLD: u32 = 3;
 
-/// Polling interval when hotplug is not available (non-macOS platforms)
-#[cfg(not(target_os = "macos"))]
+/// Polling interval used by the enumeration fallback (when no native
+/// hotplug backend is available, or when one fails to init). The
+/// fallback is reachable on every platform.
 const RECONNECT_INITIAL_MS: u64 = 500;
-
-#[cfg(not(target_os = "macos"))]
 const RECONNECT_MAX_MS: u64 = 5000;
 
 /// Manager for HID device communication with Core Deck
@@ -52,8 +56,10 @@ pub struct HidManager {
     /// Last display payload sent (for deduplication).
     /// Shared with monitor threads so disconnect clears it.
     last_display_payload: Arc<Mutex<String>>,
-    /// macOS hotplug watcher
-    #[cfg(target_os = "macos")]
+    /// Native USB hotplug watcher (macOS IOKit / Linux udev). None on
+    /// platforms without a backend or when watcher init failed and the
+    /// poll fallback took over.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     hotplug_watcher: Option<HotplugWatcher>,
 }
 
@@ -93,17 +99,20 @@ impl HidManager {
             stop_monitor: Arc::new(AtomicBool::new(false)),
             protocol_mode: Arc::new(AtomicU8::new(ProtocolMode::Standalone as u8)),
             last_display_payload: Arc::new(Mutex::new(String::new())),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             hotplug_watcher: None,
         };
 
-        // Start the appropriate monitor mechanism (hotplug only tracks availability)
-        #[cfg(target_os = "macos")]
+        // Start the appropriate monitor mechanism (hotplug only tracks availability).
+        // macOS uses IOKit, Linux uses udev; both expose the same shape and
+        // the consumer below treats them identically. Anything else falls
+        // back to enumeration polling.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            manager.start_macos_hotplug(config, event_tx);
+            manager.start_native_hotplug(config, event_tx);
         }
 
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             manager.start_polling_monitor();
         }
@@ -114,20 +123,26 @@ impl HidManager {
         Ok(manager)
     }
 
-    /// Start macOS IOKit hotplug watcher.
+    /// Start the native USB hotplug watcher. macOS uses IOKit
+    /// matching notifications, Linux uses libudev's netlink monitor —
+    /// both feed the same `HotplugEvent` channel and the consumer
+    /// below doesn't care which.
     ///
     /// Only tracks device availability (plug/unplug). Does NOT open the device.
     /// If the device was open when removed, closes it and emits HidDisconnected.
-    #[cfg(target_os = "macos")]
-    fn start_macos_hotplug(&mut self, config: HidConfig, _event_tx: DaemonEventSender) {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn start_native_hotplug(&mut self, config: HidConfig, _event_tx: DaemonEventSender) {
         // Create channel for hotplug events
         let (hotplug_tx, mut hotplug_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        // Start the IOKit watcher
+        // Start the native watcher (IOKit / udev)
         match HotplugWatcher::new(config.vendor_id, config.product_id, hotplug_tx) {
             Ok(watcher) => {
                 self.hotplug_watcher = Some(watcher);
+                #[cfg(target_os = "macos")]
                 info!("Started native IOKit hotplug watcher");
+                #[cfg(target_os = "linux")]
+                info!("Started native udev hotplug watcher");
 
                 let api = Arc::clone(&self.api);
                 let device = Arc::clone(&self.device);
@@ -208,14 +223,18 @@ impl HidManager {
                 });
             }
             Err(e) => {
-                warn!("Failed to start IOKit hotplug watcher: {}, falling back to polling", e);
+                warn!(
+                    "Native hotplug watcher init failed: {}; falling back to enumeration polling",
+                    e,
+                );
                 self.start_polling_monitor_internal();
             }
         }
     }
 
-    /// Start polling-based monitor (for non-macOS or fallback)
-    #[cfg(not(target_os = "macos"))]
+    /// Start polling-based monitor (for platforms without a native
+    /// hotplug backend, or as a fallback when one fails to init).
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     fn start_polling_monitor(&self) {
         self.start_polling_monitor_internal();
     }
@@ -238,15 +257,8 @@ impl HidManager {
         thread::spawn(move || {
             info!("HID polling monitor thread started");
 
-            #[cfg(not(target_os = "macos"))]
             let mut poll_interval_ms = RECONNECT_INITIAL_MS;
-            #[cfg(target_os = "macos")]
-            let mut poll_interval_ms = 500u64;
-
-            #[cfg(not(target_os = "macos"))]
             let max_interval = RECONNECT_MAX_MS;
-            #[cfg(target_os = "macos")]
-            let max_interval = 5000u64;
 
             let mut was_available = device_available.load(Ordering::Relaxed);
 
