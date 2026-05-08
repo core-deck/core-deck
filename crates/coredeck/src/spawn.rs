@@ -119,6 +119,9 @@ async fn spawn_in(host: &HostTerminal, cwd: &str, wrapper: &PathBuf) -> Result<(
         HostTerminalKind::ITerm2 => spawn_iterm2(cwd, wrapper).await,
         HostTerminalKind::AppleTerminal => spawn_apple_terminal(cwd, wrapper).await,
         HostTerminalKind::Ghostty => spawn_ghostty(cwd, wrapper).await,
+        HostTerminalKind::GnomeTerminal => spawn_gnome_terminal(cwd, wrapper).await,
+        HostTerminalKind::Konsole => spawn_konsole(cwd, wrapper).await,
+        HostTerminalKind::Alacritty => spawn_alacritty(cwd, wrapper).await,
         // JetBrains IDEs embed the terminal in a non-scriptable pane —
         // no public CLI to ask the IDE to open a fresh tab. Skip; the
         // user can drop a fresh wrapper into a regular terminal app
@@ -262,6 +265,55 @@ async fn spawn_ghostty(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
 async fn spawn_ghostty(_cwd: &str, _wrapper: &PathBuf) -> Result<(), String> {
     debug!("Ghostty spawn requested on non-macOS — ignoring");
     Ok(())
+}
+
+/// GNOME Terminal: `--working-directory=<cwd> -- <wrapper>`. The `--`
+/// separator is the documented way to pass a command + argv (vs. the
+/// deprecated `-e "<shell-string>"`). Opens a new tab in the existing
+/// gnome-terminal-server when one is running, falling back to a new
+/// window otherwise — that's what the daemon itself does.
+async fn spawn_gnome_terminal(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+    let cwd_arg = format!("--working-directory={}", cwd);
+    run(
+        "gnome-terminal",
+        &[&cwd_arg, "--", wrapper.to_string_lossy().as_ref()],
+    )
+    .await
+}
+
+/// Konsole: `--new-tab` reuses the running Konsole if one exists.
+/// `--workdir <cwd>` sets the starting directory; `-e <prog>` runs
+/// the program. Konsole's `-e` takes a single argv, so we pass the
+/// wrapper path directly.
+async fn spawn_konsole(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+    run(
+        "konsole",
+        &[
+            "--new-tab",
+            "--workdir",
+            cwd,
+            "-e",
+            wrapper.to_string_lossy().as_ref(),
+        ],
+    )
+    .await
+}
+
+/// Alacritty doesn't support tabs out of the box (no daemon-mode CLI
+/// like wezterm/konsole have); this opens a new window instead. That
+/// matches the user's mental model — Alacritty users typically
+/// manage windows with their WM.
+async fn spawn_alacritty(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+    run(
+        "alacritty",
+        &[
+            "--working-directory",
+            cwd,
+            "-e",
+            wrapper.to_string_lossy().as_ref(),
+        ],
+    )
+    .await
 }
 
 // ── Helpers ────────────────────────────────────────────────────────

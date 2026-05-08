@@ -294,6 +294,36 @@ fn detect_host_terminal() -> HostTerminal {
             window_id,
         };
     }
+    // Linux terminals — order matters: more specific env vars first so
+    // a Konsole shell with VTE_VERSION (rare but possible) is correctly
+    // tagged as Konsole rather than the GNOME-Terminal catch-all.
+    if env("KONSOLE_VERSION").is_some() {
+        return HostTerminal {
+            kind: HostTerminalKind::Konsole,
+            pane_id: None,
+            program_version,
+            tmux_socket: None,
+            window_id,
+        };
+    }
+    if env("ALACRITTY_LOG").is_some() {
+        return HostTerminal {
+            kind: HostTerminalKind::Alacritty,
+            pane_id: None,
+            program_version,
+            tmux_socket: None,
+            window_id,
+        };
+    }
+    if env("GNOME_TERMINAL_SCREEN").is_some() || env("VTE_VERSION").is_some() {
+        return HostTerminal {
+            kind: HostTerminalKind::GnomeTerminal,
+            pane_id: None,
+            program_version,
+            tmux_socket: None,
+            window_id,
+        };
+    }
     let kind = match term_program.as_str() {
         "ghostty" | "Ghostty" => HostTerminalKind::Ghostty,
         "iTerm.app" => HostTerminalKind::ITerm2,

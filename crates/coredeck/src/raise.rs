@@ -73,6 +73,14 @@ async fn raise_for_host(host: &HostTerminal) {
         HostTerminalKind::ITerm2 => raise_iterm2(host).await,
         HostTerminalKind::Kitty => raise_kitty(host).await,
         HostTerminalKind::Tmux => raise_tmux(host).await,
+        // GNOME Terminal / Konsole / Alacritty don't expose a CLI to
+        // raise a specific tab from outside, and they typically don't
+        // set `$WINDOWID` either. Best-effort: ask wmctrl to activate
+        // the first window matching the terminal's WM_CLASS; on a
+        // pure-Wayland session this no-ops with a debug log.
+        HostTerminalKind::GnomeTerminal => raise_linux_by_class(host, "gnome-terminal").await,
+        HostTerminalKind::Konsole => raise_linux_by_class(host, "konsole").await,
+        HostTerminalKind::Alacritty => raise_linux_by_class(host, "Alacritty").await,
         // JetBrains-family IDEs: focus the IDE app itself by its
         // macOS bundle id. The user's wrapper passes
         // `__CFBundleIdentifier` through `pane_id` (e.g.
@@ -168,6 +176,28 @@ async fn raise_jetbrains(_host: &HostTerminal) -> Result<(), String> {
     Ok(())
 }
 
+/// Linux raise-by-class: `wmctrl -x -a <class>` activates the first
+/// window whose `WM_CLASS` second field matches `class`. Prefers
+/// `$WINDOWID`-based activation when available (more precise — no
+/// chance of grabbing a sibling window), falling back to class match.
+/// Wayland sessions without an Xwayland-friendly compositor will see
+/// `wmctrl` exit non-zero; we log and move on.
+#[cfg(target_os = "linux")]
+async fn raise_linux_by_class(host: &HostTerminal, class: &str) -> Result<(), String> {
+    if let Some(wid) = host.window_id.as_deref() {
+        if !wid.is_empty() {
+            return run("wmctrl", &["-ia", wid]).await;
+        }
+    }
+    run("wmctrl", &["-x", "-a", class]).await
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn raise_linux_by_class(_host: &HostTerminal, _class: &str) -> Result<(), String> {
+    debug!("Linux class-based raise requested on non-Linux — ignoring");
+    Ok(())
+}
+
 /// Tmux is nested inside another terminal. We can select the right tmux
 /// pane from outside via the recorded socket, but we don't yet know the
 /// *outer* terminal — the wrapper sees `$TMUX` and stops detecting at
@@ -206,7 +236,13 @@ async fn activate_outer(host: &HostTerminal) -> Result<(), String> {
         HostTerminalKind::AppleTerminal => "Terminal",
         HostTerminalKind::Tmux
         | HostTerminalKind::Unknown
-        | HostTerminalKind::JetBrains => return Ok(()),
+        | HostTerminalKind::JetBrains
+        // Linux-native terminals: macOS doesn't run them, so the
+        // activate-outer path is unreachable in practice. Ok'ing
+        // keeps the match exhaustive without trying to translate.
+        | HostTerminalKind::GnomeTerminal
+        | HostTerminalKind::Konsole
+        | HostTerminalKind::Alacritty => return Ok(()),
     };
     activate_macos_app(app).await
 }

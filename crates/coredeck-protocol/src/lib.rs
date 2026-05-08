@@ -385,6 +385,15 @@ pub enum HostTerminalKind {
     Kitty,
     Tmux,
     AppleTerminal,
+    /// GNOME Terminal (and the broader VTE family that exposes the
+    /// same `--working-directory=… -- cmd` CLI: Tilix, gnome-console,
+    /// xfce4-terminal in some configs). Detected via
+    /// `$GNOME_TERMINAL_SCREEN` first, falling back to `$VTE_VERSION`.
+    GnomeTerminal,
+    /// KDE Konsole. Detected via `$KONSOLE_VERSION`.
+    Konsole,
+    /// Alacritty. Detected via `$ALACRITTY_LOG`.
+    Alacritty,
     /// JetBrains-family embedded terminals (IntelliJ, Android Studio,
     /// PyCharm, Goland, …). Detected via `TERMINAL_EMULATOR=
     /// JetBrains-JediTerm`. They don't emit OSC 1004 focus reports, so
