@@ -267,7 +267,10 @@ async fn spawn_ghostty(_cwd: &str, _wrapper: &PathBuf) -> Result<(), String> {
 // ── Helpers ────────────────────────────────────────────────────────
 
 /// POSIX single-quote shell escaping. Matches the helper used by
-/// `coredeck-claude` for SSH command building.
+/// `coredeck-claude` for SSH command building. Only the macOS
+/// AppleScript adapters need it today; gate to silence dead-code on
+/// other platforms.
+#[cfg(target_os = "macos")]
 fn shell_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');

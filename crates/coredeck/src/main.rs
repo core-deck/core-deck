@@ -109,20 +109,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install launchd plist for auto-start
+    /// Install platform auto-start agent (launchd on macOS, systemd
+    /// user unit on Linux)
     Install,
-    /// Uninstall launchd plist
+    /// Uninstall platform auto-start agent
     Uninstall,
     /// Manage Claude Code hooks configuration
     Hooks {
         #[command(subcommand)]
         action: HooksAction,
     },
-    /// One-shot setup. Without `--remote`: installs hooks + launchd
-    /// locally and prints the alias hint. With `--remote <user@host>`:
-    /// installs only the hooks on that SSH host (no launchd) — used to
-    /// pair `coredeck-claude --ssh <host>` with hook coverage on the
-    /// remote box.
+    /// One-shot setup. Without `--remote`: installs hooks +
+    /// auto-start agent locally and prints the alias hint. With
+    /// `--remote <user@host>`: installs only the hooks on that SSH
+    /// host (no auto-start) — used to pair `coredeck-claude --ssh
+    /// <host>` with hook coverage on the remote box.
     Setup {
         /// SSH host (e.g. `vden@dev-box`). When set, installs hooks on
         /// the remote instead of locally.
