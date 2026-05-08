@@ -719,8 +719,7 @@ fn setup_macos_accessory() {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn setup_macos_accessory() {}
+// No non-macOS stub — the only caller is itself gated on macOS.
 
 /// Spawn a platform-appropriate "open URL in default browser" command.
 /// Best-effort and non-blocking — tray actions shouldn't be load-bearing.
@@ -755,9 +754,13 @@ fn install_signal_handler() {
         // Use _exit to avoid running atexit handlers which could deadlock
         unsafe { libc::_exit(0) }
     }
+    // Two-step cast (function -> opaque pointer -> usize-sized signal
+    // handler) keeps rust 1.95+ happy: it now lints on direct
+    // function-as-integer casts (`function_casts_as_integer`).
+    let handler = handle_signal as *const () as libc::sighandler_t;
     unsafe {
-        libc::signal(libc::SIGINT, handle_signal as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, handle_signal as libc::sighandler_t);
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
     }
 }
 

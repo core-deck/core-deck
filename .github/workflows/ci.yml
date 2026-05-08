@@ -60,3 +60,31 @@ jobs:
         run: |
           file target/x86_64-apple-darwin/release/coredeck
           file target/x86_64-apple-darwin/release/coredeck-claude
+
+  build-linux-x86_64:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libhidapi-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build release (x86_64 Linux)
+        run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Verify binaries
+        run: |
+          file target/x86_64-unknown-linux-gnu/release/coredeck
+          file target/x86_64-unknown-linux-gnu/release/coredeck-claude
+          # Cross-check the udev hotplug symbol made it in. If we
+          # accidentally stop linking libudev on Linux this catches it
+          # before users hit a runtime "watcher init failed" log.
+          ldd target/x86_64-unknown-linux-gnu/release/coredeck | grep -q libudev

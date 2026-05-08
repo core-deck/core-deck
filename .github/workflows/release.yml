@@ -55,6 +55,36 @@ jobs:
             target/x86_64-apple-darwin/release/coredeck
             target/x86_64-apple-darwin/release/coredeck-claude
 
+  build-linux-x86_64:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev libhidapi-dev pkg-config
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build for x86_64 Linux
+        run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
+
+      - name: Strip binaries
+        run: |
+          strip target/x86_64-unknown-linux-gnu/release/coredeck
+          strip target/x86_64-unknown-linux-gnu/release/coredeck-claude
+
+      - name: Upload Linux x86_64 binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-linux-x86_64
+          path: |
+            target/x86_64-unknown-linux-gnu/release/coredeck
+            target/x86_64-unknown-linux-gnu/release/coredeck-claude
+
   # Combine binaries and create signed app bundle
   package-macos:
     needs: [build-macos-arm64, build-macos-x86_64]
@@ -182,8 +212,96 @@ jobs:
           name: CoreDeck-${{ steps.version.outputs.version }}-macos-universal
           path: dist/*.dmg
 
+  package-linux:
+    needs: build-linux-x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Linux binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-linux-x86_64
+          path: dist/linux/
+
+      - name: Get version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          else
+            echo "version=$(grep '^version' crates/coredeck/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Stage tarball contents
+        run: |
+          # Layout the user sees after extracting the tarball:
+          #   coredeck-<version>-linux-x86_64/
+          #     bin/coredeck
+          #     bin/coredeck-claude
+          #     udev/99-coredeck.rules
+          #     install.sh         (one-shot installer; calls `coredeck setup`)
+          #     README.md          (excerpt of docs/linux-setup.md)
+          #     LICENSE
+          STAGE="dist/coredeck-${{ steps.version.outputs.version }}-linux-x86_64"
+          mkdir -p "$STAGE/bin" "$STAGE/udev"
+          install -m 0755 dist/linux/coredeck "$STAGE/bin/coredeck"
+          install -m 0755 dist/linux/coredeck-claude "$STAGE/bin/coredeck-claude"
+
+          cat > "$STAGE/udev/99-coredeck.rules" <<'EOF'
+          # Core Deck QMK Raw HID device — VID 0xFEED, PID 0x0803.
+          # Drop into /etc/udev/rules.d/ then `sudo udevadm control --reload-rules && sudo udevadm trigger`.
+          SUBSYSTEM=="hidraw", ATTRS{idVendor}=="feed", ATTRS{idProduct}=="0803", MODE="0666"
+          SUBSYSTEM=="usb", ATTRS{idVendor}=="feed", ATTRS{idProduct}=="0803", MODE="0666"
+          EOF
+
+          cat > "$STAGE/install.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # Install Core Deck binaries to ~/.local/bin, drop the udev
+          # rules into /etc/udev/rules.d/ (asks for sudo), and run
+          # `coredeck setup` to register hooks + the systemd user unit.
+          set -euo pipefail
+          here="$(cd "$(dirname "$0")" && pwd)"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "$here/bin/coredeck" "$HOME/.local/bin/coredeck"
+          install -m 0755 "$here/bin/coredeck-claude" "$HOME/.local/bin/coredeck-claude"
+          if [ ! -f /etc/udev/rules.d/99-coredeck.rules ]; then
+              echo "Installing udev rules (sudo)…"
+              sudo install -m 0644 "$here/udev/99-coredeck.rules" /etc/udev/rules.d/99-coredeck.rules
+              sudo udevadm control --reload-rules
+              sudo udevadm trigger
+          fi
+          case ":$PATH:" in
+              *":$HOME/.local/bin:"*) ;;
+              *) echo "warning: ~/.local/bin is not on \$PATH; add it to your shell rc." ;;
+          esac
+          "$HOME/.local/bin/coredeck" setup
+          echo
+          echo "Done. Add this to your shell rc to wrap claude:"
+          echo "    alias claude=\"coredeck-claude\""
+          EOF
+          chmod +x "$STAGE/install.sh"
+
+          # Lift the README from docs/linux-setup.md so the tarball is
+          # self-contained — saves users a trip to the repo.
+          cp docs/linux-setup.md "$STAGE/README.md"
+          cp LICENSE "$STAGE/LICENSE" 2>/dev/null || true
+
+          tar -C dist -czf "dist/coredeck-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz" \
+              "coredeck-${{ steps.version.outputs.version }}-linux-x86_64"
+          ls -lh dist/
+
+      - name: Upload Linux tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: coredeck-${{ steps.version.outputs.version }}-linux-x86_64
+          path: dist/coredeck-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
+
   create-release:
-    needs: package-macos
+    needs: [package-macos, package-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     permissions:
@@ -193,10 +311,16 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
-      - name: Download artifacts
+      - name: Download macOS DMG
         uses: actions/download-artifact@v4
         with:
           name: CoreDeck-${{ steps.version.outputs.version }}-macos-universal
+          path: artifacts
+
+      - name: Download Linux tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: coredeck-${{ steps.version.outputs.version }}-linux-x86_64
           path: artifacts
 
       - name: Create Release
@@ -205,6 +329,8 @@ jobs:
           name: Core Deck v${{ steps.version.outputs.version }}
           draft: true
           generate_release_notes: true
-          files: artifacts/*.dmg
+          files: |
+            artifacts/*.dmg
+            artifacts/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

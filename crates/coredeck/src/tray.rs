@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use coredeck_protocol::{WrapperTab, WrapperTabList, TAB_STATE_WORKING};
 use tray_icon::{
-    menu::{ContextMenu, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     TrayIcon as TrayIconHandle, TrayIconBuilder,
 };
 use tracing::{debug, error, info};
@@ -330,6 +330,10 @@ fn decorate_tab_rows(
     use cocoa::base::{id, nil};
     use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
     use objc::{class, msg_send, sel, sel_impl};
+    // Pulls `Menu::ns_menu()` into scope on macOS — the symbol is
+    // exposed only via the ContextMenu trait, so an explicit import
+    // is required even though we never name `ContextMenu` itself.
+    use tray_icon::menu::ContextMenu;
 
     let ptr = menu.ns_menu();
     if ptr.is_null() {
