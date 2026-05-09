@@ -8,11 +8,11 @@ use core_foundation::runloop::{kCFRunLoopDefaultMode, CFRunLoop, CFRunLoopRunInM
 use core_foundation::string::CFString;
 use core_foundation_sys::dictionary::CFDictionarySetValue;
 use core_foundation_sys::runloop::{
-    CFRunLoopAddSource, CFRunLoopGetCurrent, CFRunLoopSourceRef, CFRunLoopStop,
-    kCFRunLoopRunFinished, kCFRunLoopRunStopped,
+    kCFRunLoopRunFinished, kCFRunLoopRunStopped, CFRunLoopAddSource, CFRunLoopGetCurrent,
+    CFRunLoopSourceRef, CFRunLoopStop,
 };
-use io_kit_sys::*;
 use io_kit_sys::types::io_iterator_t;
+use io_kit_sys::*;
 use mach2::port::MACH_PORT_NULL;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};

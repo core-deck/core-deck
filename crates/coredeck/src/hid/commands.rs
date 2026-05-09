@@ -5,12 +5,17 @@
 
 #![allow(dead_code)]
 
-use super::protocol::{build_chunked_packets, DeviceMode, HidCommand, HidPacket, ProtocolMode, SoftKeyType};
+use super::protocol::{
+    build_chunked_packets, DeviceMode, HidCommand, HidPacket, ProtocolMode, SoftKeyType,
+};
 
 /// Build a display update from a DisplayUpdate struct.
 /// Serializes directly to JSON — all fields (including optional context/cost/model)
 /// are included when present.
-pub fn build_display_update(update: &coredeck_protocol::DisplayUpdate, mode: ProtocolMode) -> Vec<HidPacket> {
+pub fn build_display_update(
+    update: &coredeck_protocol::DisplayUpdate,
+    mode: ProtocolMode,
+) -> Vec<HidPacket> {
     let json = serde_json::to_string(update).expect("DisplayUpdate serialization");
 
     tracing::info!("HID display payload: {}", json);
@@ -35,7 +40,13 @@ pub fn build_set_brightness(level: u8, save: bool, mode: ProtocolMode) -> Vec<Hi
 }
 
 /// Build a set soft key command (may be multi-packet for long string data)
-pub fn build_set_soft_key(index: u8, key_type: SoftKeyType, data: &[u8], save: bool, mode: ProtocolMode) -> Vec<HidPacket> {
+pub fn build_set_soft_key(
+    index: u8,
+    key_type: SoftKeyType,
+    data: &[u8],
+    save: bool,
+    mode: ProtocolMode,
+) -> Vec<HidPacket> {
     let mut payload = vec![index, key_type as u8, if save { 0x01 } else { 0x00 }];
     payload.extend_from_slice(data);
     build_chunked_packets(HidCommand::SetSoftKey, &payload, mode)
@@ -57,7 +68,13 @@ pub fn build_set_mode(device_mode: DeviceMode, mode: ProtocolMode) -> Vec<HidPac
 }
 
 /// Build an alert command to show an overlay on the device
-pub fn build_alert(tab: usize, session: &str, text: &str, details: Option<&str>, mode: ProtocolMode) -> Vec<HidPacket> {
+pub fn build_alert(
+    tab: usize,
+    session: &str,
+    text: &str,
+    details: Option<&str>,
+    mode: ProtocolMode,
+) -> Vec<HidPacket> {
     let mut json = serde_json::json!({
         "tab": tab,
         "session": session,
@@ -83,11 +100,10 @@ pub fn build_clear_alert(tab: usize, mode: ProtocolMode) -> Vec<HidPacket> {
     build_chunked_packets(HidCommand::Alert, json.to_string().as_bytes(), mode)
 }
 
-
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::{ProtocolMode, FLAG_END, FLAG_START};
     use super::*;
-    use super::super::protocol::{FLAG_END, FLAG_START, ProtocolMode};
 
     const S: ProtocolMode = ProtocolMode::Standalone;
 
@@ -188,5 +204,4 @@ mod tests {
         assert_eq!(packets[0].flags(), FLAG_START | FLAG_END);
         assert_eq!(packets[0].command(), Some(HidCommand::GetVersion));
     }
-
 }

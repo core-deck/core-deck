@@ -136,9 +136,9 @@ pub fn qmk_keycode_to_terminal_bytes(keycode: u16) -> Option<Vec<u8>> {
 
     match base {
         // Special keys
-        0x28 => Some(vec![b'\r']),       // Enter
-        0x29 => Some(vec![0x1b]),        // Escape
-        0x2A => Some(vec![0x7f]),        // Backspace
+        0x28 => Some(vec![b'\r']), // Enter
+        0x29 => Some(vec![0x1b]),  // Escape
+        0x2A => Some(vec![0x7f]),  // Backspace
         0x2B => {
             // Tab / Shift-Tab
             if mods.shift {
@@ -147,7 +147,7 @@ pub fn qmk_keycode_to_terminal_bytes(keycode: u16) -> Option<Vec<u8>> {
                 Some(vec![b'\t'])
             }
         }
-        0x2C => Some(vec![b' ']),        // Space
+        0x2C => Some(vec![b' ']), // Space
 
         // Punctuation
         0x2D => Some(shifted_or_plain(mods.shift, b'_', b'-', mods.alt)),
@@ -249,7 +249,10 @@ mod tests {
 
     #[test]
     fn arrow_up() {
-        assert_eq!(qmk_keycode_to_terminal_bytes(0x0052), Some(vec![0x1b, b'[', b'A']));
+        assert_eq!(
+            qmk_keycode_to_terminal_bytes(0x0052),
+            Some(vec![0x1b, b'[', b'A'])
+        );
     }
 
     #[test]
@@ -265,7 +268,10 @@ mod tests {
 
     #[test]
     fn shift_tab() {
-        assert_eq!(qmk_keycode_to_terminal_bytes(0x022B), Some(vec![0x1b, b'[', b'Z']));
+        assert_eq!(
+            qmk_keycode_to_terminal_bytes(0x022B),
+            Some(vec![0x1b, b'[', b'Z'])
+        );
     }
 
     #[test]

@@ -182,7 +182,11 @@ async fn spawn_tmux(host: &HostTerminal, cwd: &str, wrapper: &PathBuf) -> Result
     if socket.is_empty() {
         return run("tmux", &["new-window", "-c", cwd, &wrapper_str]).await;
     }
-    run("tmux", &["-S", socket, "new-window", "-c", cwd, &wrapper_str]).await
+    run(
+        "tmux",
+        &["-S", socket, "new-window", "-c", cwd, &wrapper_str],
+    )
+    .await
 }
 
 /// iTerm2 via AppleScript: create a new tab in the current window,

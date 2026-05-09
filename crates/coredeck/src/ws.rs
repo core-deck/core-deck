@@ -3,21 +3,24 @@
 //! Only one WebSocket client (the app) may be connected at a time.
 //! While a WS client holds the lock, HTTP mutating endpoints return 409.
 
-use coredeck_protocol::{
-    DeviceInfo, DeviceMode, SetActiveWrapperRequest, SoftKeyType, WrapperWriteRequest,
-    WsCommandTag, WsEventTag, WsResponseTag, decode_ws_frame, encode_ws_frame,
-};
 use axum::{
-    extract::{State, ws::{Message, WebSocket, WebSocketUpgrade}},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     response::IntoResponse,
+};
+use coredeck_protocol::{
+    decode_ws_frame, encode_ws_frame, DeviceInfo, DeviceMode, SetActiveWrapperRequest, SoftKeyType,
+    WrapperWriteRequest, WsCommandTag, WsEventTag, WsResponseTag,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
-use crate::DaemonState;
 use crate::state::DaemonEvent;
+use crate::DaemonState;
 
 /// Handle for the connected WS client
 pub struct WsClientHandle {
@@ -50,7 +53,9 @@ async fn handle_ws_connection(socket: WebSocket, state: Arc<DaemonState>) {
     // Set the lock
     {
         let mut guard = state.ws_client.lock().await;
-        *guard = Some(WsClientHandle { tx: client_tx.clone() });
+        *guard = Some(WsClientHandle {
+            tx: client_tx.clone(),
+        });
     }
     state.notify_lock_change.notify_waiters();
     info!("WS client connected (lock acquired)");
@@ -71,10 +76,7 @@ async fn handle_ws_connection(socket: WebSocket, state: Arc<DaemonState>) {
         if hid.is_connected() {
             let name = hid.cached_device_name().unwrap_or_default();
             let fw = hid.query_version();
-            let info = DeviceInfo {
-                name,
-                firmware: fw,
-            };
+            let info = DeviceInfo { name, firmware: fw };
             let payload = serde_json::to_vec(&info).unwrap_or_default();
             let frame = encode_ws_frame(WsEventTag::DeviceConnected as u8, 0, &payload);
             let _ = client_tx.send(frame);
@@ -139,11 +141,7 @@ async fn handle_ws_command(
     let cmd = match WsCommandTag::from_byte(tag) {
         Some(c) => c,
         None => {
-            let err = encode_ws_frame(
-                WsResponseTag::CommandError as u8,
-                seq,
-                b"unknown command",
-            );
+            let err = encode_ws_frame(WsResponseTag::CommandError as u8, seq, b"unknown command");
             let _ = reply_tx.send(err);
             return;
         }
@@ -154,11 +152,10 @@ async fn handle_ws_command(
     let result: Result<Option<Vec<u8>>, String> = match cmd {
         WsCommandTag::UpdateDisplay => {
             match serde_json::from_slice::<coredeck_protocol::DisplayUpdate>(payload) {
-                Ok(update) => {
-                    hid.send_display_update(&update)
-                        .map(|_| None)
-                        .map_err(|e| e.to_string())
-                }
+                Ok(update) => hid
+                    .send_display_update(&update)
+                    .map(|_| None)
+                    .map_err(|e| e.to_string()),
                 Err(e) => Err(format!("invalid JSON: {}", e)),
             }
         }
@@ -170,7 +167,9 @@ async fn handle_ws_command(
             if payload.len() >= 2 {
                 let level = payload[0];
                 let save = payload[1] != 0;
-                hid.set_brightness(level, save).map(|_| None).map_err(|e| e.to_string())
+                hid.set_brightness(level, save)
+                    .map(|_| None)
+                    .map_err(|e| e.to_string())
             } else {
                 Err("invalid payload".to_string())
             }
@@ -181,7 +180,9 @@ async fn handle_ws_command(
                 let key_type = SoftKeyType::from_byte(payload[1]).unwrap_or(SoftKeyType::Default);
                 let save = payload[2] != 0;
                 let data = &payload[3..];
-                hid.set_soft_key(index, key_type, data, save).map(|_| None).map_err(|e| e.to_string())
+                hid.set_soft_key(index, key_type, data, save)
+                    .map(|_| None)
+                    .map_err(|e| e.to_string())
             } else {
                 Err("invalid payload".to_string())
             }
@@ -193,7 +194,11 @@ async fn handle_ws_command(
                     Ok(config) => {
                         let mut resp = vec![config.index, config.key_type as u8];
                         resp.extend_from_slice(&config.data);
-                        Ok(Some(encode_ws_frame(WsResponseTag::SoftKeyResponse as u8, seq, &resp)))
+                        Ok(Some(encode_ws_frame(
+                            WsResponseTag::SoftKeyResponse as u8,
+                            seq,
+                            &resp,
+                        )))
                     }
                     Err(e) => Err(e.to_string()),
                 }
@@ -213,7 +218,11 @@ async fn handle_ws_command(
                         resp.push(data_len);
                         resp.extend_from_slice(&config.data);
                     }
-                    Ok(Some(encode_ws_frame(WsResponseTag::SoftKeyResponse as u8, seq, &resp)))
+                    Ok(Some(encode_ws_frame(
+                        WsResponseTag::SoftKeyResponse as u8,
+                        seq,
+                        &resp,
+                    )))
                 }
                 Err(e) => Err(e.to_string()),
             }
@@ -228,11 +237,10 @@ async fn handle_ws_command(
         }
         WsCommandTag::Alert => {
             match serde_json::from_slice::<coredeck_protocol::AlertRequest>(payload) {
-                Ok(req) => {
-                    hid.send_alert(req.tab, &req.session, &req.text, req.details.as_deref())
-                        .map(|_| None)
-                        .map_err(|e| e.to_string())
-                }
+                Ok(req) => hid
+                    .send_alert(req.tab, &req.session, &req.text, req.details.as_deref())
+                    .map(|_| None)
+                    .map_err(|e| e.to_string()),
                 Err(e) => Err(format!("invalid JSON: {}", e)),
             }
         }
@@ -247,10 +255,15 @@ async fn handle_ws_command(
         WsCommandTag::ClearAlert => {
             if !payload.is_empty() {
                 let tab = payload[0] as usize;
-                hid.clear_alert(tab).map(|_| None).map_err(|e| e.to_string())
+                hid.clear_alert(tab)
+                    .map(|_| None)
+                    .map_err(|e| e.to_string())
             } else {
                 match serde_json::from_slice::<coredeck_protocol::ClearAlertRequest>(payload) {
-                    Ok(req) => hid.clear_alert(req.tab).map(|_| None).map_err(|e| e.to_string()),
+                    Ok(req) => hid
+                        .clear_alert(req.tab)
+                        .map(|_| None)
+                        .map_err(|e| e.to_string()),
                     Err(e) => Err(format!("invalid payload: {}", e)),
                 }
             }
@@ -318,7 +331,10 @@ pub async fn forward_event_to_ws(state: &Arc<DaemonState>, event: &DaemonEvent) 
     };
 
     let frame = match event {
-        DaemonEvent::HidConnected { device_name, firmware_version } => {
+        DaemonEvent::HidConnected {
+            device_name,
+            firmware_version,
+        } => {
             let info = DeviceInfo {
                 name: device_name.clone(),
                 firmware: firmware_version.clone(),
@@ -330,7 +346,11 @@ pub async fn forward_event_to_ws(state: &Arc<DaemonState>, event: &DaemonEvent) 
             encode_ws_frame(WsEventTag::DeviceDisconnected as u8, 0, &[])
         }
         DaemonEvent::DeviceStateChanged { mode, yolo } => {
-            let state_byte = coredeck_protocol::DeviceState { mode: *mode, yolo: *yolo }.to_byte();
+            let state_byte = coredeck_protocol::DeviceState {
+                mode: *mode,
+                yolo: *yolo,
+            }
+            .to_byte();
             encode_ws_frame(WsEventTag::StateChanged as u8, 0, &[state_byte])
         }
         DaemonEvent::HidKeyEvent { keycode } => {
@@ -350,4 +370,3 @@ pub async fn forward_event_to_ws(state: &Arc<DaemonState>, event: &DaemonEvent) 
 
     let _ = client.tx.send(frame);
 }
-

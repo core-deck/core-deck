@@ -7,11 +7,11 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use coredeck_protocol::{WrapperTab, WrapperTabList, TAB_STATE_WORKING};
+use tracing::{debug, error, info};
 use tray_icon::{
     menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     TrayIcon as TrayIconHandle, TrayIconBuilder,
 };
-use tracing::{debug, error, info};
 
 use crate::state::UpdateInfo;
 
@@ -123,7 +123,8 @@ impl DaemonTrayManager {
         info!("Daemon tray icon created");
 
         let (action_tx, action_rx) = std::sync::mpsc::channel();
-        let tab_dispatch: Arc<Mutex<HashMap<MenuId, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let tab_dispatch: Arc<Mutex<HashMap<MenuId, String>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let install_hooks_id: Arc<Mutex<Option<MenuId>>> = Arc::new(Mutex::new(None));
         let update_dispatch: Arc<Mutex<HashMap<MenuId, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
@@ -258,7 +259,10 @@ impl DaemonTrayManager {
                 format!("Core Deck Daemon - {}", device_name.unwrap_or("Active"))
             }
             DevicePresence::Available => {
-                format!("Core Deck Daemon - {} (idle)", device_name.unwrap_or("Available"))
+                format!(
+                    "Core Deck Daemon - {} (idle)",
+                    device_name.unwrap_or("Available")
+                )
             }
             DevicePresence::None => "Core Deck Daemon - No device".to_string(),
         };
@@ -322,11 +326,7 @@ impl DaemonTrayManager {
     /// we just rebuild the section from scratch each time. Update rows
     /// sit between the wrapper-tab section and the "Install hooks" /
     /// Settings rows.
-    pub fn set_updates(
-        &mut self,
-        daemon: Option<UpdateInfo>,
-        firmware: Option<UpdateInfo>,
-    ) {
+    pub fn set_updates(&mut self, daemon: Option<UpdateInfo>, firmware: Option<UpdateInfo>) {
         // Tear down whatever's currently in the update slot.
         if let Some(item) = self.daemon_update_item.take() {
             let _ = self.menu.remove(&item as &dyn IsMenuItem);
@@ -376,7 +376,11 @@ impl DaemonTrayManager {
         // Layout: [about, name, firmware, sep, dynamic_tabs|placeholder, sep,
         //          ...extras..., settings, quit]
         let dynamic = if self.tab_items.is_empty() {
-            if self.empty_placeholder.is_some() { 1 } else { 0 }
+            if self.empty_placeholder.is_some() {
+                1
+            } else {
+                0
+            }
         } else {
             self.tab_items.len()
         };
@@ -401,13 +405,19 @@ impl DaemonTrayManager {
 /// task (or "working" if the session is in WORKING state with no task
 /// string), rendered by macOS 14.4+'s `NSMenuItem.subtitle`. On older
 /// macOS it's silently dropped.
-fn format_tab_menu_label(tab: &WrapperTab, active_id: Option<&str>) -> (String, Option<String>, bool) {
+fn format_tab_menu_label(
+    tab: &WrapperTab,
+    active_id: Option<&str>,
+) -> (String, Option<String>, bool) {
     let is_active = active_id == Some(tab.wrapper_id.as_str());
     let name = crate::wrapper::tab_label_long(tab);
-    let subtitle = tab
-        .current_task
-        .clone()
-        .or_else(|| if tab.tab_state == TAB_STATE_WORKING { Some("working".to_string()) } else { None });
+    let subtitle = tab.current_task.clone().or_else(|| {
+        if tab.tab_state == TAB_STATE_WORKING {
+            Some("working".to_string())
+        } else {
+            None
+        }
+    });
     (name, subtitle, is_active)
 }
 
@@ -421,12 +431,7 @@ fn format_tab_menu_label(tab: &WrapperTab, active_id: Option<&str>) -> (String, 
 /// supported, the subtitle is dropped but the state column still
 /// works. No-op on non-macOS.
 #[cfg(target_os = "macos")]
-fn decorate_tab_rows(
-    menu: &Menu,
-    offset: usize,
-    subtitles: &[Option<String>],
-    actives: &[bool],
-) {
+fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], actives: &[bool]) {
     use cocoa::base::{id, nil};
     use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
     use objc::{class, msg_send, sel, sel_impl};
@@ -572,7 +577,8 @@ fn decorate_tab_rows(
 const CONNECTED_DARK_DATA: &[u8] = include_bytes!("../assets/icons/tray_connected.png");
 const DISCONNECTED_DARK_DATA: &[u8] = include_bytes!("../assets/icons/tray_disconnected.png");
 const CONNECTED_LIGHT_DATA: &[u8] = include_bytes!("../assets/icons/tray_connected_light.png");
-const DISCONNECTED_LIGHT_DATA: &[u8] = include_bytes!("../assets/icons/tray_disconnected_light.png");
+const DISCONNECTED_LIGHT_DATA: &[u8] =
+    include_bytes!("../assets/icons/tray_disconnected_light.png");
 
 struct TrayIcons {
     connected_dark: tray_icon::Icon,
@@ -592,11 +598,19 @@ impl TrayIcons {
     }
 
     fn connected(&self) -> &tray_icon::Icon {
-        if is_dark_mode() { &self.connected_dark } else { &self.connected_light }
+        if is_dark_mode() {
+            &self.connected_dark
+        } else {
+            &self.connected_light
+        }
     }
 
     fn disconnected(&self) -> &tray_icon::Icon {
-        if is_dark_mode() { &self.disconnected_dark } else { &self.disconnected_light }
+        if is_dark_mode() {
+            &self.disconnected_dark
+        } else {
+            &self.disconnected_light
+        }
     }
 }
 

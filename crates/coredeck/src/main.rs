@@ -18,8 +18,8 @@ mod wrapper;
 mod wrapper_state;
 mod ws;
 
-use coredeck_protocol::DEFAULT_DAEMON_ADDR;
 use clap::{Parser, Subcommand};
+use coredeck_protocol::DEFAULT_DAEMON_ADDR;
 use hid::HidManager;
 use state::{ClaudeState, DaemonEvent, DaemonEventSender, DeviceStatus, TrayUpdate, Wrapper};
 use std::collections::HashMap;
@@ -265,7 +265,10 @@ fn main() {
     // a device that was already plugged in when the daemon started.
     if initially_available {
         let name = initial_device_name.unwrap_or_else(|| "Core Deck".to_string());
-        info!("Emitting initial DeviceAvailable for already-connected device: {}", name);
+        info!(
+            "Emitting initial DeviceAvailable for already-connected device: {}",
+            name
+        );
         let _ = initial_event_tx.send(DaemonEvent::DeviceAvailable { device_name: name });
     }
 
@@ -307,11 +310,7 @@ fn main() {
 fn apply_tray_update(tray: &mut tray::DaemonTrayManager, update: TrayUpdate) {
     match update {
         TrayUpdate::DeviceConnected { name, firmware } => {
-            tray.set_device_status(
-                tray::DevicePresence::Active,
-                Some(&name),
-                Some(&firmware),
-            );
+            tray.set_device_status(tray::DevicePresence::Active, Some(&name), Some(&firmware));
         }
         TrayUpdate::DeviceDisconnected => {
             // Device interface closed but may still be physically available
@@ -396,29 +395,68 @@ async fn run_async(
         .route("/api/status", axum::routing::get(rpc::get_status))
         .route("/api/display", axum::routing::post(rpc::post_display))
         .route("/api/alert", axum::routing::post(rpc::post_alert))
-        .route("/api/alert/clear", axum::routing::post(rpc::post_alert_clear))
+        .route(
+            "/api/alert/clear",
+            axum::routing::post(rpc::post_alert_clear),
+        )
         .route("/api/brightness", axum::routing::post(rpc::post_brightness))
         .route("/api/mode", axum::routing::post(rpc::post_mode))
         .route("/api/version", axum::routing::get(rpc::get_version))
-        .route("/api/hooks/status", axum::routing::get(rpc::get_hooks_status))
-        .route("/api/hooks/install", axum::routing::post(rpc::post_hooks_install))
-        .route("/api/hooks/uninstall", axum::routing::post(rpc::post_hooks_uninstall))
+        .route(
+            "/api/hooks/status",
+            axum::routing::get(rpc::get_hooks_status),
+        )
+        .route(
+            "/api/hooks/install",
+            axum::routing::post(rpc::post_hooks_install),
+        )
+        .route(
+            "/api/hooks/uninstall",
+            axum::routing::post(rpc::post_hooks_uninstall),
+        )
         .route("/api/soft-keys", axum::routing::get(rpc::get_soft_keys))
-        .route("/api/soft-keys/reset", axum::routing::post(rpc::post_soft_keys_reset))
-        .route("/api/soft-keys/presets", axum::routing::get(rpc::get_soft_key_presets))
-        .route("/api/soft-keys/presets/apply", axum::routing::post(rpc::apply_soft_key_preset))
-        .route("/api/soft-keys/presets/save", axum::routing::post(rpc::save_soft_key_preset))
-        .route("/api/soft-keys/presets/{name}", axum::routing::delete(rpc::delete_soft_key_preset))
-        .route("/api/soft-keys/{index}", axum::routing::put(rpc::put_soft_key))
+        .route(
+            "/api/soft-keys/reset",
+            axum::routing::post(rpc::post_soft_keys_reset),
+        )
+        .route(
+            "/api/soft-keys/presets",
+            axum::routing::get(rpc::get_soft_key_presets),
+        )
+        .route(
+            "/api/soft-keys/presets/apply",
+            axum::routing::post(rpc::apply_soft_key_preset),
+        )
+        .route(
+            "/api/soft-keys/presets/save",
+            axum::routing::post(rpc::save_soft_key_preset),
+        )
+        .route(
+            "/api/soft-keys/presets/{name}",
+            axum::routing::delete(rpc::delete_soft_key_preset),
+        )
+        .route(
+            "/api/soft-keys/{index}",
+            axum::routing::put(rpc::put_soft_key),
+        )
         .route("/api/wrappers", axum::routing::get(rpc::get_wrappers))
         // Static settings page (HTML embedded in the binary)
         .route("/", axum::routing::get(rpc::get_settings_page))
         .route("/settings", axum::routing::get(rpc::get_settings_page))
         // Claude Code hook endpoints (no WS lock needed — hooks come from Claude Code)
-        .route("/hooks/{event_type}", axum::routing::post(hooks::handle_hook))
+        .route(
+            "/hooks/{event_type}",
+            axum::routing::post(hooks::handle_hook),
+        )
         // coredeck-claude wrapper protocol
-        .route("/wrapper-ws", axum::routing::get(wrapper::wrapper_ws_handler))
-        .route("/wrapper/register", axum::routing::post(wrapper::wrapper_register_session))
+        .route(
+            "/wrapper-ws",
+            axum::routing::get(wrapper::wrapper_ws_handler),
+        )
+        .route(
+            "/wrapper/register",
+            axum::routing::post(wrapper::wrapper_register_session),
+        )
         .layer(
             tower_http::cors::CorsLayer::new()
                 .allow_origin(tower_http::cors::Any)
@@ -478,7 +516,10 @@ async fn run_async(
         while let Some(event) = event_rx.recv().await {
             // Update shared device status and notify tray
             match &event {
-                DaemonEvent::HidConnected { device_name, firmware_version } => {
+                DaemonEvent::HidConnected {
+                    device_name,
+                    firmware_version,
+                } => {
                     let mut status = state_for_events.device_status.write().await;
                     status.available = true;
                     status.connected = true;
@@ -516,7 +557,8 @@ async fn run_async(
                         status.available = true;
                         status.device_name = Some(device_name.clone());
                     }
-                    state_for_events.send_tray_update(TrayUpdate::DeviceAvailable(device_name.clone()));
+                    state_for_events
+                        .send_tray_update(TrayUpdate::DeviceAvailable(device_name.clone()));
                     // Open HID immediately and keep it open for the
                     // daemon's lifetime — no GUI app means there's
                     // nothing to hand it off to, and the open/close
@@ -565,9 +607,7 @@ async fn run_async(
                             // YOLO turned ON — the wrapper that's focused at
                             // this moment auto-opts in. Other wrappers will
                             // be asked on their first PermissionRequest.
-                            if let Some(wid) =
-                                wrapper::active_wrapper_id(&state_for_events).await
-                            {
+                            if let Some(wid) = wrapper::active_wrapper_id(&state_for_events).await {
                                 wrapper::mark_yolo_opt_in(&state_for_events, &wid).await;
                                 info!("YOLO ON — wrapper {} auto-opted in", wid);
                             }
@@ -579,12 +619,9 @@ async fn run_async(
                         None => {}
                     }
                     if inject_shift_tab {
-                        if let Err(e) = wrapper::write_to_target(
-                            &state_for_events,
-                            "",
-                            b"\x1b[Z".to_vec(),
-                        )
-                        .await
+                        if let Err(e) =
+                            wrapper::write_to_target(&state_for_events, "", b"\x1b[Z".to_vec())
+                                .await
                         {
                             debug!(error = %e, "mode-tap Shift+Tab injection failed");
                         }
@@ -718,7 +755,8 @@ fn run_main_event_loop(
             _event_loop: &ActiveEventLoop,
             _window_id: winit::window::WindowId,
             _event: winit::event::WindowEvent,
-        ) {}
+        ) {
+        }
 
         fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -878,7 +916,9 @@ fn install_launchd(listen: &str) {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = listen;
-        eprintln!("auto-start is only supported on macOS (launchd) and Linux (systemd) at the moment");
+        eprintln!(
+            "auto-start is only supported on macOS (launchd) and Linux (systemd) at the moment"
+        );
     }
 }
 
@@ -938,7 +978,10 @@ fn install_launchd_macos(listen: &str) {
     if status.success() {
         println!("Installed and loaded: {}", plist_path);
     } else {
-        eprintln!("launchctl load failed (exit {})", status.code().unwrap_or(-1));
+        eprintln!(
+            "launchctl load failed (exit {})",
+            status.code().unwrap_or(-1)
+        );
     }
 }
 

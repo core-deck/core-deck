@@ -55,7 +55,10 @@ impl WrapperStateStore {
     /// Last-known `permission_mode` for `wrapper_id`, or `None` when
     /// we've never persisted one.
     pub fn permission_mode(&self, wrapper_id: &str) -> Option<String> {
-        self.inner.lock().ok().and_then(|m| m.get(wrapper_id).cloned())
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|m| m.get(wrapper_id).cloned())
     }
 
     /// Update the persisted mode for `wrapper_id` and flush to disk.

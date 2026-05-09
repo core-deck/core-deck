@@ -248,7 +248,7 @@ impl AppControlAction {
         match byte {
             0x01 => Some(Self::ShowWindow),
             0x02 => Some(Self::HideWindow),
-        _ => None,
+            _ => None,
         }
     }
 }
@@ -491,17 +491,11 @@ pub enum WrapperToDaemon {
     /// Host terminal focus changed (parsed from OSC 1004 reports on the
     /// wrapper's stdin). Daemon uses focus-in to set the wrapper as
     /// active and clear any alert tied to its session.
-    FocusChanged {
-        wrapper_id: String,
-        focused: bool,
-    },
+    FocusChanged { wrapper_id: String, focused: bool },
     /// Title hint sniffed from claude's PTY output (OSC 9). The wrapper
     /// passes the bytes through to the host terminal as well — this is
     /// purely a side channel for the daemon's session-label fallback.
-    TitleHint {
-        wrapper_id: String,
-        title: String,
-    },
+    TitleHint { wrapper_id: String, title: String },
 }
 
 /// Messages sent by the daemon to a wrapper over /wrapper-ws.
@@ -649,7 +643,10 @@ mod tests {
 
     #[test]
     fn test_device_state_byte_roundtrip() {
-        let state = DeviceState { mode: DeviceMode::Plan, yolo: true };
+        let state = DeviceState {
+            mode: DeviceMode::Plan,
+            yolo: true,
+        };
         let byte = state.to_byte();
         let parsed = DeviceState::from_byte(byte);
         assert_eq!(parsed.mode, DeviceMode::Plan);
@@ -683,7 +680,12 @@ mod tests {
 
     #[test]
     fn test_soft_key_type_roundtrip() {
-        for t in [SoftKeyType::Default, SoftKeyType::Keycode, SoftKeyType::String, SoftKeyType::Sequence] {
+        for t in [
+            SoftKeyType::Default,
+            SoftKeyType::Keycode,
+            SoftKeyType::String,
+            SoftKeyType::Sequence,
+        ] {
             assert_eq!(SoftKeyType::from_byte(t as u8), Some(t));
         }
         assert_eq!(SoftKeyType::from_byte(4), None);
@@ -744,22 +746,37 @@ mod tests {
 
     #[test]
     fn test_command_tags() {
-        assert_eq!(WsCommandTag::from_byte(0x01), Some(WsCommandTag::UpdateDisplay));
-        assert_eq!(WsCommandTag::from_byte(0x0A), Some(WsCommandTag::ClearAlert));
+        assert_eq!(
+            WsCommandTag::from_byte(0x01),
+            Some(WsCommandTag::UpdateDisplay)
+        );
+        assert_eq!(
+            WsCommandTag::from_byte(0x0A),
+            Some(WsCommandTag::ClearAlert)
+        );
         assert_eq!(WsCommandTag::from_byte(0xFF), None);
     }
 
     #[test]
     fn test_event_tags() {
-        assert_eq!(WsEventTag::from_byte(0x80), Some(WsEventTag::DeviceConnected));
+        assert_eq!(
+            WsEventTag::from_byte(0x80),
+            Some(WsEventTag::DeviceConnected)
+        );
         assert_eq!(WsEventTag::from_byte(0x89), Some(WsEventTag::AppControl));
         assert_eq!(WsEventTag::from_byte(0x00), None);
     }
 
     #[test]
     fn test_response_tags() {
-        assert_eq!(WsResponseTag::from_byte(0x85), Some(WsResponseTag::SoftKeyResponse));
-        assert_eq!(WsResponseTag::from_byte(0x88), Some(WsResponseTag::CommandError));
+        assert_eq!(
+            WsResponseTag::from_byte(0x85),
+            Some(WsResponseTag::SoftKeyResponse)
+        );
+        assert_eq!(
+            WsResponseTag::from_byte(0x88),
+            Some(WsResponseTag::CommandError)
+        );
         assert_eq!(WsResponseTag::from_byte(0x00), None);
     }
 }

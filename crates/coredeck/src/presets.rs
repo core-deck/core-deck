@@ -64,7 +64,10 @@ fn key_string(text: &str, send_enter: bool) -> PresetKey {
     let mut bytes = text.as_bytes().to_vec();
     bytes.truncate(126);
     data.extend_from_slice(&bytes);
-    PresetKey { key_type: SoftKeyType::String, data }
+    PresetKey {
+        key_type: SoftKeyType::String,
+        data,
+    }
 }
 
 /// Build a Sequence preset key from a list of (already-composed)
@@ -76,7 +79,10 @@ fn key_sequence(codes: &[u16]) -> PresetKey {
         data.push((kc >> 8) as u8);
         data.push((kc & 0xFF) as u8);
     }
-    PresetKey { key_type: SoftKeyType::Sequence, data }
+    PresetKey {
+        key_type: SoftKeyType::Sequence,
+        data,
+    }
 }
 
 /// Names of presets that ship with the binary; user presets are
@@ -95,9 +101,7 @@ pub fn builtin_presets() -> Vec<Preset> {
     vec![
         Preset {
             name: "Default".into(),
-            description: Some(
-                "Esc+Esc (clear input), Ctrl+O (verbose), /model (models)".into(),
-            ),
+            description: Some("Esc+Esc (clear input), Ctrl+O (verbose), /model (models)".into()),
             keys: [
                 key_sequence(&[KC_ESC, KC_ESC]),
                 key_keycode(MOD_LCTL | KC_O),
@@ -181,7 +185,9 @@ impl UserPresetStore {
             }
         };
         match toml::from_str::<UserPresetFile>(&content) {
-            Ok(file) => Self { presets: file.presets },
+            Ok(file) => Self {
+                presets: file.presets,
+            },
             Err(e) => {
                 warn!(error = %e, path = ?path, "preset file unparseable");
                 Self::default()
@@ -195,9 +201,10 @@ impl UserPresetStore {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("create {}: {}", parent.display(), e))?;
         }
-        let file = UserPresetFile { presets: self.presets.clone() };
-        let content =
-            toml::to_string_pretty(&file).map_err(|e| format!("serialize: {}", e))?;
+        let file = UserPresetFile {
+            presets: self.presets.clone(),
+        };
+        let content = toml::to_string_pretty(&file).map_err(|e| format!("serialize: {}", e))?;
         std::fs::write(&path, content).map_err(|e| format!("write: {}", e))
     }
 

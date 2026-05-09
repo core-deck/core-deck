@@ -156,12 +156,13 @@ impl ClaudeState {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let entry = self.sessions.entry(session_id.to_string()).or_insert_with(|| {
-            SessionState {
+        let entry = self
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionState {
                 session_id: session_id.to_string(),
                 ..SessionState::default()
-            }
-        });
+            });
         entry.last_update_unix = now;
         entry
     }

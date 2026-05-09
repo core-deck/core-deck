@@ -28,8 +28,8 @@ use axum::{
 };
 use coredeck_protocol::{
     encode_ws_frame, DaemonToWrapper, DeviceMode, DisplayUpdate, WrapperRegisterSession,
-    WrapperTab, WrapperTabList, WrapperToDaemon, WsEventTag, TAB_STATE_STARTED, TAB_STATE_WORKING,
-    TAB_STATE_INACTIVE,
+    WrapperTab, WrapperTabList, WrapperToDaemon, WsEventTag, TAB_STATE_INACTIVE, TAB_STATE_STARTED,
+    TAB_STATE_WORKING,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -69,31 +69,32 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         }
     };
 
-    let (wrapper_id, pid, cwd, started_at_unix, host_terminal, cached_session_id, is_remote) = match register {
-        WrapperToDaemon::Register {
-            wrapper_id,
-            pid,
-            cwd,
-            started_at_unix,
-            host_terminal,
-            session_id: cached_session_id,
-            is_remote,
-        } => (
-            wrapper_id,
-            pid,
-            cwd,
-            started_at_unix,
-            host_terminal,
-            cached_session_id,
-            is_remote,
-        ),
-        WrapperToDaemon::Goodbye { .. }
-        | WrapperToDaemon::FocusChanged { .. }
-        | WrapperToDaemon::TitleHint { .. } => {
-            debug!("wrapper sent non-Register frame first; ignoring");
-            return;
-        }
-    };
+    let (wrapper_id, pid, cwd, started_at_unix, host_terminal, cached_session_id, is_remote) =
+        match register {
+            WrapperToDaemon::Register {
+                wrapper_id,
+                pid,
+                cwd,
+                started_at_unix,
+                host_terminal,
+                session_id: cached_session_id,
+                is_remote,
+            } => (
+                wrapper_id,
+                pid,
+                cwd,
+                started_at_unix,
+                host_terminal,
+                cached_session_id,
+                is_remote,
+            ),
+            WrapperToDaemon::Goodbye { .. }
+            | WrapperToDaemon::FocusChanged { .. }
+            | WrapperToDaemon::TitleHint { .. } => {
+                debug!("wrapper sent non-Register frame first; ignoring");
+                return;
+            }
+        };
 
     info!(
         wrapper_id = %wrapper_id,
@@ -117,9 +118,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
     //      prompt to trigger any hook.
     let adopted_from_cache = {
         let mut wrappers = state.wrappers.write().await;
-        let preserved_session_id = wrappers
-            .get(&wrapper_id)
-            .and_then(|w| w.session_id.clone());
+        let preserved_session_id = wrappers.get(&wrapper_id).and_then(|w| w.session_id.clone());
         let preserved_terminal_title = wrappers
             .get(&wrapper_id)
             .and_then(|w| w.terminal_title.clone());
@@ -647,12 +646,10 @@ pub async fn run_frontmost_app_watcher(state: Arc<DaemonState>) {
         // attached — there's nothing this watcher could promote.
         let any_jetbrains = {
             let wrappers = state.wrappers.read().await;
-            wrappers
-                .values()
-                .any(|w| match &w.host_terminal {
-                    Some(h) => matches!(h.kind, HostTerminalKind::JetBrains),
-                    None => false,
-                })
+            wrappers.values().any(|w| match &w.host_terminal {
+                Some(h) => matches!(h.kind, HostTerminalKind::JetBrains),
+                None => false,
+            })
         };
         if !any_jetbrains {
             last_bundle = None;
@@ -716,7 +713,11 @@ unsafe fn frontmost_bundle_id() -> Option<String> {
     if utf8.is_null() {
         return None;
     }
-    Some(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned())
+    Some(
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
@@ -1067,17 +1068,16 @@ pub async fn cycle_active(state: &Arc<DaemonState>, step: i32) {
         let wrappers = state.wrappers.read().await;
         active_sid.and_then(|sid| {
             candidates.iter().position(|wid| {
-                wrappers
-                    .get(wid)
-                    .and_then(|w| w.session_id.as_deref())
-                    == Some(sid.as_str())
+                wrappers.get(wid).and_then(|w| w.session_id.as_deref()) == Some(sid.as_str())
             })
         })
     };
 
     let len = candidates.len() as i32;
     // No active session yet → start at 0 for next, end for prev.
-    let base = current_idx.map(|i| i as i32).unwrap_or(if step > 0 { -1 } else { 0 });
+    let base = current_idx
+        .map(|i| i as i32)
+        .unwrap_or(if step > 0 { -1 } else { 0 });
     let next_idx = ((base + step).rem_euclid(len)) as usize;
     let target = &candidates[next_idx];
 
@@ -1119,7 +1119,10 @@ pub async fn set_active_wrapper(state: &Arc<DaemonState>, wrapper_id: &str) -> R
 #[allow(dead_code)]
 pub async fn write_to_session(state: &Arc<DaemonState>, session_id: &str, bytes: Vec<u8>) -> bool {
     let wrappers = state.wrappers.read().await;
-    let Some(w) = wrappers.values().find(|w| w.session_id.as_deref() == Some(session_id)) else {
+    let Some(w) = wrappers
+        .values()
+        .find(|w| w.session_id.as_deref() == Some(session_id))
+    else {
         return false;
     };
     w.tx.send(DaemonToWrapper::Write { bytes }).is_ok()

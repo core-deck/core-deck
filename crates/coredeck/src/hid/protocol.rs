@@ -7,9 +7,9 @@
 
 // Re-export shared types from the protocol crate so existing code
 // can continue to use `crate::hid::protocol::DeviceMode` etc.
-pub use coredeck_protocol::{DeviceMode, DeviceState, SoftKeyConfig, SoftKeyType};
 #[cfg(test)]
 pub use coredeck_protocol::DisplayUpdate;
+pub use coredeck_protocol::{DeviceMode, DeviceState, SoftKeyConfig, SoftKeyType};
 
 /// HID packet size in bytes
 pub const PACKET_SIZE: usize = 32;
@@ -37,8 +37,8 @@ impl ProtocolMode {
     /// Maximum payload bytes per chunk in this mode
     pub fn max_payload_size(self) -> usize {
         match self {
-            ProtocolMode::Standalone => MAX_PAYLOAD_SIZE,      // 30
-            ProtocolMode::Vial => MAX_PAYLOAD_SIZE - 1,        // 29
+            ProtocolMode::Standalone => MAX_PAYLOAD_SIZE, // 30
+            ProtocolMode::Vial => MAX_PAYLOAD_SIZE - 1,   // 29
         }
     }
 
@@ -207,7 +207,11 @@ impl HidPacket {
 /// Splits payload into chunks with correct START/END flags.
 /// Chunk size depends on protocol mode: 30 bytes (standalone) or 29 bytes (VIAL).
 /// Single-packet messages get flags START|END (0xC0).
-pub fn build_chunked_packets(command: HidCommand, payload: &[u8], mode: ProtocolMode) -> Vec<HidPacket> {
+pub fn build_chunked_packets(
+    command: HidCommand,
+    payload: &[u8],
+    mode: ProtocolMode,
+) -> Vec<HidPacket> {
     let chunk_size = mode.max_payload_size();
 
     if payload.is_empty() {
@@ -335,7 +339,8 @@ mod tests {
     #[test]
     fn test_build_chunked_small_payload() {
         let payload = b"small";
-        let packets = build_chunked_packets(HidCommand::UpdateDisplay, payload, ProtocolMode::Standalone);
+        let packets =
+            build_chunked_packets(HidCommand::UpdateDisplay, payload, ProtocolMode::Standalone);
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].flags(), FLAG_START | FLAG_END);
         assert_eq!(&packets[0].payload()[..5], b"small");
@@ -344,7 +349,11 @@ mod tests {
     #[test]
     fn test_build_chunked_multi_packet() {
         let payload = vec![0xAA; 70];
-        let packets = build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Standalone);
+        let packets = build_chunked_packets(
+            HidCommand::UpdateDisplay,
+            &payload,
+            ProtocolMode::Standalone,
+        );
         assert_eq!(packets.len(), 3);
         assert!(packets[0].is_start());
         assert!(!packets[0].is_end());
@@ -360,12 +369,20 @@ mod tests {
     #[test]
     fn test_build_chunked_exact_boundary() {
         let payload = vec![0xBB; 30];
-        let packets = build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Standalone);
+        let packets = build_chunked_packets(
+            HidCommand::UpdateDisplay,
+            &payload,
+            ProtocolMode::Standalone,
+        );
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].flags(), FLAG_START | FLAG_END);
 
         let payload = vec![0xBB; 60];
-        let packets = build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Standalone);
+        let packets = build_chunked_packets(
+            HidCommand::UpdateDisplay,
+            &payload,
+            ProtocolMode::Standalone,
+        );
         assert_eq!(packets.len(), 2);
     }
 
@@ -385,20 +402,24 @@ mod tests {
     #[test]
     fn test_build_chunked_vial_mode() {
         let payload = vec![0xAA; 29];
-        let packets = build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Vial);
+        let packets =
+            build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Vial);
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].flags(), FLAG_START | FLAG_END);
 
         let payload = vec![0xAA; 30];
-        let packets = build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Vial);
+        let packets =
+            build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Vial);
         assert_eq!(packets.len(), 2);
 
         let payload = vec![0xAA; 58];
-        let packets = build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Vial);
+        let packets =
+            build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Vial);
         assert_eq!(packets.len(), 2);
 
         let payload = vec![0xAA; 59];
-        let packets = build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Vial);
+        let packets =
+            build_chunked_packets(HidCommand::UpdateDisplay, &payload, ProtocolMode::Vial);
         assert_eq!(packets.len(), 3);
     }
 
@@ -475,7 +496,10 @@ mod tests {
     fn test_proto_error() {
         assert_eq!(ProtoError::from_byte(0x01), Some(ProtoError::Overflow));
         assert_eq!(ProtoError::from_byte(0x02), Some(ProtoError::BadSequence));
-        assert_eq!(ProtoError::from_byte(0x03), Some(ProtoError::UnknownCommand));
+        assert_eq!(
+            ProtoError::from_byte(0x03),
+            Some(ProtoError::UnknownCommand)
+        );
         assert_eq!(ProtoError::from_byte(0x99), None);
     }
 

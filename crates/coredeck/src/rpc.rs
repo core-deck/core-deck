@@ -8,22 +8,22 @@
 //! retired together with the GUI app, since the wrapper-driven flow has no
 //! moments where another consumer needs the device.)
 
-use coredeck_protocol::{
-    AlertRequest, ApiError, BrightnessRequest, ClearAlertRequest, DaemonStatus,
-    DisplayUpdateRequest, SetModeRequest, SoftKeyConfig, SoftKeyType,
-};
 use axum::{
     extract::{Path, State},
     http::{header, StatusCode},
     response::IntoResponse,
     Json,
 };
+use coredeck_protocol::{
+    AlertRequest, ApiError, BrightnessRequest, ClearAlertRequest, DaemonStatus,
+    DisplayUpdateRequest, SetModeRequest, SoftKeyConfig, SoftKeyType,
+};
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::DaemonState;
 use crate::hid::HidManager;
 use crate::hooks;
+use crate::DaemonState;
 
 /// Make sure the HID handle is open before a handler uses it. The daemon
 /// normally opens the device on `DeviceAvailable` and keeps it open, but
@@ -62,7 +62,13 @@ pub async fn post_display(
     Json(req): Json<DisplayUpdateRequest>,
 ) -> impl IntoResponse {
     if state.ws_client.lock().await.is_some() {
-        return (StatusCode::CONFLICT, Json(ApiError { error: "device locked by WebSocket client".into() })).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
     }
 
     let hid = state.hid.lock().await;
@@ -86,7 +92,13 @@ pub async fn post_display(
 
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -96,7 +108,13 @@ pub async fn post_alert(
     Json(req): Json<AlertRequest>,
 ) -> impl IntoResponse {
     if state.ws_client.lock().await.is_some() {
-        return (StatusCode::CONFLICT, Json(ApiError { error: "device locked by WebSocket client".into() })).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
     }
 
     let hid = state.hid.lock().await;
@@ -110,7 +128,13 @@ pub async fn post_alert(
 
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -120,7 +144,13 @@ pub async fn post_alert_clear(
     Json(req): Json<ClearAlertRequest>,
 ) -> impl IntoResponse {
     if state.ws_client.lock().await.is_some() {
-        return (StatusCode::CONFLICT, Json(ApiError { error: "device locked by WebSocket client".into() })).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
     }
 
     let hid = state.hid.lock().await;
@@ -134,7 +164,13 @@ pub async fn post_alert_clear(
 
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -144,7 +180,13 @@ pub async fn post_brightness(
     Json(req): Json<BrightnessRequest>,
 ) -> impl IntoResponse {
     if state.ws_client.lock().await.is_some() {
-        return (StatusCode::CONFLICT, Json(ApiError { error: "device locked by WebSocket client".into() })).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
     }
 
     let hid = state.hid.lock().await;
@@ -158,7 +200,13 @@ pub async fn post_brightness(
 
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -168,7 +216,13 @@ pub async fn post_mode(
     Json(req): Json<SetModeRequest>,
 ) -> impl IntoResponse {
     if state.ws_client.lock().await.is_some() {
-        return (StatusCode::CONFLICT, Json(ApiError { error: "device locked by WebSocket client".into() })).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
     }
 
     let hid = state.hid.lock().await;
@@ -182,14 +236,26 @@ pub async fn post_mode(
 
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
 /// GET /api/version
 pub async fn get_version(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     if state.ws_client.lock().await.is_some() {
-        return (StatusCode::CONFLICT, Json(ApiError { error: "device locked by WebSocket client".into() })).into_response();
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
     }
 
     let hid = state.hid.lock().await;
@@ -210,9 +276,7 @@ pub async fn get_hooks_status() -> impl IntoResponse {
 }
 
 /// POST /api/hooks/install — install CoreDeck hooks into ~/.claude/settings.json
-pub async fn post_hooks_install(
-    State(state): State<Arc<DaemonState>>,
-) -> impl IntoResponse {
+pub async fn post_hooks_install(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     // Use the daemon's listen address from state
     let listen_addr = &state.listen_addr;
     let result = hooks::install_hooks_result(listen_addr);
@@ -221,21 +285,27 @@ pub async fn post_hooks_install(
     ));
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError { error: e }),
+        )
+            .into_response(),
     }
 }
 
 /// POST /api/hooks/uninstall — remove CoreDeck hooks from ~/.claude/settings.json
-pub async fn post_hooks_uninstall(
-    State(state): State<Arc<DaemonState>>,
-) -> impl IntoResponse {
+pub async fn post_hooks_uninstall(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     let result = hooks::uninstall_hooks_result();
     state.send_tray_update(crate::state::TrayUpdate::HooksInstalled(
         hooks::are_hooks_installed(),
     ));
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError { error: e }),
+        )
+            .into_response(),
     }
 }
 
@@ -258,7 +328,9 @@ pub async fn get_soft_keys(State(state): State<Arc<DaemonState>>) -> impl IntoRe
     if state.ws_client.lock().await.is_some() {
         return (
             StatusCode::CONFLICT,
-            Json(ApiError { error: "device locked by WebSocket client".into() }),
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
         )
             .into_response();
     }
@@ -283,7 +355,11 @@ pub async fn get_soft_keys(State(state): State<Arc<DaemonState>>) -> impl IntoRe
     drop(hid);
 
     if let Some(e) = err {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError { error: e }),
+        )
+            .into_response();
     }
     Json(configs).into_response()
 }
@@ -297,14 +373,18 @@ pub async fn put_soft_key(
     if index > 2 {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiError { error: format!("invalid soft-key index {index}; must be 0..=2") }),
+            Json(ApiError {
+                error: format!("invalid soft-key index {index}; must be 0..=2"),
+            }),
         )
             .into_response();
     }
     if state.ws_client.lock().await.is_some() {
         return (
             StatusCode::CONFLICT,
-            Json(ApiError { error: "device locked by WebSocket client".into() }),
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
         )
             .into_response();
     }
@@ -320,20 +400,26 @@ pub async fn put_soft_key(
 
     match result {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
 /// POST /api/soft-keys/reset — reset all 3 soft keys to firmware defaults.
 /// Returns the post-reset configs so the client can refresh its UI without
 /// a follow-up GET.
-pub async fn post_soft_keys_reset(
-    State(state): State<Arc<DaemonState>>,
-) -> impl IntoResponse {
+pub async fn post_soft_keys_reset(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     if state.ws_client.lock().await.is_some() {
         return (
             StatusCode::CONFLICT,
-            Json(ApiError { error: "device locked by WebSocket client".into() }),
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
         )
             .into_response();
     }
@@ -349,7 +435,13 @@ pub async fn post_soft_keys_reset(
 
     match result {
         Ok(configs) => Json(configs.to_vec()).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e.to_string() })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
@@ -389,7 +481,9 @@ pub async fn apply_soft_key_preset(
     let Some(preset) = preset else {
         return (
             StatusCode::NOT_FOUND,
-            Json(ApiError { error: format!("preset {:?} not found", req.name) }),
+            Json(ApiError {
+                error: format!("preset {:?} not found", req.name),
+            }),
         )
             .into_response();
     };
@@ -397,7 +491,9 @@ pub async fn apply_soft_key_preset(
     if state.ws_client.lock().await.is_some() {
         return (
             StatusCode::CONFLICT,
-            Json(ApiError { error: "device locked by WebSocket client".into() }),
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
         )
             .into_response();
     }
@@ -425,7 +521,11 @@ pub async fn apply_soft_key_preset(
 
     match err {
         None => StatusCode::OK.into_response(),
-        Some(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })).into_response(),
+        Some(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError { error: e }),
+        )
+            .into_response(),
     }
 }
 
@@ -440,21 +540,23 @@ pub struct SavePresetRequest {
 }
 
 /// POST /api/soft-keys/presets/save — persist a user preset.
-pub async fn save_soft_key_preset(
-    Json(req): Json<SavePresetRequest>,
-) -> impl IntoResponse {
+pub async fn save_soft_key_preset(Json(req): Json<SavePresetRequest>) -> impl IntoResponse {
     let trimmed = req.name.trim().to_string();
     if trimmed.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiError { error: "preset name is required".into() }),
+            Json(ApiError {
+                error: "preset name is required".into(),
+            }),
         )
             .into_response();
     }
     if crate::presets::is_builtin_name(&trimmed) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiError { error: format!("'{}' collides with a built-in preset name", trimmed) }),
+            Json(ApiError {
+                error: format!("'{}' collides with a built-in preset name", trimmed),
+            }),
         )
             .into_response();
     }
@@ -467,7 +569,11 @@ pub async fn save_soft_key_preset(
     });
     match store.save() {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError { error: e }),
+        )
+            .into_response(),
     }
 }
 
@@ -477,7 +583,9 @@ pub async fn delete_soft_key_preset(Path(name): Path<String>) -> impl IntoRespon
     if crate::presets::is_builtin_name(&name) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiError { error: "built-in presets cannot be deleted".into() }),
+            Json(ApiError {
+                error: "built-in presets cannot be deleted".into(),
+            }),
         )
             .into_response();
     }
@@ -485,13 +593,19 @@ pub async fn delete_soft_key_preset(Path(name): Path<String>) -> impl IntoRespon
     if !store.remove(&name) {
         return (
             StatusCode::NOT_FOUND,
-            Json(ApiError { error: format!("preset {:?} not found", name) }),
+            Json(ApiError {
+                error: format!("preset {:?} not found", name),
+            }),
         )
             .into_response();
     }
     match store.save() {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error: e })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError { error: e }),
+        )
+            .into_response(),
     }
 }
 

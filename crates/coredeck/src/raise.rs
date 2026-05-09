@@ -66,9 +66,9 @@ async fn raise_for_host(host: &HostTerminal) {
         "raising host terminal",
     );
     let result = match host.kind {
-        HostTerminalKind::Ghostty
-        | HostTerminalKind::AppleTerminal
-        | HostTerminalKind::Unknown => activate_outer(host).await,
+        HostTerminalKind::Ghostty | HostTerminalKind::AppleTerminal | HostTerminalKind::Unknown => {
+            activate_outer(host).await
+        }
         HostTerminalKind::WezTerm => raise_wezterm(host).await,
         HostTerminalKind::ITerm2 => raise_iterm2(host).await,
         HostTerminalKind::Kitty => raise_kitty(host).await,

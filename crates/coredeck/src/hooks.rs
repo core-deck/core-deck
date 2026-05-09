@@ -12,14 +12,14 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use coredeck_protocol::{WsEventTag, encode_ws_frame};
+use coredeck_protocol::{encode_ws_frame, WsEventTag};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, info};
 
-use crate::DaemonState;
 use crate::alerts::{self, DecisionOutcome};
 use crate::state::SubagentRow;
+use crate::DaemonState;
 
 /// Common fields present in all Claude Code hook events.
 /// Claude Code sends snake_case field names which match Rust naming directly.
@@ -196,7 +196,10 @@ pub async fn handle_hook(
     // Log every hook payload at info level for observability
     if event_type == "statusline" {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
-            info!("HOOK statusline: {}", serde_json::to_string(&v).unwrap_or_default());
+            info!(
+                "HOOK statusline: {}",
+                serde_json::to_string(&v).unwrap_or_default()
+            );
         }
         let resp = handle_statusline(&state, &body).await;
         crate::wrapper::emit_tab_list(&state).await;
@@ -231,10 +234,7 @@ pub async fn handle_hook(
 }
 
 /// Handle statusline data (context window, cost, model info).
-async fn handle_statusline(
-    state: &DaemonState,
-    body: &[u8],
-) -> axum::response::Response {
+async fn handle_statusline(state: &DaemonState, body: &[u8]) -> axum::response::Response {
     let data: StatuslineData = match serde_json::from_slice(body) {
         Ok(d) => d,
         Err(e) => {
@@ -291,10 +291,7 @@ async fn handle_statusline(
 /// payload is always the complete visible list). Returns 200 with an
 /// EMPTY body — the script's stdout is interpreted by Claude Code as
 /// JSON-line row overrides, and we want the default rendering.
-async fn handle_subagent_statusline(
-    state: &DaemonState,
-    body: &[u8],
-) -> axum::response::Response {
+async fn handle_subagent_statusline(state: &DaemonState, body: &[u8]) -> axum::response::Response {
     let data: SubagentStatuslineData = match serde_json::from_slice(body) {
         Ok(d) => d,
         Err(e) => {
@@ -387,9 +384,7 @@ async fn handle_claude_hook(
         // differs from what we had — saves disk writes on the common
         // "every hook re-asserts the same mode" case.
         let persist = match (&prev, &event.permission_mode) {
-            (a, Some(b)) if a.as_deref() != Some(b.as_str()) => {
-                Some((sid.clone(), b.clone()))
-            }
+            (a, Some(b)) if a.as_deref() != Some(b.as_str()) => Some((sid.clone(), b.clone())),
             _ => None,
         };
         (changed, persist)
@@ -412,7 +407,9 @@ async fn handle_claude_hook(
             // slow part of this path and we don't need to hold the
             // wrapper map across it.
             drop(wrappers);
-            state.wrapper_state.set_permission_mode(&wrapper_id, &new_mode);
+            state
+                .wrapper_state
+                .set_permission_mode(&wrapper_id, &new_mode);
         }
     }
     if mode_changed_for_active {
@@ -449,12 +446,8 @@ async fn handle_claude_hook(
             // terminal prompt. Match by tool_name so only the same-tool
             // signal cancels.
             "PreToolUse" | "PostToolUse" => {
-                crate::alerts::cancel_pending_for_tool(
-                    state,
-                    sid,
-                    event.tool_name.as_deref(),
-                )
-                .await;
+                crate::alerts::cancel_pending_for_tool(state, sid, event.tool_name.as_deref())
+                    .await;
             }
             // Coarse session-progress: Stop, SessionStart/End,
             // PreCompact, etc. — clear any pending alert and drain
@@ -615,7 +608,9 @@ fn glyph_prefix(tool: &str) -> Option<&'static str> {
 /// Extract a short task description from tool_name + tool_input for HID display.
 fn extract_task_text(tool_name: Option<&str>, tool_input: Option<&serde_json::Value>) -> String {
     let name = tool_name.unwrap_or("Working");
-    let detail = tool_input.and_then(|v| pick_detail(name, v)).unwrap_or_default();
+    let detail = tool_input
+        .and_then(|v| pick_detail(name, v))
+        .unwrap_or_default();
     if let Some(prefix) = glyph_prefix(name) {
         if detail.is_empty() {
             return prefix.trim_end().to_string();
@@ -798,16 +793,16 @@ fn pick_detail(tool: &str, input: &serde_json::Value) -> Option<String> {
 /// fields so right-anchored truncation kicks in for them.
 fn generic_pick(v: &serde_json::Value) -> Option<String> {
     const FIELDS: &[&str] = &[
-        "file_path",      // Edit, Write, Read, NotebookEdit (when path is the right key)
-        "notebook_path",  // NotebookEdit
-        "url",            // WebFetch
-        "pattern",        // Glob
-        "query",          // WebSearch
-        "skill",          // Skill
-        "subagent_type",  // Agent / Task
-        "subject",        // TaskCreate / TaskUpdate
-        "description",    // generic last-resort summary
-        "command",        // Bash already special-cased; harmless fallback
+        "file_path",     // Edit, Write, Read, NotebookEdit (when path is the right key)
+        "notebook_path", // NotebookEdit
+        "url",           // WebFetch
+        "pattern",       // Glob
+        "query",         // WebSearch
+        "skill",         // Skill
+        "subagent_type", // Agent / Task
+        "subject",       // TaskCreate / TaskUpdate
+        "description",   // generic last-resort summary
+        "command",       // Bash already special-cased; harmless fallback
     ];
     FIELDS
         .iter()
@@ -892,10 +887,7 @@ fn extract_first_question(input: Option<&serde_json::Value>) -> Option<String> {
 /// we extract the in-progress todo (if any) and keep the previous
 /// tool's summary intact — TodoWrite is a meta-tool that doesn't
 /// itself represent productive work.
-async fn handle_pre_tool_use(
-    state: &DaemonState,
-    event: &HookEvent,
-) -> axum::response::Response {
+async fn handle_pre_tool_use(state: &DaemonState, event: &HookEvent) -> axum::response::Response {
     let is_todo_write = event.tool_name.as_deref() == Some("TodoWrite");
 
     if is_todo_write {
@@ -957,7 +949,11 @@ async fn handle_pre_tool_use(
         }
     }
 
-    debug!("PreToolUse: {} ({})", event.tool_name.as_deref().unwrap_or("?"), summary);
+    debug!(
+        "PreToolUse: {} ({})",
+        event.tool_name.as_deref().unwrap_or("?"),
+        summary
+    );
 
     if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
@@ -1127,9 +1123,15 @@ async fn handle_permission_request(
             "Auto-approve on but wrapper not enrolled — surfacing enrollment alert"
         );
     } else if yolo && !connected {
-        info!("YOLO armed but device disconnected — NOT auto-approving {}", tool);
+        info!(
+            "YOLO armed but device disconnected — NOT auto-approving {}",
+            tool
+        );
     } else if yolo {
-        info!("YOLO: NOT auto-approving {} — requires explicit approval", tool);
+        info!(
+            "YOLO: NOT auto-approving {} — requires explicit approval",
+            tool
+        );
     }
 
     let session_id = match event.session_id.clone() {
@@ -1142,10 +1144,13 @@ async fn handle_permission_request(
     // available).
     {
         let mut claude = state.claude_state.write().await;
-        claude.pending_permissions.insert(session_id.clone(), crate::state::PendingPermission {
-            tool_name: event.tool_name.clone(),
-            tool_input: event.tool_input.clone(),
-        });
+        claude.pending_permissions.insert(
+            session_id.clone(),
+            crate::state::PendingPermission {
+                tool_name: event.tool_name.clone(),
+                tool_input: event.tool_input.clone(),
+            },
+        );
     }
 
     let session_label = compute_session_label(state, &session_id).await;
@@ -1332,9 +1337,10 @@ async fn handle_notification(state: &DaemonState, event: &HookEvent) {
             // Look up stored PermissionRequest details for this session.
             let details = if let Some(ref sid) = event.session_id {
                 let claude = state.claude_state.read().await;
-                claude.pending_permissions.get(sid).map(|p| {
-                    extract_task_text(p.tool_name.as_deref(), p.tool_input.as_ref())
-                })
+                claude
+                    .pending_permissions
+                    .get(sid)
+                    .map(|p| extract_task_text(p.tool_name.as_deref(), p.tool_input.as_ref()))
             } else {
                 None
             };
@@ -1470,9 +1476,11 @@ async fn handle_pre_compact(state: &DaemonState, event: &HookEvent) {
 /// created up front and only one runs at a time. The actual switch
 /// to in-progress is signaled by `PreToolUse(TaskUpdate, in_progress)`.
 async fn handle_task_created(state: &DaemonState, event: &HookEvent) {
-    let (Some(sid), Some(id), Some(subject)) =
-        (event.session_id.as_ref(), event.task_id.as_ref(), event.task_subject.as_ref())
-    else {
+    let (Some(sid), Some(id), Some(subject)) = (
+        event.session_id.as_ref(),
+        event.task_id.as_ref(),
+        event.task_subject.as_ref(),
+    ) else {
         return;
     };
     let label = event
@@ -1567,7 +1575,12 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
         serde_json::json!({})
     };
 
-    apply_hook_entries(&mut settings, &register_path_str, &hook_shim_path_str, &base_url);
+    apply_hook_entries(
+        &mut settings,
+        &register_path_str,
+        &hook_shim_path_str,
+        &base_url,
+    );
 
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent)
@@ -1624,8 +1637,8 @@ pub fn install_hooks_remote_result(host: &str, daemon_addr: &str) -> Result<(), 
         ),
     )
     .unwrap_or_else(|_| "{}".to_string());
-    let mut settings: serde_json::Value = serde_json::from_str(raw.trim())
-        .unwrap_or_else(|_| serde_json::json!({}));
+    let mut settings: serde_json::Value =
+        serde_json::from_str(raw.trim()).unwrap_or_else(|_| serde_json::json!({}));
 
     let base_url = format!("http://{}", daemon_addr);
     apply_hook_entries(&mut settings, &register_path, &shim_path, &base_url);
@@ -1924,7 +1937,11 @@ fn merge_managed_hook(
 /// pre-existing single-valued setting (statusLine, subagentStatusLine)
 /// with content that doesn't match what we'd recognise as ours. Empty
 /// or already-ours values are silent.
-fn warn_if_clobbering(key: &str, existing: Option<&serde_json::Value>, replacement: &serde_json::Value) {
+fn warn_if_clobbering(
+    key: &str,
+    existing: Option<&serde_json::Value>,
+    replacement: &serde_json::Value,
+) {
     let Some(existing) = existing else { return };
     if existing.is_null() {
         return;
@@ -1949,7 +1966,10 @@ fn warn_if_clobbering(key: &str, existing: Option<&serde_json::Value>, replaceme
 /// Uninstall hooks, returning Ok or an error message. Single source of truth.
 pub fn uninstall_hooks_result() -> Result<(), String> {
     // Always try to remove our scripts — safe even if hooks were never installed.
-    for path in [coredeck_register_script_path(), coredeck_hook_shim_script_path()] {
+    for path in [
+        coredeck_register_script_path(),
+        coredeck_hook_shim_script_path(),
+    ] {
         if path.exists() {
             let _ = std::fs::remove_file(&path);
         }
@@ -2006,7 +2026,10 @@ pub fn uninstall_hooks_result() -> Result<(), String> {
     if let Some(sl) = settings.get("subagentStatusLine") {
         let s = sl.to_string();
         if s.contains("127.0.0.1:19384") || s.contains("localhost:19384") {
-            settings.as_object_mut().unwrap().remove("subagentStatusLine");
+            settings
+                .as_object_mut()
+                .unwrap()
+                .remove("subagentStatusLine");
             changed = true;
         }
     }

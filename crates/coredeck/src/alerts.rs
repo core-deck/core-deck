@@ -24,9 +24,9 @@
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
-use crate::DaemonState;
 use crate::keymap::{KEYCODE_F20, KEYCODE_KNOB_NEXT, KEYCODE_KNOB_PREV};
 use crate::state::DaemonEvent;
+use crate::DaemonState;
 
 /// Outcome of an interactive permission decision from the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,7 +374,8 @@ pub async fn try_install_next_pending(state: &DaemonState) {
             if !hid.is_connected() {
                 debug!("queued permission alert dropped: device not connected");
                 false
-            } else if let Err(e) = hid.send_alert(tab_index, &q.label, &q.text, q.details.as_deref())
+            } else if let Err(e) =
+                hid.send_alert(tab_index, &q.label, &q.text, q.details.as_deref())
             {
                 warn!(error = %e, "send_alert failed for queued permission prompt");
                 false
@@ -556,11 +557,7 @@ pub async fn cancel_pending_for_session(state: &DaemonState, session_id: &str) {
 /// `tool` of `None` is treated as "no information" — never cancels.
 /// Callers that genuinely want session-wide cancel should use
 /// `cancel_pending_for_session` instead.
-pub async fn cancel_pending_for_tool(
-    state: &DaemonState,
-    session_id: &str,
-    tool: Option<&str>,
-) {
+pub async fn cancel_pending_for_tool(state: &DaemonState, session_id: &str, tool: Option<&str>) {
     let Some(tool) = tool else {
         return;
     };
@@ -633,10 +630,7 @@ async fn cancel_pending_inner(
 /// - Pending alert + anything else → leave the alert up, return
 ///   `Passthrough`. The user must answer with one of the explicit
 ///   decision keys.
-pub async fn consume_input_for_decision(
-    state: &DaemonState,
-    event: &DaemonEvent,
-) -> AlertOutcome {
+pub async fn consume_input_for_decision(state: &DaemonState, event: &DaemonEvent) -> AlertOutcome {
     let kind = classify_input(event);
     if matches!(kind, InputKind::None) {
         return AlertOutcome::Passthrough;
@@ -858,10 +852,7 @@ fn classify_input(event: &DaemonEvent) -> InputKind {
 /// - Otherwise no-op.
 ///
 /// Called from `wrapper::emit_tab_list` on every tab list change.
-pub async fn refresh_for_tabs(
-    state: &DaemonState,
-    snapshot: &coredeck_protocol::WrapperTabList,
-) {
+pub async fn refresh_for_tabs(state: &DaemonState, snapshot: &coredeck_protocol::WrapperTabList) {
     // Drop any queued Pending alerts whose session no longer has a
     // wrapper backing it — their oneshots wake the parked hook
     // handlers with `Err`, causing them to fall back to Claude's
@@ -877,7 +868,10 @@ pub async fn refresh_for_tabs(
         });
         let dropped = before - queue.len();
         if dropped > 0 {
-            debug!(dropped, "queued permission alerts dropped — wrapper(s) gone");
+            debug!(
+                dropped,
+                "queued permission alerts dropped — wrapper(s) gone"
+            );
         }
     }
 
@@ -921,11 +915,22 @@ pub async fn refresh_for_tabs(
             // Tab list reordered — re-render at the new index.
             // We need a copy of the rendering content; mutate in place.
             let (label, text, details) = match &mut *guard {
-                AlertState::Idle { tab_index, label, text, .. } => {
+                AlertState::Idle {
+                    tab_index,
+                    label,
+                    text,
+                    ..
+                } => {
                     *tab_index = new_idx;
                     (label.clone(), text.clone(), None)
                 }
-                AlertState::Pending { tab_index, label, text, details, .. } => {
+                AlertState::Pending {
+                    tab_index,
+                    label,
+                    text,
+                    details,
+                    ..
+                } => {
                     *tab_index = new_idx;
                     (label.clone(), text.clone(), details.clone())
                 }
