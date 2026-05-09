@@ -757,14 +757,14 @@ impl HidManager {
             },
         ];
 
-        for i in 0..3usize {
+        for (i, config) in configs.iter_mut().enumerate().take(3) {
             let offset = i * 3;
             if offset + 2 < response.data.len() {
                 let key_type =
                     SoftKeyType::from_byte(response.data[offset]).unwrap_or(SoftKeyType::Default);
                 let kc_hi = response.data[offset + 1];
                 let kc_lo = response.data[offset + 2];
-                configs[i] = SoftKeyConfig {
+                *config = SoftKeyConfig {
                     index: i as u8,
                     key_type,
                     data: match key_type {

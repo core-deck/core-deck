@@ -22,7 +22,7 @@
 //! Failures are non-fatal — log and move on. The chord is a UX
 //! shortcut, not load-bearing for any data path.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use coredeck_protocol::{HostTerminal, HostTerminalKind};
 use tokio::process::Command;
@@ -111,7 +111,7 @@ fn wrapper_binary_path() -> Option<PathBuf> {
     }
 }
 
-async fn spawn_in(host: &HostTerminal, cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_in(host: &HostTerminal, cwd: &str, wrapper: &Path) -> Result<(), String> {
     match host.kind {
         HostTerminalKind::WezTerm => spawn_wezterm(cwd, wrapper).await,
         HostTerminalKind::Kitty => spawn_kitty(cwd, wrapper).await,
@@ -138,7 +138,7 @@ async fn spawn_in(host: &HostTerminal, cwd: &str, wrapper: &PathBuf) -> Result<(
 
 // ── Per-terminal adapters ──────────────────────────────────────────
 
-async fn spawn_wezterm(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_wezterm(cwd: &str, wrapper: &Path) -> Result<(), String> {
     run(
         "wezterm",
         &[
@@ -153,7 +153,7 @@ async fn spawn_wezterm(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
     .await
 }
 
-async fn spawn_kitty(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_kitty(cwd: &str, wrapper: &Path) -> Result<(), String> {
     let cwd_arg = format!("--cwd={}", cwd);
     run(
         "kitty",
@@ -172,7 +172,7 @@ async fn spawn_kitty(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
 /// running the wrapper. The socket is recorded in the wrapper's
 /// `tmux_socket` ($TMUX = "<socket>,<pid>,<session>" — we only need
 /// the socket).
-async fn spawn_tmux(host: &HostTerminal, cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_tmux(host: &HostTerminal, cwd: &str, wrapper: &Path) -> Result<(), String> {
     let socket = host
         .tmux_socket
         .as_deref()
@@ -193,7 +193,7 @@ async fn spawn_tmux(host: &HostTerminal, cwd: &str, wrapper: &PathBuf) -> Result
 /// then write `cd <cwd> && <wrapper>` plus a newline so the new shell
 /// starts the wrapper. Quotes use AppleScript-compatible escapes.
 #[cfg(target_os = "macos")]
-async fn spawn_iterm2(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_iterm2(cwd: &str, wrapper: &Path) -> Result<(), String> {
     let cmd = format!(
         "cd {} && exec {}",
         shell_quote(cwd),
@@ -213,7 +213,7 @@ async fn spawn_iterm2(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn spawn_iterm2(_cwd: &str, _wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_iterm2(_cwd: &str, _wrapper: &Path) -> Result<(), String> {
     debug!("iTerm2 spawn requested on non-macOS — ignoring");
     Ok(())
 }
@@ -222,7 +222,7 @@ async fn spawn_iterm2(_cwd: &str, _wrapper: &PathBuf) -> Result<(), String> {
 /// reuses the front-most one if the user prefers — that's user-config
 /// territory). Pre-cd to `cwd` and exec the wrapper.
 #[cfg(target_os = "macos")]
-async fn spawn_apple_terminal(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_apple_terminal(cwd: &str, wrapper: &Path) -> Result<(), String> {
     let cmd = format!(
         "cd {} && exec {}",
         shell_quote(cwd),
@@ -239,7 +239,7 @@ async fn spawn_apple_terminal(cwd: &str, wrapper: &PathBuf) -> Result<(), String
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn spawn_apple_terminal(_cwd: &str, _wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_apple_terminal(_cwd: &str, _wrapper: &Path) -> Result<(), String> {
     debug!("Terminal.app spawn requested on non-macOS — ignoring");
     Ok(())
 }
@@ -249,7 +249,7 @@ async fn spawn_apple_terminal(_cwd: &str, _wrapper: &PathBuf) -> Result<(), Stri
 /// `--working-directory` and `-e` so it runs the wrapper. Falls back
 /// to the user's default behaviour if `open` isn't available.
 #[cfg(target_os = "macos")]
-async fn spawn_ghostty(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_ghostty(cwd: &str, wrapper: &Path) -> Result<(), String> {
     let dir_arg = format!("--working-directory={}", cwd);
     run(
         "open",
@@ -266,7 +266,7 @@ async fn spawn_ghostty(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-async fn spawn_ghostty(_cwd: &str, _wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_ghostty(_cwd: &str, _wrapper: &Path) -> Result<(), String> {
     debug!("Ghostty spawn requested on non-macOS — ignoring");
     Ok(())
 }
@@ -276,7 +276,7 @@ async fn spawn_ghostty(_cwd: &str, _wrapper: &PathBuf) -> Result<(), String> {
 /// deprecated `-e "<shell-string>"`). Opens a new tab in the existing
 /// gnome-terminal-server when one is running, falling back to a new
 /// window otherwise — that's what the daemon itself does.
-async fn spawn_gnome_terminal(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_gnome_terminal(cwd: &str, wrapper: &Path) -> Result<(), String> {
     let cwd_arg = format!("--working-directory={}", cwd);
     run(
         "gnome-terminal",
@@ -289,7 +289,7 @@ async fn spawn_gnome_terminal(cwd: &str, wrapper: &PathBuf) -> Result<(), String
 /// `--workdir <cwd>` sets the starting directory; `-e <prog>` runs
 /// the program. Konsole's `-e` takes a single argv, so we pass the
 /// wrapper path directly.
-async fn spawn_konsole(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_konsole(cwd: &str, wrapper: &Path) -> Result<(), String> {
     run(
         "konsole",
         &[
@@ -307,7 +307,7 @@ async fn spawn_konsole(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
 /// like wezterm/konsole have); this opens a new window instead. That
 /// matches the user's mental model — Alacritty users typically
 /// manage windows with their WM.
-async fn spawn_alacritty(cwd: &str, wrapper: &PathBuf) -> Result<(), String> {
+async fn spawn_alacritty(cwd: &str, wrapper: &Path) -> Result<(), String> {
     run(
         "alacritty",
         &[

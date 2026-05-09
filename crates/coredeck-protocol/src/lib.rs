@@ -419,10 +419,7 @@ impl HostTerminalKind {
     /// `Unknown` because we'd rather show a clearable alert than miss
     /// one in a terminal we just haven't taught the daemon about.
     pub fn supports_focus_reporting(&self) -> bool {
-        match self {
-            HostTerminalKind::JetBrains => false,
-            _ => true,
-        }
+        !matches!(self, HostTerminalKind::JetBrains)
     }
 }
 

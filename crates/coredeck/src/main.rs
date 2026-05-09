@@ -3,6 +3,12 @@
 //! Provides WebSocket (exclusive) and HTTP REST (shared) APIs for
 //! controlling the CoreDeck macropad.
 
+// Cocoa is deprecated upstream in favour of objc2. We're intentionally
+// staying on cocoa for now — the migration is its own slice. Silence
+// the lint crate-wide rather than peppering every macOS-only function
+// with #[allow(deprecated)].
+#![allow(deprecated)]
+
 mod alerts;
 mod hid;
 mod hooks;
