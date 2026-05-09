@@ -45,8 +45,18 @@ jobs:
           file target/aarch64-apple-darwin/release/coredeck
           file target/aarch64-apple-darwin/release/coredeck-claude
 
-  build-linux-x86_64:
-    runs-on: ubuntu-22.04
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -62,17 +72,17 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release (x86_64 Linux)
-        run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
+      - name: Build release (${{ matrix.arch }} Linux)
+        run: cargo build --release --workspace --target ${{ matrix.rust_target }}
 
       - name: Run tests
         run: cargo test --workspace
 
       - name: Verify binaries
         run: |
-          file target/x86_64-unknown-linux-gnu/release/coredeck
-          file target/x86_64-unknown-linux-gnu/release/coredeck-claude
+          file target/${{ matrix.rust_target }}/release/coredeck
+          file target/${{ matrix.rust_target }}/release/coredeck-claude
           # Cross-check the udev hotplug symbol made it in. If we
           # accidentally stop linking libudev on Linux this catches it
           # before users hit a runtime "watcher init failed" log.
-          ldd target/x86_64-unknown-linux-gnu/release/coredeck | grep -q libudev
+          ldd target/${{ matrix.rust_target }}/release/coredeck | grep -q libudev

@@ -60,13 +60,15 @@ alias claude="coredeck-claude"
 Two paths: the prebuilt tarball (recommended) or build from source.
 
 **Tarball.** Each tagged release uploads
-`coredeck-<version>-linux-x86_64.tar.gz` to GitHub Releases. Extract,
-run the bundled `install.sh`, and you're done — it copies the
-binaries to `~/.local/bin/`, installs the udev rules, and runs
-`coredeck setup` (which writes a systemd user unit and registers the
-Claude Code hooks):
+`coredeck-<version>-linux-x86_64.tar.gz` and
+`coredeck-<version>-linux-arm64.tar.gz` to GitHub Releases. Pick
+the one matching your CPU, extract, run the bundled `install.sh`,
+and you're done — it copies the binaries to `~/.local/bin/`,
+installs the udev rules, and runs `coredeck setup` (which writes a
+systemd user unit and registers the Claude Code hooks):
 
 ```bash
+# Use linux-arm64 instead of linux-x86_64 on Apple Silicon / Asahi.
 tar -xzf coredeck-*-linux-x86_64.tar.gz
 cd coredeck-*-linux-x86_64
 ./install.sh

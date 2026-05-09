@@ -37,12 +37,20 @@ A graphical session (X11 or Wayland) is needed for the tray icon.
 
 ### Path A — Prebuilt tarball (recommended)
 
-Download `coredeck-<version>-linux-x86_64.tar.gz` from
-[Releases](https://github.com/core-deck/core-deck/releases), then:
+Two tarballs are published per release on
+[Releases](https://github.com/core-deck/core-deck/releases):
+
+- `coredeck-<version>-linux-x86_64.tar.gz` — Intel/AMD64
+- `coredeck-<version>-linux-arm64.tar.gz` — aarch64 (Raspberry Pi
+  64-bit, Apple Silicon under Asahi or a Linux VM, Ampere/AWS
+  Graviton, etc.)
+
+Pick the one matching your CPU (`uname -m` reports `x86_64` or
+`aarch64`), then:
 
 ```bash
-tar -xzf coredeck-*-linux-x86_64.tar.gz
-cd coredeck-*-linux-x86_64
+tar -xzf coredeck-*-linux-*.tar.gz
+cd coredeck-*-linux-*
 ./install.sh
 ```
 

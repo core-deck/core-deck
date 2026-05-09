@@ -35,8 +35,18 @@ jobs:
             target/aarch64-apple-darwin/release/coredeck
             target/aarch64-apple-darwin/release/coredeck-claude
 
-  build-linux-x86_64:
-    runs-on: ubuntu-22.04
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+          - arch: arm64
+            runner: ubuntu-22.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,21 +63,21 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build for x86_64 Linux
-        run: cargo build --release --workspace --target x86_64-unknown-linux-gnu
+      - name: Build for ${{ matrix.arch }} Linux
+        run: cargo build --release --workspace --target ${{ matrix.rust_target }}
 
       - name: Strip binaries
         run: |
-          strip target/x86_64-unknown-linux-gnu/release/coredeck
-          strip target/x86_64-unknown-linux-gnu/release/coredeck-claude
+          strip target/${{ matrix.rust_target }}/release/coredeck
+          strip target/${{ matrix.rust_target }}/release/coredeck-claude
 
-      - name: Upload Linux x86_64 binaries
+      - name: Upload Linux ${{ matrix.arch }} binaries
         uses: actions/upload-artifact@v4
         with:
-          name: binary-linux-x86_64
+          name: binary-linux-${{ matrix.arch }}
           path: |
-            target/x86_64-unknown-linux-gnu/release/coredeck
-            target/x86_64-unknown-linux-gnu/release/coredeck-claude
+            target/${{ matrix.rust_target }}/release/coredeck
+            target/${{ matrix.rust_target }}/release/coredeck-claude
 
   # Bundle the arm64 binary into a signed app. Intel macOS support
   # was dropped here because GitHub's macos-13 runner queue can take
@@ -188,7 +198,11 @@ jobs:
           path: dist/*.dmg
 
   package-linux:
-    needs: build-linux-x86_64
+    needs: build-linux
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
@@ -197,7 +211,7 @@ jobs:
       - name: Download Linux binaries
         uses: actions/download-artifact@v4
         with:
-          name: binary-linux-x86_64
+          name: binary-linux-${{ matrix.arch }}
           path: dist/linux/
 
       - name: Get version
@@ -212,16 +226,19 @@ jobs:
           fi
 
       - name: Stage tarball contents
+        env:
+          ARCH: ${{ matrix.arch }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           # Layout the user sees after extracting the tarball:
-          #   coredeck-<version>-linux-x86_64/
+          #   coredeck-<version>-linux-<arch>/
           #     bin/coredeck
           #     bin/coredeck-claude
           #     udev/99-coredeck.rules
           #     install.sh         (one-shot installer; calls `coredeck setup`)
           #     README.md          (excerpt of docs/linux-setup.md)
           #     LICENSE
-          STAGE="dist/coredeck-${{ steps.version.outputs.version }}-linux-x86_64"
+          STAGE="dist/coredeck-$VERSION-linux-$ARCH"
           mkdir -p "$STAGE/bin" "$STAGE/udev"
           install -m 0755 dist/linux/coredeck "$STAGE/bin/coredeck"
           install -m 0755 dist/linux/coredeck-claude "$STAGE/bin/coredeck-claude"
@@ -265,15 +282,15 @@ jobs:
           cp docs/linux-setup.md "$STAGE/README.md"
           cp LICENSE "$STAGE/LICENSE" 2>/dev/null || true
 
-          tar -C dist -czf "dist/coredeck-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz" \
-              "coredeck-${{ steps.version.outputs.version }}-linux-x86_64"
+          tar -C dist -czf "dist/coredeck-$VERSION-linux-$ARCH.tar.gz" \
+              "coredeck-$VERSION-linux-$ARCH"
           ls -lh dist/
 
       - name: Upload Linux tarball
         uses: actions/upload-artifact@v4
         with:
-          name: coredeck-${{ steps.version.outputs.version }}-linux-x86_64
-          path: dist/coredeck-${{ steps.version.outputs.version }}-linux-x86_64.tar.gz
+          name: coredeck-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}
+          path: dist/coredeck-${{ steps.version.outputs.version }}-linux-${{ matrix.arch }}.tar.gz
 
   create-release:
     needs: [package-macos, package-linux]
@@ -292,11 +309,16 @@ jobs:
           name: CoreDeck-${{ steps.version.outputs.version }}-macos-arm64
           path: artifacts
 
-      - name: Download Linux tarball
+      - name: Download Linux tarballs
         uses: actions/download-artifact@v4
         with:
-          name: coredeck-${{ steps.version.outputs.version }}-linux-x86_64
+          # Matches every per-arch artifact uploaded by `package-linux`
+          # (currently x86_64 + arm64). `merge-multiple` flattens them
+          # into `artifacts/` so the gh-release `files:` glob picks up
+          # both tarballs without per-arch download blocks.
+          pattern: coredeck-${{ steps.version.outputs.version }}-linux-*
           path: artifacts
+          merge-multiple: true
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
