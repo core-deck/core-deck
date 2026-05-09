@@ -287,6 +287,13 @@ The daemon hosts every user-facing surface:
   cover most). HID device access works through the same `hidapi`
   crate but service registration would need `sc create` or a
   Win32 Service wrapper instead of launchd/systemd.
+- **Intel macOS.** Dropped from the release workflow when GitHub's
+  `macos-13` runner queue started blocking tagged builds for 12+
+  hours. The code still builds for `x86_64-apple-darwin` from
+  source — just not in CI. Re-add a `build-macos-x86_64` job + the
+  lipo step in `release.yml` (it's all kept in `bundle.sh` behind
+  `--lipo-only`) when GitHub's Intel availability stabilises or
+  if anyone actually asks.
 
 ---
 

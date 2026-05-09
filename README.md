@@ -34,6 +34,11 @@ See [docs/Building.md](docs/Building.md) for Linux dependencies, individual crat
 
 ### macOS
 
+Apple Silicon only for prebuilt releases — Intel macOS binaries
+are dropped from CI because GitHub's `macos-13` runner queue can
+take 12+ hours and was blocking tagged releases. Intel users can
+still build from source (see [docs/Building.md](docs/Building.md)).
+
 The fastest path is via Homebrew:
 
 ```bash

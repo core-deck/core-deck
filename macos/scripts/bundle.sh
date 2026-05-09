@@ -18,6 +18,7 @@ BUILD_TYPE="release"
 ARCH=""
 UNIVERSAL=false
 LIPO_ONLY=false
+ARM64_ONLY=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -39,15 +40,24 @@ while [[ $# -gt 0 ]]; do
             UNIVERSAL=true
             shift
             ;;
+        --arm64-only)
+            # Use the prebuilt aarch64 binary as-is — no lipo, no
+            # universal binary. Used by the release workflow now that
+            # macos-13 (Intel) runner queues are unreliable enough to
+            # block tagged releases for hours/days.
+            ARM64_ONLY=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: $0 [--debug] [--arch arm64|x86_64] [--universal] [--lipo-only]"
+            echo "Usage: $0 [--debug] [--arch arm64|x86_64] [--universal] [--lipo-only] [--arm64-only]"
             echo ""
             echo "Options:"
             echo "  --debug       Build debug instead of release"
             echo "  --arch ARCH   Build for specific architecture (arm64 or x86_64)"
             echo "  --universal   Build universal binary (requires native libs for both archs)"
             echo "  --lipo-only   Skip build, just combine existing binaries with lipo (for CI)"
+            echo "  --arm64-only  Skip build, just bundle the existing aarch64 binary (for CI)"
             exit 1
             ;;
     esac
@@ -89,7 +99,18 @@ lipo_binary() {
     lipo -create "$arm" "$x86" -output "$TARGET_DIR/$name"
 }
 
-if [ "$LIPO_ONLY" = true ]; then
+if [ "$ARM64_ONLY" = true ]; then
+    echo "Using prebuilt aarch64 binaries..."
+    arm_target="$PROJECT_ROOT/target/aarch64-apple-darwin/$BUILD_TYPE"
+    for binary in "$EXECUTABLE_NAME" "$WRAPPER_NAME"; do
+        if [ ! -f "$arm_target/$binary" ]; then
+            echo "Error: ARM64 binary not found at $arm_target/$binary"
+            exit 1
+        fi
+    done
+    TARGET_DIR="$arm_target"
+
+elif [ "$LIPO_ONLY" = true ]; then
     echo "Combining existing binaries with lipo..."
     lipo_binary "$EXECUTABLE_NAME"
     lipo_binary "$WRAPPER_NAME"

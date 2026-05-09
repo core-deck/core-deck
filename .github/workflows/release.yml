@@ -35,26 +35,6 @@ jobs:
             target/aarch64-apple-darwin/release/coredeck
             target/aarch64-apple-darwin/release/coredeck-claude
 
-  build-macos-x86_64:
-    runs-on: macos-13  # Intel runner
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build for x86_64
-        run: cargo build --release --workspace --target x86_64-apple-darwin
-
-      - name: Upload x86_64 binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-x86_64
-          path: |
-            target/x86_64-apple-darwin/release/coredeck
-            target/x86_64-apple-darwin/release/coredeck-claude
-
   build-linux-x86_64:
     runs-on: ubuntu-22.04
     steps:
@@ -89,9 +69,12 @@ jobs:
             target/x86_64-unknown-linux-gnu/release/coredeck
             target/x86_64-unknown-linux-gnu/release/coredeck-claude
 
-  # Combine binaries and create signed app bundle
+  # Bundle the arm64 binary into a signed app. Intel macOS support
+  # was dropped here because GitHub's macos-13 runner queue can take
+  # 12+ hours and was blocking tagged releases. Re-add a
+  # build-macos-x86_64 job + lipo step if Intel users actually ask.
   package-macos:
-    needs: [build-macos-arm64, build-macos-x86_64]
+    needs: [build-macos-arm64]
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -106,38 +89,26 @@ jobs:
           name: binary-arm64
           path: target/aarch64-apple-darwin/release/
 
-      - name: Download x86_64 binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: binary-x86_64
-          path: target/x86_64-apple-darwin/release/
-
       - name: Make binaries executable
         run: |
           chmod +x target/aarch64-apple-darwin/release/coredeck
           chmod +x target/aarch64-apple-darwin/release/coredeck-claude
-          chmod +x target/x86_64-apple-darwin/release/coredeck
-          chmod +x target/x86_64-apple-darwin/release/coredeck-claude
 
       - name: Verify binaries
         run: |
           file target/aarch64-apple-darwin/release/coredeck
           file target/aarch64-apple-darwin/release/coredeck-claude
-          file target/x86_64-apple-darwin/release/coredeck
-          file target/x86_64-apple-darwin/release/coredeck-claude
 
       - name: Generate app icon
         run: ./macos/scripts/generate-icon.sh
 
-      - name: Create universal binaries and bundle
-        run: ./macos/scripts/bundle.sh --lipo-only
+      - name: Bundle arm64 binaries
+        run: ./macos/scripts/bundle.sh --arm64-only
 
-      - name: Verify universal binaries
+      - name: Verify bundled binaries
         run: |
           file "dist/Core Deck.app/Contents/MacOS/coredeck"
           file "dist/Core Deck.app/Contents/MacOS/coredeck-claude"
-          lipo -info "dist/Core Deck.app/Contents/MacOS/coredeck"
-          lipo -info "dist/Core Deck.app/Contents/MacOS/coredeck-claude"
 
       - name: Import signing certificate
         if: ${{ env.MACOS_CERTIFICATE != '' }}
@@ -213,7 +184,7 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CoreDeck-${{ steps.version.outputs.version }}-macos-universal
+          name: CoreDeck-${{ steps.version.outputs.version }}-macos-arm64
           path: dist/*.dmg
 
   package-linux:
@@ -318,7 +289,7 @@ jobs:
       - name: Download macOS DMG
         uses: actions/download-artifact@v4
         with:
-          name: CoreDeck-${{ steps.version.outputs.version }}-macos-universal
+          name: CoreDeck-${{ steps.version.outputs.version }}-macos-arm64
           path: artifacts
 
       - name: Download Linux tarball
