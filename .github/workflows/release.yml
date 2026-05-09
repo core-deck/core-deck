@@ -64,7 +64,9 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y libudev-dev libhidapi-dev pkg-config
+          # libgtk-3-dev pulls atk-sys / gdk-pixbuf-sys / glib-sys —
+          # the transitive build deps of `tray-icon` on Linux.
+          sudo apt-get install -y libudev-dev libhidapi-dev libgtk-3-dev pkg-config
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

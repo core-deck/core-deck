@@ -11,20 +11,25 @@ runtime; the build adds `build-essential` + `pkg-config`.
 
 ### Debian / Ubuntu
 ```bash
-sudo apt install libudev1 libhidapi-libusb0
-# add build-essential pkg-config libudev-dev libhidapi-dev for source builds
+sudo apt install libudev1 libhidapi-libusb0 libgtk-3-0
+# add build-essential pkg-config libudev-dev libhidapi-dev libgtk-3-dev for source builds
 ```
 
 ### Fedora / RHEL
 ```bash
-sudo dnf install systemd-libs hidapi
-# add gcc pkg-config systemd-devel hidapi-devel for source builds
+sudo dnf install systemd-libs hidapi gtk3
+# add gcc pkg-config systemd-devel hidapi-devel gtk3-devel for source builds
 ```
 
 ### Arch
 ```bash
-sudo pacman -S hidapi
+sudo pacman -S hidapi gtk3
 ```
+
+`libgtk-3-0` (runtime) is needed because the daemon's tray icon is
+backed by `tray-icon` + GTK on Linux. Ubuntu Desktop and other
+GNOME/GTK desktops already have it; headless servers and minimal
+DEs may not.
 
 A graphical session (X11 or Wayland) is needed for the tray icon.
 
