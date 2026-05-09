@@ -213,7 +213,16 @@ fn main() {
         }
     };
 
-    // Create tray (must happen on main thread on macOS)
+    // Linux: tray-icon panics if gtk::init() hasn't been called
+    // before TrayIcon construction. macOS uses NSStatusItem and
+    // doesn't need this.
+    #[cfg(target_os = "linux")]
+    if let Err(e) = gtk::init() {
+        error!("gtk::init failed: {} — tray will not be available", e);
+    }
+
+    // Create tray (must happen on main thread on macOS; on Linux it
+    // must be the same thread that later calls gtk::main()).
     let (tray_manager, tray_action_rx) = match tray::DaemonTrayManager::new() {
         Ok((tray, rx)) => (Some(tray), Some(rx)),
         Err(e) => {
@@ -283,8 +292,96 @@ fn main() {
         std::process::exit(0);
     });
 
-    // Handle tray events on main thread (via winit event loop)
+    // Handle tray events on the main thread. macOS uses winit (the
+    // tray is an NSStatusItem and NSApp must own the main thread);
+    // Linux uses gtk::main() (tray-icon's callbacks fire from GTK
+    // signal handlers). Both paths drain the same mpsc channels.
+    #[cfg(target_os = "linux")]
+    run_main_loop_linux(state, tray_manager, tray_action_rx, tray_update_rx);
+    #[cfg(not(target_os = "linux"))]
     run_main_event_loop(state, tray_manager, tray_action_rx, tray_update_rx);
+}
+
+/// Apply one async-side `TrayUpdate` to the tray manager. Shared by
+/// the macOS (winit) and Linux (gtk::main) loops.
+fn apply_tray_update(tray: &mut tray::DaemonTrayManager, update: TrayUpdate) {
+    match update {
+        TrayUpdate::DeviceConnected { name, firmware } => {
+            tray.set_device_status(
+                tray::DevicePresence::Active,
+                Some(&name),
+                Some(&firmware),
+            );
+        }
+        TrayUpdate::DeviceDisconnected => {
+            // Device interface closed but may still be physically available
+            tray.set_device_status(tray::DevicePresence::Available, None, None);
+        }
+        TrayUpdate::DeviceAvailable(name) => {
+            tray.set_device_status(tray::DevicePresence::Available, Some(&name), None);
+        }
+        TrayUpdate::DeviceUnavailable => {
+            tray.set_device_status(tray::DevicePresence::None, None, None);
+        }
+        TrayUpdate::Tabs(list) => {
+            tray.set_tabs(&list);
+        }
+        TrayUpdate::HooksInstalled(installed) => {
+            tray.set_hooks_installed(installed);
+        }
+        TrayUpdate::UpdatesAvailable { daemon, firmware } => {
+            tray.set_updates(daemon, firmware);
+        }
+    }
+}
+
+/// Handle one click event from the tray menu. Returns `true` when
+/// the action was Quit so the caller can tear down the platform's
+/// main loop appropriately (`event_loop.exit()` on macOS,
+/// `gtk::main_quit()` on Linux).
+fn handle_tray_action(state: &Arc<DaemonState>, action: tray::DaemonTrayAction) -> bool {
+    match action {
+        tray::DaemonTrayAction::FocusWrapper(wrapper_id) => {
+            let st = Arc::clone(state);
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                rt.block_on(async {
+                    if let Err(e) = wrapper::set_active_wrapper(&st, &wrapper_id).await {
+                        info!("FocusWrapper({}) failed: {}", wrapper_id, e);
+                    }
+                });
+            });
+            false
+        }
+        tray::DaemonTrayAction::OpenSettings => {
+            let url = format!("http://{}/settings", state.listen_addr);
+            info!(url = %url, "opening settings page");
+            open_url_in_browser(&url);
+            false
+        }
+        tray::DaemonTrayAction::InstallHooks => {
+            let listen = state.listen_addr.clone();
+            let st = Arc::clone(state);
+            std::thread::spawn(move || {
+                hooks::install_claude_hooks(&listen);
+                let installed = hooks::are_hooks_installed();
+                st.send_tray_update(TrayUpdate::HooksInstalled(installed));
+            });
+            false
+        }
+        tray::DaemonTrayAction::OpenUrl(url) => {
+            info!(url = %url, "opening URL from tray");
+            open_url_in_browser(&url);
+            false
+        }
+        tray::DaemonTrayAction::Quit => {
+            info!("Quit requested from tray");
+            true
+        }
+    }
 }
 
 /// Run the async daemon (axum server + event processing)
@@ -587,7 +684,12 @@ async fn run_async(
     }
 }
 
-/// Run the winit event loop on the main thread (for tray icon support on macOS)
+/// Run the winit event loop on the main thread (macOS tray needs
+/// NSApp on the main thread; winit owns NSApp). Drains the mpsc
+/// channels on a 250ms WaitUntil tick — pure Wait would only fire
+/// `about_to_wait` on native UI events, leaving async-side updates
+/// queued until the user opens the menu.
+#[cfg(not(target_os = "linux"))]
 fn run_main_event_loop(
     state: Arc<DaemonState>,
     tray_manager: Option<tray::DaemonTrayManager>,
@@ -606,11 +708,6 @@ fn run_main_event_loop(
 
     impl ApplicationHandler for TrayApp {
         fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-            // WaitUntil lets us drain the mpsc channels (tray_update_rx,
-            // tray_action_rx) on a regular tick. Pure Wait would only fire
-            // about_to_wait on native UI events, which leaves async-side
-            // updates (hooks installed, wrapper connected) sitting in the
-            // channel until the user happens to open the menu.
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 std::time::Instant::now() + std::time::Duration::from_millis(250),
             ));
@@ -624,93 +721,20 @@ fn run_main_event_loop(
         ) {}
 
         fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-            // Re-arm the periodic tick so the channels keep draining even
-            // when no native UI events arrive.
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 std::time::Instant::now() + std::time::Duration::from_millis(250),
             ));
 
-            // Process tray updates from async code (non-blocking)
             while let Ok(update) = self.tray_update_rx.try_recv() {
                 if let Some(ref mut tray) = self.tray_manager {
-                    match update {
-                        TrayUpdate::DeviceConnected { name, firmware } => {
-                            tray.set_device_status(
-                                tray::DevicePresence::Active,
-                                Some(&name),
-                                Some(&firmware),
-                            );
-                        }
-                        TrayUpdate::DeviceDisconnected => {
-                            // Device interface closed but may still be physically available
-                            tray.set_device_status(tray::DevicePresence::Available, None, None);
-                        }
-                        TrayUpdate::DeviceAvailable(name) => {
-                            tray.set_device_status(
-                                tray::DevicePresence::Available,
-                                Some(&name),
-                                None,
-                            );
-                        }
-                        TrayUpdate::DeviceUnavailable => {
-                            tray.set_device_status(tray::DevicePresence::None, None, None);
-                        }
-                        TrayUpdate::Tabs(list) => {
-                            tray.set_tabs(&list);
-                        }
-                        TrayUpdate::HooksInstalled(installed) => {
-                            tray.set_hooks_installed(installed);
-                        }
-                        TrayUpdate::UpdatesAvailable { daemon, firmware } => {
-                            tray.set_updates(daemon, firmware);
-                        }
-                    }
+                    apply_tray_update(tray, update);
                 }
             }
 
-            // Poll tray menu actions (non-blocking)
             if let Some(ref rx) = self.tray_action_rx {
                 while let Ok(action) = rx.try_recv() {
-                    match action {
-                        tray::DaemonTrayAction::FocusWrapper(wrapper_id) => {
-                            let state = Arc::clone(&self.state);
-                            std::thread::spawn(move || {
-                                let rt = tokio::runtime::Builder::new_current_thread()
-                                    .enable_all()
-                                    .build()
-                                    .unwrap();
-                                rt.block_on(async {
-                                    if let Err(e) = wrapper::set_active_wrapper(&state, &wrapper_id).await {
-                                        info!("FocusWrapper({}) failed: {}", wrapper_id, e);
-                                    }
-                                });
-                            });
-                        }
-                        tray::DaemonTrayAction::OpenSettings => {
-                            let url = format!(
-                                "http://{}/settings",
-                                self.state.listen_addr,
-                            );
-                            info!(url = %url, "opening settings page");
-                            open_url_in_browser(&url);
-                        }
-                        tray::DaemonTrayAction::InstallHooks => {
-                            let listen = self.state.listen_addr.clone();
-                            let state = Arc::clone(&self.state);
-                            std::thread::spawn(move || {
-                                hooks::install_claude_hooks(&listen);
-                                let installed = hooks::are_hooks_installed();
-                                state.send_tray_update(TrayUpdate::HooksInstalled(installed));
-                            });
-                        }
-                        tray::DaemonTrayAction::OpenUrl(url) => {
-                            info!(url = %url, "opening URL from tray");
-                            open_url_in_browser(&url);
-                        }
-                        tray::DaemonTrayAction::Quit => {
-                            info!("Quit requested from tray");
-                            event_loop.exit();
-                        }
+                    if handle_tray_action(&self.state, action) {
+                        event_loop.exit();
                     }
                 }
             }
@@ -725,6 +749,54 @@ fn run_main_event_loop(
         tray_update_rx,
     };
     let _ = event_loop.run_app(&mut app);
+
+    info!("Daemon exiting");
+    std::process::exit(0);
+}
+
+/// Run the GTK main loop on the main thread (Linux tray uses
+/// libayatana-appindicator via gtk-rs; menu callbacks only fire
+/// while gtk::main() is pumping events). A glib timer drains the
+/// same mpsc channels the winit loop does on macOS.
+#[cfg(target_os = "linux")]
+fn run_main_loop_linux(
+    state: Arc<DaemonState>,
+    tray_manager: Option<tray::DaemonTrayManager>,
+    tray_action_rx: Option<std::sync::mpsc::Receiver<tray::DaemonTrayAction>>,
+    tray_update_rx: std::sync::mpsc::Receiver<TrayUpdate>,
+) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    // glib::timeout_add_local requires a 'static FnMut on the GTK
+    // thread. RefCell + Rc gives interior-mut access without sending
+    // anything across threads (the tray manager is GTK-bound and
+    // !Send anyway).
+    let tray_cell = Rc::new(RefCell::new(tray_manager));
+    let action_rx = tray_action_rx;
+    let state_for_timer = Arc::clone(&state);
+    let tray_for_timer = Rc::clone(&tray_cell);
+
+    glib::timeout_add_local(Duration::from_millis(250), move || {
+        while let Ok(update) = tray_update_rx.try_recv() {
+            if let Some(ref mut tray) = *tray_for_timer.borrow_mut() {
+                apply_tray_update(tray, update);
+            }
+        }
+
+        if let Some(ref rx) = action_rx {
+            while let Ok(action) = rx.try_recv() {
+                if handle_tray_action(&state_for_timer, action) {
+                    gtk::main_quit();
+                    return glib::ControlFlow::Break;
+                }
+            }
+        }
+        glib::ControlFlow::Continue
+    });
+
+    gtk::main();
 
     info!("Daemon exiting");
     std::process::exit(0);

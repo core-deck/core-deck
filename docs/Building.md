@@ -28,18 +28,23 @@ The `hidapi` crate links against IOKit for USB HID access. No Homebrew packages 
 ```bash
 # Debian/Ubuntu
 sudo apt install build-essential pkg-config libudev-dev libhidapi-dev \
-                 libgtk-3-dev libxdo-dev
+                 libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
 
 # Fedora
-sudo dnf install gcc pkg-config systemd-devel hidapi-devel gtk3-devel libxdo-devel
+sudo dnf install gcc pkg-config systemd-devel hidapi-devel gtk3-devel \
+                 libxdo-devel libayatana-appindicator3-gtk3
 ```
 
 `libgtk-3-dev` / `gtk3-devel` is required because `tray-icon` pulls
 in `atk-sys`, `gdk-pixbuf-sys`, and `glib-sys` on Linux; `libxdo-dev`
-/ `libxdo-devel` is the X11 menu/window helper `muda` links against.
+/ `libxdo-devel` is the X11 menu/window helper `muda` links against;
+`libayatana-appindicator3-*` is the StatusNotifierItem backend that
+makes the tray icon actually show up under GNOME / KDE Plasma.
+
 Ubuntu Desktop boxes typically already have the runtime libs from a
 default install; headless servers will need them at runtime too
-(`libgtk-3-0 libxdo3` / `gtk3 libxdo`).
+(`libgtk-3-0 libxdo3 libayatana-appindicator3-1` /
+`gtk3 libxdo libayatana-appindicator3-gtk3`).
 
 The daemon also draws the tray icon via `tray-icon`/`winit`, which on Linux needs an X11 or Wayland session at runtime but no extra build packages beyond what is listed above.
 

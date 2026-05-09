@@ -75,6 +75,15 @@ mach2 = "0.4"
 # Event-driven USB hotplug detection (counterpart to IOKit on macOS).
 # Pulls libudev which is already a system dep for hidapi on Linux.
 udev = "0.9"
+# `tray-icon` panics with "GTK has not been initialized" on Linux
+# unless we gtk::init() before building the tray, and its menu
+# callbacks only fire while gtk::main() is pumping events. Both
+# crates are already in our dep graph transitively (via tray-icon),
+# we just need a direct dep so we can call into them. glib hosts
+# the `timeout_add_local` we use to drain the tray-update channel
+# from inside the GTK main loop.
+gtk = "0.18"
+glib = "0.18"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-clippy\"))"] }

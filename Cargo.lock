@@ -587,6 +587,8 @@ dependencies = [
  "coredeck-protocol",
  "directories",
  "futures-util",
+ "glib",
+ "gtk",
  "hidapi",
  "io-kit-sys",
  "libc",

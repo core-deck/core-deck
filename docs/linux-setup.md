@@ -11,25 +11,32 @@ runtime; the build adds `build-essential` + `pkg-config`.
 
 ### Debian / Ubuntu
 ```bash
-sudo apt install libudev1 libhidapi-libusb0 libgtk-3-0 libxdo3
-# add build-essential pkg-config libudev-dev libhidapi-dev libgtk-3-dev libxdo-dev for source builds
+sudo apt install libudev1 libhidapi-libusb0 libgtk-3-0 libxdo3 \
+                 libayatana-appindicator3-1
+# Source builds add: build-essential pkg-config libudev-dev libhidapi-dev
+#                    libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
 ```
 
 ### Fedora / RHEL
 ```bash
-sudo dnf install systemd-libs hidapi gtk3 libxdo
-# add gcc pkg-config systemd-devel hidapi-devel gtk3-devel libxdo-devel for source builds
+sudo dnf install systemd-libs hidapi gtk3 libxdo \
+                 libayatana-appindicator3-gtk3
+# Source builds add: gcc pkg-config systemd-devel hidapi-devel gtk3-devel
+#                    libxdo-devel
 ```
 
 ### Arch
 ```bash
-sudo pacman -S hidapi gtk3 xdotool
+sudo pacman -S hidapi gtk3 xdotool libayatana-appindicator
 ```
 
-`libgtk-3-0` (runtime) is needed because the daemon's tray icon is
-backed by `tray-icon` + GTK on Linux; `libxdo3` covers the X11
-window plumbing. Ubuntu Desktop and other GNOME/GTK desktops
-already have both; headless servers and minimal DEs may not.
+`libgtk-3-0` is needed because the daemon's tray icon is backed by
+`tray-icon` + GTK on Linux. `libxdo3` covers X11 window plumbing.
+`libayatana-appindicator3-*` is the StatusNotifierItem backend that
+makes the tray icon actually show up under KDE Plasma and GNOME (via
+its AppIndicator extension). Ubuntu Desktop and other GNOME/GTK
+desktops already have GTK and xdo; the appindicator runtime is
+distro-dependent (Fedora KDE for instance does not preinstall it).
 
 A graphical session (X11 or Wayland) is needed for the tray icon.
 
