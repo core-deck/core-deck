@@ -15,7 +15,14 @@
 //!   desktop foreground. Platform-specific:
 //!     - macOS: `osascript -e 'tell application "<X>" to activate'`
 //!     - Linux/X11: `wmctrl -ia <WINDOWID>` if WINDOWID was captured
-//!     - Linux/Wayland: no portable primitive — adapter no-ops
+//!     - Linux/KDE (X11 or Wayland): `gdbus` script load into KWin's
+//!       Scripting interface, activates by `resourceClass`. Handles
+//!       both Plasma 5 (`activeClient`) and Plasma 6 (`activeWindow`).
+//!     - Linux/GNOME Wayland: nothing built-in. Mutter doesn't expose
+//!       window management to clients (security stance). Users can
+//!       install the Window Calls extension or run an X11 session.
+//!     - Linux/Wayland (other compositors): no portable primitive —
+//!       falls through to wmctrl which won't help on pure Wayland.
 //!
 //! Failures are non-fatal — F20 is a UX nicety, not load-bearing.
 
@@ -176,20 +183,165 @@ async fn raise_jetbrains(_host: &HostTerminal) -> Result<(), String> {
     Ok(())
 }
 
-/// Linux raise-by-class: `wmctrl -x -a <class>` activates the first
-/// window whose `WM_CLASS` second field matches `class`. Prefers
-/// `$WINDOWID`-based activation when available (more precise — no
-/// chance of grabbing a sibling window), falling back to class match.
-/// Wayland sessions without an Xwayland-friendly compositor will see
-/// `wmctrl` exit non-zero; we log and move on.
+/// Linux raise-by-class. Tries three paths in order, falling through
+/// on each failure (debug-logged) so a session that's e.g. KDE
+/// Wayland still has a working raise after `wmctrl -ia` errors out:
+///
+/// 1. `$WINDOWID + wmctrl -ia` — X11 / XWayland sessions where the
+///    terminal captured its X11 window id.
+/// 2. KWin DBus scripting — KDE Plasma, X11 or Wayland.
+/// 3. `wmctrl -x -a <class>` — pure X11 sessions without WINDOWID.
+///
+/// GNOME Wayland and other compositors without a published window-
+/// management API will end up at step 3 (which won't help on pure
+/// Wayland). That's documented in `docs/linux-setup.md`.
 #[cfg(target_os = "linux")]
 async fn raise_linux_by_class(host: &HostTerminal, class: &str) -> Result<(), String> {
     if let Some(wid) = host.window_id.as_deref() {
         if !wid.is_empty() {
-            return run("wmctrl", &["-ia", wid]).await;
+            match run("wmctrl", &["-ia", wid]).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    debug!(error = %e, "wmctrl -ia $WINDOWID failed; trying KWin/class fallbacks")
+                }
+            }
+        }
+    }
+    if is_kde() {
+        match raise_kwin_dbus(class).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                debug!(error = %e, "KWin DBus raise failed; falling back to wmctrl class lookup")
+            }
         }
     }
     run("wmctrl", &["-x", "-a", class]).await
+}
+
+/// True when this user's session is KDE Plasma. `XDG_CURRENT_DESKTOP`
+/// is typically `KDE` or a colon-separated chain like `KDE:Plasma`;
+/// match any segment case-insensitively.
+#[cfg(target_os = "linux")]
+fn is_kde() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|s| s.split(':').any(|p| p.eq_ignore_ascii_case("KDE")))
+        .unwrap_or(false)
+}
+
+/// Activate a window by `resourceClass` via KWin's Scripting DBus
+/// interface. Works on both X11 and Wayland KDE sessions — KWin is
+/// the compositor in both cases. Uses `gdbus` (ships with glib2,
+/// which we already depend on for the GTK tray) to avoid pulling in
+/// a Rust DBus crate just for this path.
+///
+/// The JS snippet handles both Plasma 5 and 6:
+/// - Plasma 5 exposes `workspace.clientList()` / `workspace.activeClient`
+/// - Plasma 6 exposes `workspace.windowList()` / `workspace.activeWindow`
+///
+/// Best-effort cleanup: after running we ask KWin to stop the script
+/// so loaded-script slots don't accumulate over a long session. The
+/// stop call's success isn't checked.
+#[cfg(target_os = "linux")]
+async fn raise_kwin_dbus(class: &str) -> Result<(), String> {
+    let class_lower = class.to_lowercase();
+    let script = format!(
+        r#"
+const list = workspace.windowList ? workspace.windowList() : workspace.clientList();
+for (const c of list) {{
+    const cls = (c.resourceClass || "").toString().toLowerCase();
+    if (cls === "{class_lower}") {{
+        if ('activeWindow' in workspace) {{
+            workspace.activeWindow = c;
+        }} else {{
+            workspace.activeClient = c;
+        }}
+        break;
+    }}
+}}
+"#
+    );
+
+    let load_output = Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.kde.KWin",
+            "--object-path",
+            "/Scripting",
+            "--method",
+            "org.kde.kwin.Scripting.loadScriptFromText",
+            &script,
+            "coredeck-raise",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("gdbus spawn failed: {e}"))?;
+
+    if !load_output.status.success() {
+        return Err(format!(
+            "gdbus loadScriptFromText exited {}: {}",
+            load_output.status,
+            String::from_utf8_lossy(&load_output.stderr).trim()
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&load_output.stdout);
+    let id = parse_kwin_script_id(&stdout)
+        .ok_or_else(|| format!("couldn't parse KWin script id from: {}", stdout.trim()))?;
+    let object_path = format!("/Scripting/Script{id}");
+
+    let run_output = Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.kde.KWin",
+            "--object-path",
+            &object_path,
+            "--method",
+            "org.kde.kwin.Script.run",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("gdbus run-call spawn failed: {e}"))?;
+
+    if !run_output.status.success() {
+        return Err(format!(
+            "gdbus Script.run exited {}: {}",
+            run_output.status,
+            String::from_utf8_lossy(&run_output.stderr).trim()
+        ));
+    }
+
+    // Best-effort: ask KWin to drop the loaded-script slot. Failure
+    // here doesn't matter — KWin will tidy up on its own restart and
+    // a few orphan scripts are cheap.
+    let _ = Command::new("gdbus")
+        .args([
+            "call",
+            "--session",
+            "--dest",
+            "org.kde.KWin",
+            "--object-path",
+            &object_path,
+            "--method",
+            "org.kde.kwin.Script.stop",
+        ])
+        .output()
+        .await;
+
+    Ok(())
+}
+
+/// Parse the reply from `gdbus call` to `loadScriptFromText`. Looks
+/// like `(int32 5,)` (or `(uint32 5,)` on some versions); return the
+/// number. Returns `None` on anything we don't recognise.
+#[cfg(target_os = "linux")]
+fn parse_kwin_script_id(reply: &str) -> Option<i64> {
+    let trimmed = reply.trim();
+    let inner = trimmed.strip_prefix('(')?.strip_suffix(",)")?.trim();
+    inner.rsplit_whitespace().next()?.parse().ok()
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -292,4 +444,30 @@ async fn run(program: &str, args: &[&str]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_int32_reply() {
+        assert_eq!(parse_kwin_script_id("(int32 5,)\n"), Some(5));
+        assert_eq!(parse_kwin_script_id("(int32 0,)"), Some(0));
+        assert_eq!(parse_kwin_script_id("(int32 12345,)"), Some(12345));
+    }
+
+    #[test]
+    fn parses_uint32_reply() {
+        // Some KWin versions return uint32 instead of int32.
+        assert_eq!(parse_kwin_script_id("(uint32 7,)"), Some(7));
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert_eq!(parse_kwin_script_id(""), None);
+        assert_eq!(parse_kwin_script_id("()"), None);
+        assert_eq!(parse_kwin_script_id("(int32 notanumber,)"), None);
+        assert_eq!(parse_kwin_script_id("int32 5"), None);
+    }
 }

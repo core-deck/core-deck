@@ -141,6 +141,35 @@ graphical session. On GNOME ≥ 40 you may need the
 [AppIndicator extension](https://extensions.gnome.org/extension/615/appindicator-support/)
 to see status icons at all.
 
+## F20 raise (window focusing) on Wayland
+
+Tapping F20 on the device raises the active wrapper's terminal
+window. The daemon picks a path automatically:
+
+| Session                    | Mechanism                                |
+|----------------------------|------------------------------------------|
+| X11 (any DE)               | `wmctrl -ia $WINDOWID` / `wmctrl -x -a`  |
+| KDE Plasma Wayland or X11  | KWin Scripting via `gdbus` (always works)|
+| GNOME Wayland              | **No built-in support.** See below       |
+| Sway / Hyprland / Wayfire  | **No built-in support yet.** See below   |
+
+**KDE Plasma** is the friendly Wayland case — KWin exposes a Scripting
+DBus interface that we drive via `gdbus` (which ships with glib2,
+already pulled in by the tray). No extra packages needed.
+
+**GNOME Wayland** deliberately doesn't expose window management to
+clients (Mutter's security stance). Options if you're on GNOME
+Wayland:
+- Install the [Window Calls extension](https://github.com/ickyicky/window-calls)
+  — re-exposes `Activate(windowId)` over DBus. CoreDeck doesn't talk
+  to it yet, but the plumbing would slot in alongside the KWin path.
+- Run an X11 session instead. Mutter still supports X11; `wmctrl`
+  works there.
+
+**Sway / Hyprland / Wayfire** each expose their own clean primitive
+(`swaymsg`, `hyprctl`, `wlrctl`) — drop us an issue if you want one
+wired up, the pattern is the same as the KWin adapter.
+
 ## Verification
 
 ```bash
@@ -175,6 +204,16 @@ curl -s http://127.0.0.1:19384/api/status | jq .
 ### Tray icon missing on GNOME
 - GNOME ≥ 40 hides legacy tray icons by default. Install the
   AppIndicator extension linked above.
+
+### F20 doesn't raise the terminal
+- On KDE Wayland or X11, check `journalctl --user -u coredeck.service`
+  for the actual `gdbus` / `wmctrl` error (the daemon falls through
+  several paths; the last one's message is what you'll see).
+- On GNOME Wayland, raise isn't supported out of the box — see the
+  "F20 raise" section above for the workaround.
+- For non-tabbed cases (e.g. konsole with one window), KWin's
+  `resourceClass` must match. Verify with `qdbus6 org.kde.KWin
+  /KWin org.kde.KWin.activeWindow` or just `xprop` under X11.
 
 ### `coredeck setup` complains about `systemctl --user`
 - Make sure your session is registered with logind:
