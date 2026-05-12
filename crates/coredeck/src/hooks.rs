@@ -1096,7 +1096,7 @@ async fn handle_permission_request(
         Some(sid) => crate::wrapper::wrapper_id_for_session(state, sid).await,
         None => None,
     };
-    let user_input_tool = matches!(tool, "ExitPlanMode" | "AskUserQuestion");
+    let user_input_tool = alerts::is_user_input_tool(tool);
     if yolo && connected && !user_input_tool {
         let (opted_in, opted_out) = match &wrapper_id {
             Some(wid) => (

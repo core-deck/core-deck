@@ -137,6 +137,14 @@ impl std::fmt::Debug for QueuedPending {
 /// Claude's terminal prompt.
 const PENDING_QUEUE_CAP: usize = 4;
 
+/// Tools whose whole purpose is to wait on the user — auto-approving
+/// them just lets Claude resume with an empty answer, which silently
+/// corrupts the turn. Used both by the direct `PermissionRequest`
+/// path (hooks.rs) and the queued-promotion path (this module).
+pub fn is_user_input_tool(tool: &str) -> bool {
+    matches!(tool, "ExitPlanMode" | "AskUserQuestion")
+}
+
 /// What `consume_input_for_decision` decided about an HID input event.
 #[derive(Debug, Clone)]
 pub enum AlertOutcome {
@@ -342,10 +350,20 @@ pub async fn try_install_next_pending(state: &DaemonState) {
         };
 
         // Skip past queued entries the user has already implicitly
-        // answered via the active alert's enrollment decision.
+        // answered via the active alert's enrollment decision —
+        // EXCEPT for user-input tools (ExitPlanMode, AskUserQuestion).
+        // Those need a real answer from the user; "approving" them
+        // just lets Claude resume with an empty input, which silently
+        // corrupts the turn. Same guard that `handle_permission_request`
+        // applies on the direct path, but it was missing here on the
+        // queued path — a queued AskUserQuestion could auto-resolve
+        // when the wrapper's enrollment alert ahead of it resolved
+        // Allow, or when an unrelated focus-in cleared an idle alert
+        // and ran the promotion loop.
         let wrapper_id = crate::wrapper::wrapper_id_for_session(state, &q.session_id).await;
+        let is_user_input = q.tool_name.as_deref().is_some_and(is_user_input_tool);
         if let Some(ref wid) = wrapper_id {
-            if crate::wrapper::is_yolo_opted_in(state, wid).await {
+            if !is_user_input && crate::wrapper::is_yolo_opted_in(state, wid).await {
                 debug!(
                     session = %q.session_id,
                     "queued PR auto-allowed: wrapper now enrolled in Auto-approve",
@@ -353,7 +371,7 @@ pub async fn try_install_next_pending(state: &DaemonState) {
                 let _ = q.tx.send(DecisionOutcome::Allow);
                 continue;
             }
-            if crate::wrapper::is_yolo_opted_out(state, wid).await {
+            if !is_user_input && crate::wrapper::is_yolo_opted_out(state, wid).await {
                 debug!(
                     session = %q.session_id,
                     "queued PR dropped: wrapper opted out of Auto-approve",
