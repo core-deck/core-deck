@@ -1070,7 +1070,17 @@ async fn handle_permission_request(
         if s.active_task_id.is_none() {
             s.current_task = Some("Thinking…".to_string());
         }
-        s.last_tool_summary = Some(summary);
+        // AskUserQuestion's surface is the question itself (raised
+        // via PreToolUse's Idle alert path) — duplicating it as
+        // "AskUserQuestion: …" on line 2 of the device just steals
+        // characters from the alert overlay it sits behind. Match
+        // the carve-out in handle_pre_tool_use: clear line 2 so
+        // the alert owns the screen.
+        if event.tool_name.as_deref() == Some("AskUserQuestion") {
+            s.last_tool_summary = None;
+        } else {
+            s.last_tool_summary = Some(summary);
+        }
     }
 
     // YOLO gating, with three guardrails:
