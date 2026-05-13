@@ -942,10 +942,20 @@ async fn handle_pre_tool_use(state: &DaemonState, event: &HookEvent) -> axum::re
     // `status`, so the generic summary collapses to a bare "TaskUpdate"
     // — useless on a 30-char line. Substitute the cached subject from
     // TaskCreated and prefix with a status glyph so the user can tell
-    // what changed without raising the terminal.
+    // what changed without raising the terminal. When the task isn't
+    // in the registry (out-of-order hooks, a session resumed without
+    // its TaskCreated history, a task created via a different
+    // mechanism), enrich returns None — in that case we'd rather
+    // leave whatever's currently on line 2 alone than overwrite it
+    // with the literal string "TaskUpdate".
+    let mut skip_line2_write = false;
     if event.tool_name.as_deref() == Some("TaskUpdate") {
-        if let Some(rich) = enrich_task_update(state, event).await {
-            summary = rich;
+        match enrich_task_update(state, event).await {
+            Some(rich) => summary = rich,
+            None => {
+                debug!("TaskUpdate without registered task — leaving line 2 untouched");
+                skip_line2_write = true;
+            }
         }
     }
 
@@ -973,7 +983,7 @@ async fn handle_pre_tool_use(state: &DaemonState, event: &HookEvent) -> axum::re
         // owns the screen until the user answers in the terminal.
         if event.tool_name.as_deref() == Some("AskUserQuestion") {
             s.last_tool_summary = None;
-        } else {
+        } else if !skip_line2_write {
             s.last_tool_summary = Some(summary);
         }
         s.tool_count_this_turn = s.tool_count_this_turn.saturating_add(1);
