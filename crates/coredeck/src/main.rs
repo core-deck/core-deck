@@ -741,6 +741,8 @@ fn run_main_event_loop(
 ) {
     use winit::application::ApplicationHandler;
     use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+    #[cfg(target_os = "macos")]
+    use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
 
     struct TrayApp {
         state: Arc<DaemonState>,
@@ -785,7 +787,21 @@ fn run_main_event_loop(
         }
     }
 
-    let event_loop = EventLoop::new().expect("Failed to create event loop");
+    // Build the event loop with Accessory activation policy on macOS
+    // so NSApplication never registers as Regular — that would draw a
+    // Dock icon even when our earlier `setup_macos_accessory` already
+    // set the policy. Setting it on the builder bakes it into NSApp
+    // initialisation, which is when the Dock decides whether to show
+    // an icon at all. For the bundled .app install path the same
+    // hint comes from Info.plist's LSUIElement, but launching via the
+    // brew-installed CLI symlink bypasses Info.plist so we still need
+    // the runtime call.
+    let event_loop = {
+        let mut builder = EventLoop::builder();
+        #[cfg(target_os = "macos")]
+        builder.with_activation_policy(ActivationPolicy::Accessory);
+        builder.build().expect("Failed to create event loop")
+    };
     let mut app = TrayApp {
         state,
         tray_manager,
