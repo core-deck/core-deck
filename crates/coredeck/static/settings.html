@@ -211,9 +211,25 @@
     image-rendering: pixelated;
     shape-rendering: crispEdges;
   }
-  /* Secondary preview (softkey overlay) — half-size of the main one. */
-  .theme-preview-small {
-    width: 426px;
+  /* Preview header: label on the left, mode toggle on the right. */
+  .theme-preview-header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 12px;
+  }
+  .theme-preview-toggle {
+    display: inline-flex; border: 1px solid var(--border); border-radius: 4px;
+    overflow: hidden;
+  }
+  .theme-preview-toggle .toggle-btn {
+    background: transparent; color: var(--muted);
+    border: none; padding: 3px 10px; font-size: 11px;
+    cursor: pointer; font-family: inherit;
+  }
+  .theme-preview-toggle .toggle-btn + .toggle-btn {
+    border-left: 1px solid var(--border);
+  }
+  .theme-preview-toggle .toggle-btn.is-active {
+    background: var(--accent); color: #1a1a1a; font-weight: 500;
   }
   .theme-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .theme-help { color: var(--muted); font-size: 12px; margin: 0; }
@@ -330,10 +346,16 @@
     <div class="theme-layout" id="theme-body" style="display:none">
       <div class="theme-slots" id="theme-slots"></div>
       <div class="theme-preview-wrap">
-        <div class="theme-preview-label">Live preview &mdash; main display (284&times;76, 2&times;)</div>
+        <div class="theme-preview-header">
+          <span class="theme-preview-label">Live preview &mdash; main display (284&times;76, 2&times;)</span>
+          <span class="theme-preview-toggle">
+            <button type="button" class="toggle-btn is-active" id="preview-mode-active" data-mode="active">Active task</button>
+            <button type="button" class="toggle-btn" id="preview-mode-idle" data-mode="idle">Idle</button>
+          </span>
+        </div>
         <svg class="theme-preview" id="theme-preview" viewBox="0 0 284 76" preserveAspectRatio="xMidYMid meet"></svg>
-        <div class="theme-preview-label">Softkey overlay (shown while a knob is held)</div>
-        <svg class="theme-preview theme-preview-small" id="theme-softkey-preview" viewBox="0 0 284 76" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="theme-preview-label">Alert overlay (shown while alerts are pending)</div>
+        <svg class="theme-preview" id="theme-alert-preview" viewBox="0 0 284 76" preserveAspectRatio="xMidYMid meet"></svg>
         <div class="theme-actions">
           <button id="theme-save" class="primary">Save to device</button>
           <button id="theme-reset" class="danger">Reset to defaults</button>
@@ -1103,25 +1125,29 @@ function renderThemeSlots() {
 }
 
 // Build the SVG preview. Faithfully mirrors the firmware's normal
-// display mode (display_render in display.c) at native 284×76 — same
-// text y-coords, same tab-dot geometry, same 3-pixel-wide ARM
+// display mode (display_render in display.c) at native 284×76 —
+// same text y-coords, same tab-dot geometry, same 3-pixel-wide ARM
 // stripe columns, same 2-pixel context bar at the bottom.
 //
-// Slot coverage in this preview:
-//   0 Session       — top text line
-//   1 Task          — second + third text lines
-//   3 Alert         — filled square overlaid on tab[0] (firmware
-//                     draws this when a tab has an unread alert)
-//   4 CtxBar        — 2px bar at the very bottom
-//   5 ARM (YOLO)    — 3-pixel diagonal-dash columns on left & right
-//   6 TabActive     — filled circle, +1 radius, on tab[1]
-//   7 TabInactive   — circles on tab[2..5]
-//
-// Slot 2 (TaskEmpty) only shows up when no task is active — the
-// swatch in the slot list is its visualization. Slots 8 & 9 belong
-// to the softkey overlay, which gets its own preview below.
+// The main preview has an "Active task" / "Idle" toggle so the
+// user can see how the TaskEmpty slot (slot 2) renders as a
+// centered "No active task" placeholder. The alert-overlay preview
+// below shows the perimeter alert frame and alert text styling.
 const ARM_STRIPE_W = 3;     // YOLO_STRIPE_W from display.c
 const ARM_STRIPE_P = 6;     // YOLO_STRIPE_P from display.c
+
+// Toggle state for the main preview. Flipped by the
+// `.theme-preview-toggle` buttons; nothing else reads it.
+let previewIdle = false;
+
+// Demo strings — generic enough to not look like a snapshot of the
+// developer's current project, specific enough to be representative.
+const DEMO_SESSION = 'my-project';
+const DEMO_TASK    = 'Editing files…';
+const DEMO_TASK2   = 'src/main.rs';
+const DEMO_ALERT_SESSION = 'my-project';
+const DEMO_ALERT_TEXT_L1 = 'Claude is waiting for';
+const DEMO_ALERT_TEXT_L2 = 'your input';
 
 // Build pixels of one ARM-stripe tile: a 3×6 pattern that, when
 // repeated vertically and mirrored to the right edge, exactly
@@ -1154,6 +1180,23 @@ function tabCenters(n) {
   return out;
 }
 
+// Common SVG fragment: black canvas + ARM stripes on both edges,
+// using a pattern referenced by `patternId`.
+function previewBackground(armCss, patternId) {
+  return `
+    <defs>
+      <pattern id="${patternId}" x="0" y="0" width="${ARM_STRIPE_W}" height="${ARM_STRIPE_P}" patternUnits="userSpaceOnUse">
+        ${armPatternRects(armCss)}
+      </pattern>
+    </defs>
+    <rect x="0" y="0" width="284" height="76" fill="#000"/>
+    <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#${patternId})"/>
+    <g transform="translate(284,0) scale(-1,1)">
+      <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#${patternId})"/>
+    </g>
+  `;
+}
+
 function renderThemePreview() {
   const svg = $('#theme-preview');
   const c = id => findSlot(themeLive, id);
@@ -1161,6 +1204,7 @@ function renderThemePreview() {
 
   const sessionCss     = cssFor(0);
   const taskCss        = cssFor(1);
+  const taskEmptyCss   = cssFor(2);
   const alertCss       = cssFor(3);
   const ctxBarCss      = cssFor(4);
   const armCss         = cssFor(5);
@@ -1184,47 +1228,36 @@ function renderThemePreview() {
     `<circle cx="${tabs[5]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
   ];
 
-  // Context bar at the very bottom, ~50% width (mimics ~50% usage).
+  // Context bar at the very bottom, ~50% width.
   const ctxBarW = 142;
 
-  // Text positions match display_render() exactly:
-  //   font_large (Terminus Bold 18) at y=2 for the session line,
-  //   font_small (Terminus Reg 14)  at y=25, y=42 for task / task2.
-  // Browsers don't ship Terminus, so we use ui-monospace and pick
-  // font-sizes that approximate the firmware's footprint.
+  // Text block depending on the toggle. Firmware draws task at
+  // y=25 + task2 at y=42 when both are present; placeholder at
+  // y=33 in the empty branch.
+  const textSvg = previewIdle
+    ? `<text x="142" y="33" fill="${taskEmptyCss}"
+             text-anchor="middle" dominant-baseline="hanging"
+             font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+             font-size="11">No active task</text>`
+    : `<text x="142" y="25" fill="${taskCss}"
+             text-anchor="middle" dominant-baseline="hanging"
+             font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+             font-size="11">${DEMO_TASK}</text>
+       <text x="142" y="42" fill="${taskCss}"
+             text-anchor="middle" dominant-baseline="hanging"
+             font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+             font-size="11">${DEMO_TASK2}</text>`;
+
   svg.innerHTML = `
-    <defs>
-      <pattern id="armPattern" x="0" y="0" width="${ARM_STRIPE_W}" height="${ARM_STRIPE_P}" patternUnits="userSpaceOnUse">
-        ${armPatternRects(armCss)}
-      </pattern>
-    </defs>
+    ${previewBackground(armCss, 'armPatternMain')}
 
-    <!-- Black canvas -->
-    <rect x="0" y="0" width="284" height="76" fill="#000"/>
-
-    <!-- ARM-mode stripes: left & right 3px columns -->
-    <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#armPattern)"/>
-    <g transform="translate(284,0) scale(-1,1)">
-      <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#armPattern)"/>
-    </g>
-
-    <!-- Session line — large bold, centered at top, y=2 (top of glyph) -->
+    <!-- Session line — large bold, centered at top, y=2 -->
     <text x="142" y="2" fill="${sessionCss}"
           text-anchor="middle" dominant-baseline="hanging"
           font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-          font-size="14" font-weight="bold">Plan Hindsight memory-st&#8230;</text>
+          font-size="14" font-weight="bold">${DEMO_SESSION}</text>
 
-    <!-- Task line — small, centered, y=25 (top of glyph) -->
-    <text x="142" y="25" fill="${taskCss}"
-          text-anchor="middle" dominant-baseline="hanging"
-          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-          font-size="11">Thinking (xhigh)&#8230; &#183; 2s</text>
-
-    <!-- Task2 line — small, centered, y=42 -->
-    <text x="142" y="42" fill="${taskCss}"
-          text-anchor="middle" dominant-baseline="hanging"
-          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-          font-size="11">Stage F7 files and show stat</text>
+    ${textSvg}
 
     <!-- Tab dots row at y=65 -->
     ${tabSvg.join('')}
@@ -1233,68 +1266,72 @@ function renderThemePreview() {
     <rect x="0" y="74" width="${ctxBarW}" height="2" fill="${ctxBarCss}"/>
   `;
 
-  renderSoftkeyOverlayPreview(cssFor);
+  renderAlertOverlayPreview(cssFor);
 }
 
-// Softkey overlay preview — mirrors display_render_softkeys() in
-// display.c. Three rows of dot identifiers + centered labels, two
-// thin horizontal separators between them, ARM stripes on the
-// edges. Lets the user see slots 8 (SoftkeyLabel) and 9
-// (SoftkeySep) in their actual context, since they never appear in
-// the main display mode.
-function renderSoftkeyOverlayPreview(cssFor) {
-  const svg = $('#theme-softkey-preview');
+// Alert overlay preview — mirrors display_render_alert_overlay()
+// in display.c. Five concentric THEME_ALERT rings around the
+// perimeter (firmware animates them; we show the peak frame),
+// session at y=2 in THEME_SESSION, alert text wrapped over y=25 /
+// y=42 in THEME_ALERT, plus the tab row drawn the same way as in
+// main mode (alerted tabs become THEME_ALERT squares).
+function renderAlertOverlayPreview(cssFor) {
+  const svg = $('#theme-alert-preview');
   if (!svg) return;
 
-  const armCss   = cssFor(5);
-  const labelCss = cssFor(8);
-  const sepCss   = cssFor(9);
+  const sessionCss     = cssFor(0);
+  const alertCss       = cssFor(3);
+  const armCss         = cssFor(5);
+  const tabActiveCss   = cssFor(6);
+  const tabInactiveCss = cssFor(7);
 
-  const lineH = 76 / 3;           // ≈25.33 — `DISPLAY_HEIGHT / 3` from firmware
-  const sepMargin = 284 / 20;     // ≈14.2 — `DISPLAY_WIDTH / 20`
-  const dotX = ARM_STRIPE_W + 2;  // mimics `yolo ? (YOLO_STRIPE_W + 2) : 4`
-
-  const dots   = ['·', '··', '···'];
-  const labels = ['MUTE', 'TASKS', 'MENU'];
-
-  const rows = [];
-  for (let i = 0; i < 3; i++) {
-    const yTop = i * lineH + (lineH - 14) / 2;
-    rows.push(
-      // dot identifier, left-aligned
-      `<text x="${dotX}" y="${yTop}" fill="${labelCss}"
-             dominant-baseline="hanging" font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-             font-size="14" font-weight="bold">${dots[i]}</text>`,
-      // label, centered in remaining area
-      `<text x="142" y="${yTop}" fill="${labelCss}"
-             text-anchor="middle" dominant-baseline="hanging"
-             font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-             font-size="14" font-weight="bold">${labels[i]}</text>`,
+  // Five concentric rings; outer→inner brightness from firmware's
+  // base_v[] array, scaled to opacity. The 60/255 floor matches
+  // the animated minimum.
+  const ringOpacity = [1.0, 0.71, 0.47, 0.27, 0.24];
+  const rings = [];
+  for (let i = 0; i < 5; i++) {
+    rings.push(
+      `<rect x="${i + 0.5}" y="${i + 0.5}" width="${283 - 2 * i}" height="${75 - 2 * i}"
+             fill="none" stroke="${alertCss}" stroke-width="1" opacity="${ringOpacity[i]}"/>`,
     );
   }
 
+  // Tabs: same layout as main mode. tab[0] is the alerted one
+  // (filled square in THEME_ALERT — same code path the firmware
+  // uses for alerts in either mode).
+  const tabs = tabCenters(6);
+  const tabSvg = [
+    `<rect x="${tabs[0] - 4}" y="61" width="8" height="8" fill="${alertCss}"/>`,
+    `<circle cx="${tabs[1]}" cy="65" r="5" fill="${tabActiveCss}"/>`,
+    `<circle cx="${tabs[2]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+    `<circle cx="${tabs[3]}" cy="65" r="4" fill="none" stroke="${tabInactiveCss}" stroke-width="1"/>`,
+    `<circle cx="${tabs[4]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+    `<circle cx="${tabs[5]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+  ];
+
   svg.innerHTML = `
-    <defs>
-      <pattern id="armPatternSk" x="0" y="0" width="${ARM_STRIPE_W}" height="${ARM_STRIPE_P}" patternUnits="userSpaceOnUse">
-        ${armPatternRects(armCss)}
-      </pattern>
-    </defs>
+    ${previewBackground(armCss, 'armPatternAlert')}
 
-    <rect x="0" y="0" width="284" height="76" fill="#000"/>
+    ${rings.join('')}
 
-    <!-- ARM stripes (left & right) -->
-    <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#armPatternSk)"/>
-    <g transform="translate(284,0) scale(-1,1)">
-      <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#armPatternSk)"/>
-    </g>
+    <!-- Session name -->
+    <text x="142" y="2" fill="${sessionCss}"
+          text-anchor="middle" dominant-baseline="hanging"
+          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+          font-size="14" font-weight="bold">${DEMO_ALERT_SESSION}</text>
 
-    <!-- Two horizontal separators at the row boundaries -->
-    <line x1="${sepMargin}" y1="${lineH}" x2="${284 - sepMargin}" y2="${lineH}"
-          stroke="${sepCss}" stroke-width="1"/>
-    <line x1="${sepMargin}" y1="${lineH * 2}" x2="${284 - sepMargin}" y2="${lineH * 2}"
-          stroke="${sepCss}" stroke-width="1"/>
+    <!-- Alert text — two wrapped lines in THEME_ALERT -->
+    <text x="142" y="25" fill="${alertCss}"
+          text-anchor="middle" dominant-baseline="hanging"
+          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+          font-size="11">${DEMO_ALERT_TEXT_L1}</text>
+    <text x="142" y="42" fill="${alertCss}"
+          text-anchor="middle" dominant-baseline="hanging"
+          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+          font-size="11">${DEMO_ALERT_TEXT_L2}</text>
 
-    ${rows.join('')}
+    ${tabSvg.join('')}
   `;
 }
 
@@ -1457,6 +1494,15 @@ async function resetThemeOnDevice() {
 
 $('#theme-save').addEventListener('click', saveThemeToDevice);
 $('#theme-reset').addEventListener('click', resetThemeOnDevice);
+document.querySelectorAll('.theme-preview-toggle .toggle-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    previewIdle = btn.dataset.mode === 'idle';
+    document.querySelectorAll('.theme-preview-toggle .toggle-btn').forEach(b => {
+      b.classList.toggle('is-active', b.dataset.mode === btn.dataset.mode);
+    });
+    if (themeLive) renderThemePreview();
+  });
+});
 $('#iro-close').addEventListener('click', closeIroPicker);
 $('#iro-overlay').addEventListener('click', e => {
   if (e.target.id === 'iro-overlay') closeIroPicker();
