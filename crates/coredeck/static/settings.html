@@ -211,6 +211,10 @@
     image-rendering: pixelated;
     shape-rendering: crispEdges;
   }
+  /* Secondary preview (softkey overlay) — half-size of the main one. */
+  .theme-preview-small {
+    width: 426px;
+  }
   .theme-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   .theme-help { color: var(--muted); font-size: 12px; margin: 0; }
   .theme-help code { background: var(--panel-2); padding: 1px 4px; border-radius: 2px; }
@@ -326,8 +330,10 @@
     <div class="theme-layout" id="theme-body" style="display:none">
       <div class="theme-slots" id="theme-slots"></div>
       <div class="theme-preview-wrap">
-        <div class="theme-preview-label">Live preview (284×76, scaled)</div>
+        <div class="theme-preview-label">Live preview &mdash; main display (284&times;76, 2&times;)</div>
         <svg class="theme-preview" id="theme-preview" viewBox="0 0 284 76" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="theme-preview-label">Softkey overlay (shown while a knob is held)</div>
+        <svg class="theme-preview theme-preview-small" id="theme-softkey-preview" viewBox="0 0 284 76" preserveAspectRatio="xMidYMid meet"></svg>
         <div class="theme-actions">
           <button id="theme-save" class="primary">Save to device</button>
           <button id="theme-reset" class="danger">Reset to defaults</button>
@@ -1096,69 +1102,199 @@ function renderThemeSlots() {
   }
 }
 
-// Build the SVG preview. Mirrors the firmware's display layout in
-// rough proportion — session line up top, task lines below, tab
-// dots toward the bottom-right, context bar at the very bottom,
-// ARM-mode stripes overlaid diagonally, alert frame around the
-// perimeter, softkey separators near the bottom edge. Not pixel-
-// accurate to the firmware but shows every theme slot at once so
-// the user can judge interactions between them.
+// Build the SVG preview. Faithfully mirrors the firmware's normal
+// display mode (display_render in display.c) at native 284×76 — same
+// text y-coords, same tab-dot geometry, same 3-pixel-wide ARM
+// stripe columns, same 2-pixel context bar at the bottom.
+//
+// Slot coverage in this preview:
+//   0 Session       — top text line
+//   1 Task          — second + third text lines
+//   3 Alert         — filled square overlaid on tab[0] (firmware
+//                     draws this when a tab has an unread alert)
+//   4 CtxBar        — 2px bar at the very bottom
+//   5 ARM (YOLO)    — 3-pixel diagonal-dash columns on left & right
+//   6 TabActive     — filled circle, +1 radius, on tab[1]
+//   7 TabInactive   — circles on tab[2..5]
+//
+// Slot 2 (TaskEmpty) only shows up when no task is active — the
+// swatch in the slot list is its visualization. Slots 8 & 9 belong
+// to the softkey overlay, which gets its own preview below.
+const ARM_STRIPE_W = 3;     // YOLO_STRIPE_W from display.c
+const ARM_STRIPE_P = 6;     // YOLO_STRIPE_P from display.c
+
+// Build pixels of one ARM-stripe tile: a 3×6 pattern that, when
+// repeated vertically and mirrored to the right edge, exactly
+// matches `(i + y) % 6 < 3` from draw_yolo_stripes().
+function armPatternRects(armCss) {
+  const rects = [];
+  for (let y = 0; y < ARM_STRIPE_P; y++) {
+    for (let x = 0; x < ARM_STRIPE_W; x++) {
+      if (((x + y) % ARM_STRIPE_P) < (ARM_STRIPE_P / 2)) {
+        rects.push(`<rect x="${x}" y="${y}" width="1" height="1" fill="${armCss}"/>`);
+      }
+    }
+  }
+  return rects.join('');
+}
+
+// Tab dot x-centers for `n` tabs, mirroring draw_tabs() in
+// display.c: margin from edges depends on count, spacing is even.
+function tabCenters(n) {
+  const W = 284;
+  let margin;
+  if (n === 1) return [W / 2];
+  if (n === 2) margin = W / 4;
+  else if (n === 3) margin = W / 6;
+  else margin = 10 + ARM_STRIPE_W + 1;  // 14 — same as firmware with ARM on
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push(margin + (i * (W - 2 * margin)) / (n - 1));
+  }
+  return out;
+}
+
 function renderThemePreview() {
   const svg = $('#theme-preview');
   const c = id => findSlot(themeLive, id);
   const cssFor = id => { const x = c(id); return hsvDeviceToCss(x.hue, x.sat, x.val); };
-  // ARM-mode stripes — diagonal pattern across the whole canvas.
-  // Repeat a thin line every 14px at 45°.
-  const stripes = [];
-  for (let i = -76; i < 284; i += 14) {
-    stripes.push(`<line x1="${i}" y1="0" x2="${i + 76}" y2="76" stroke="${cssFor(5)}" stroke-width="2" opacity="0.35"/>`);
-  }
-  // Alert frame — 2px border inset 1px from edges.
-  const alertCss = cssFor(3);
-  // Softkey separators — two horizontal lines near the bottom-right
-  // softkey overlay area (firmware draws these to right of dots).
-  const sepCss = cssFor(9);
-  // Tab dots — three near the right edge.
-  const activeCss = cssFor(6);
-  const inactiveCss = cssFor(7);
-  // Softkey dot identifiers (single-color "●●●" stand-ins)
+
+  const sessionCss     = cssFor(0);
+  const taskCss        = cssFor(1);
+  const alertCss       = cssFor(3);
+  const ctxBarCss      = cssFor(4);
+  const armCss         = cssFor(5);
+  const tabActiveCss   = cssFor(6);
+  const tabInactiveCss = cssFor(7);
+
+  // 6 tabs: alert on [0], active on [1], the rest demonstrating
+  // both filled (loaded/working) and outlined (inactive) variants.
+  const tabs = tabCenters(6);
+  const tabSvg = [
+    // tab[0] alert — filled square, side = 2*base_radius
+    `<rect x="${tabs[0] - 4}" y="61" width="8" height="8" fill="${alertCss}"/>`,
+    // tab[1] active — filled circle, r = base+1 (firmware: `if (is_active) r++;`)
+    `<circle cx="${tabs[1]}" cy="65" r="5" fill="${tabActiveCss}"/>`,
+    // tab[2] inactive loaded — filled circle
+    `<circle cx="${tabs[2]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+    // tab[3] inactive idle — outline circle
+    `<circle cx="${tabs[3]}" cy="65" r="4" fill="none" stroke="${tabInactiveCss}" stroke-width="1"/>`,
+    // tab[4..5] inactive filled
+    `<circle cx="${tabs[4]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+    `<circle cx="${tabs[5]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+  ];
+
+  // Context bar at the very bottom, ~50% width (mimics ~50% usage).
+  const ctxBarW = 142;
+
+  // Text positions match display_render() exactly:
+  //   font_large (Terminus Bold 18) at y=2 for the session line,
+  //   font_small (Terminus Reg 14)  at y=25, y=42 for task / task2.
+  // Browsers don't ship Terminus, so we use ui-monospace and pick
+  // font-sizes that approximate the firmware's footprint.
+  svg.innerHTML = `
+    <defs>
+      <pattern id="armPattern" x="0" y="0" width="${ARM_STRIPE_W}" height="${ARM_STRIPE_P}" patternUnits="userSpaceOnUse">
+        ${armPatternRects(armCss)}
+      </pattern>
+    </defs>
+
+    <!-- Black canvas -->
+    <rect x="0" y="0" width="284" height="76" fill="#000"/>
+
+    <!-- ARM-mode stripes: left & right 3px columns -->
+    <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#armPattern)"/>
+    <g transform="translate(284,0) scale(-1,1)">
+      <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#armPattern)"/>
+    </g>
+
+    <!-- Session line — large bold, centered at top, y=2 (top of glyph) -->
+    <text x="142" y="2" fill="${sessionCss}"
+          text-anchor="middle" dominant-baseline="hanging"
+          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+          font-size="14" font-weight="bold">Plan Hindsight memory-st&#8230;</text>
+
+    <!-- Task line — small, centered, y=25 (top of glyph) -->
+    <text x="142" y="25" fill="${taskCss}"
+          text-anchor="middle" dominant-baseline="hanging"
+          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+          font-size="11">Thinking (xhigh)&#8230; &#183; 2s</text>
+
+    <!-- Task2 line — small, centered, y=42 -->
+    <text x="142" y="42" fill="${taskCss}"
+          text-anchor="middle" dominant-baseline="hanging"
+          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+          font-size="11">Stage F7 files and show stat</text>
+
+    <!-- Tab dots row at y=65 -->
+    ${tabSvg.join('')}
+
+    <!-- Context usage bar: 2px tall at the very bottom -->
+    <rect x="0" y="74" width="${ctxBarW}" height="2" fill="${ctxBarCss}"/>
+  `;
+
+  renderSoftkeyOverlayPreview(cssFor);
+}
+
+// Softkey overlay preview — mirrors display_render_softkeys() in
+// display.c. Three rows of dot identifiers + centered labels, two
+// thin horizontal separators between them, ARM stripes on the
+// edges. Lets the user see slots 8 (SoftkeyLabel) and 9
+// (SoftkeySep) in their actual context, since they never appear in
+// the main display mode.
+function renderSoftkeyOverlayPreview(cssFor) {
+  const svg = $('#theme-softkey-preview');
+  if (!svg) return;
+
+  const armCss   = cssFor(5);
   const labelCss = cssFor(8);
+  const sepCss   = cssFor(9);
+
+  const lineH = 76 / 3;           // ≈25.33 — `DISPLAY_HEIGHT / 3` from firmware
+  const sepMargin = 284 / 20;     // ≈14.2 — `DISPLAY_WIDTH / 20`
+  const dotX = ARM_STRIPE_W + 2;  // mimics `yolo ? (YOLO_STRIPE_W + 2) : 4`
+
+  const dots   = ['·', '··', '···'];
+  const labels = ['MUTE', 'TASKS', 'MENU'];
+
+  const rows = [];
+  for (let i = 0; i < 3; i++) {
+    const yTop = i * lineH + (lineH - 14) / 2;
+    rows.push(
+      // dot identifier, left-aligned
+      `<text x="${dotX}" y="${yTop}" fill="${labelCss}"
+             dominant-baseline="hanging" font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+             font-size="14" font-weight="bold">${dots[i]}</text>`,
+      // label, centered in remaining area
+      `<text x="142" y="${yTop}" fill="${labelCss}"
+             text-anchor="middle" dominant-baseline="hanging"
+             font-family="ui-monospace, 'SF Mono', Menlo, monospace"
+             font-size="14" font-weight="bold">${labels[i]}</text>`,
+    );
+  }
 
   svg.innerHTML = `
-    <!-- ARM-mode diagonal stripes (firmware slot is still THEME_YOLO) -->
-    <g aria-label="ARM stripes">${stripes.join('')}</g>
+    <defs>
+      <pattern id="armPatternSk" x="0" y="0" width="${ARM_STRIPE_W}" height="${ARM_STRIPE_P}" patternUnits="userSpaceOnUse">
+        ${armPatternRects(armCss)}
+      </pattern>
+    </defs>
 
-    <!-- Alert frame (visible regardless of state — pure preview) -->
-    <rect x="1" y="1" width="282" height="74" fill="none"
-          stroke="${alertCss}" stroke-width="2" opacity="0.85"/>
+    <rect x="0" y="0" width="284" height="76" fill="#000"/>
 
-    <!-- Session line -->
-    <text x="8" y="17" font-family="ui-monospace, Menlo, monospace"
-          font-size="11" fill="${cssFor(0)}">my-session ↦</text>
+    <!-- ARM stripes (left & right) -->
+    <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#armPatternSk)"/>
+    <g transform="translate(284,0) scale(-1,1)">
+      <rect x="0" y="0" width="${ARM_STRIPE_W}" height="76" fill="url(#armPatternSk)"/>
+    </g>
 
-    <!-- Task line -->
-    <text x="8" y="33" font-family="ui-monospace, Menlo, monospace"
-          font-size="11" fill="${cssFor(1)}">Building tests…</text>
+    <!-- Two horizontal separators at the row boundaries -->
+    <line x1="${sepMargin}" y1="${lineH}" x2="${284 - sepMargin}" y2="${lineH}"
+          stroke="${sepCss}" stroke-width="1"/>
+    <line x1="${sepMargin}" y1="${lineH * 2}" x2="${284 - sepMargin}" y2="${lineH * 2}"
+          stroke="${sepCss}" stroke-width="1"/>
 
-    <!-- No-active-task placeholder (shown for slot 2 demo) -->
-    <text x="8" y="47" font-family="ui-monospace, Menlo, monospace"
-          font-size="9" fill="${cssFor(2)}">No active task</text>
-
-    <!-- Tab dots — bottom right cluster (active circle + 2 inactive) -->
-    <circle cx="232" cy="62" r="4" fill="${activeCss}"/>
-    <circle cx="246" cy="62" r="4" fill="none" stroke="${inactiveCss}" stroke-width="1"/>
-    <circle cx="260" cy="62" r="4" fill="${inactiveCss}"/>
-
-    <!-- Softkey labels (placeholder dots near the bottom-left) -->
-    <text x="8" y="69" font-family="ui-monospace, Menlo, monospace"
-          font-size="10" fill="${labelCss}">● ● ●</text>
-
-    <!-- Softkey separators (horizontal lines bottom-right area) -->
-    <line x1="200" y1="50" x2="276" y2="50" stroke="${sepCss}" stroke-width="1"/>
-    <line x1="200" y1="56" x2="276" y2="56" stroke="${sepCss}" stroke-width="1"/>
-
-    <!-- Context usage bar (very bottom, ~60% width) -->
-    <rect x="0" y="74" width="170" height="2" fill="${cssFor(4)}"/>
+    ${rows.join('')}
   `;
 }
 
