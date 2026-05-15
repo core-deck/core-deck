@@ -341,7 +341,7 @@ for (const c of list) {{
 fn parse_kwin_script_id(reply: &str) -> Option<i64> {
     let trimmed = reply.trim();
     let inner = trimmed.strip_prefix('(')?.strip_suffix(",)")?.trim();
-    inner.rsplit_whitespace().next()?.parse().ok()
+    inner.split_whitespace().next_back()?.parse().ok()
 }
 
 #[cfg(not(target_os = "linux"))]
