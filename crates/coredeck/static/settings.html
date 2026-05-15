@@ -151,18 +151,23 @@
   .data-input { flex: 1; min-width: 0; }
   .checkbox-row { display: flex; align-items: center; gap: 6px; }
 
-  /* Display theme section */
+  /* Display theme section. Flex (not grid) so the preview column
+     has an explicit fixed width and never blows up the section
+     when the SVG's intrinsic-size negotiation gets confused inside
+     a `1fr / auto` track. */
   .theme-status { color: var(--muted); font-size: 13px; }
   .theme-layout {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(280px, auto);
+    display: flex;
     gap: 24px;
-    align-items: start;
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
-  @media (max-width: 720px) {
-    .theme-layout { grid-template-columns: 1fr; }
+  .theme-slots {
+    display: grid;
+    gap: 6px;
+    flex: 1 1 320px;
+    min-width: 280px;
   }
-  .theme-slots { display: grid; gap: 6px; }
   .theme-slot {
     display: grid;
     grid-template-columns: 28px 1fr auto;
@@ -185,19 +190,24 @@
     color: var(--muted); font-size: 11px;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
+  /* Preview column: fixed width = 2× device (568×152 px). Don't
+     stretch — the device is 284×76, 2× is the closest "honest"
+     scale that still fits comfortably alongside the slot list. */
   .theme-preview-wrap {
     display: flex; flex-direction: column; gap: 10px;
-    min-width: 280px;
+    flex: 0 0 568px;
+    max-width: 100%;
   }
   .theme-preview-label { color: var(--muted); font-size: 12px; }
   .theme-preview {
-    width: 100%;
+    display: block;
+    width: 568px;
+    max-width: 100%;
     height: auto;
+    aspect-ratio: 284 / 76;
     background: #000;
     border: 1px solid var(--border);
     border-radius: 4px;
-    /* Crisp pixel rendering — the device is a small panel, so don't
-       smooth the SVG. */
     image-rendering: pixelated;
     shape-rendering: crispEdges;
   }
@@ -1029,7 +1039,10 @@ const THEME_SLOTS = [
   { id: 2, name: 'No-task placeholder' },
   { id: 3, name: 'Alert frame & text' },
   { id: 4, name: 'Context usage bar' },
-  { id: 5, name: 'YOLO hazard stripes' },
+  // UI label is "ARM" but the firmware slot is still THEME_YOLO —
+  // the stripes are drawn whenever the device is in auto-approve
+  // mode, which we now call "ARM" in user-facing surfaces.
+  { id: 5, name: 'ARM hazard stripes' },
   { id: 6, name: 'Active tab' },
   { id: 7, name: 'Inactive tab' },
   { id: 8, name: 'Softkey labels' },
@@ -1086,7 +1099,7 @@ function renderThemeSlots() {
 // Build the SVG preview. Mirrors the firmware's display layout in
 // rough proportion — session line up top, task lines below, tab
 // dots toward the bottom-right, context bar at the very bottom,
-// YOLO stripes overlaid diagonally, alert frame around the
+// ARM-mode stripes overlaid diagonally, alert frame around the
 // perimeter, softkey separators near the bottom edge. Not pixel-
 // accurate to the firmware but shows every theme slot at once so
 // the user can judge interactions between them.
@@ -1094,7 +1107,7 @@ function renderThemePreview() {
   const svg = $('#theme-preview');
   const c = id => findSlot(themeLive, id);
   const cssFor = id => { const x = c(id); return hsvDeviceToCss(x.hue, x.sat, x.val); };
-  // YOLO stripes — diagonal pattern across the whole canvas.
+  // ARM-mode stripes — diagonal pattern across the whole canvas.
   // Repeat a thin line every 14px at 45°.
   const stripes = [];
   for (let i = -76; i < 284; i += 14) {
@@ -1112,8 +1125,8 @@ function renderThemePreview() {
   const labelCss = cssFor(8);
 
   svg.innerHTML = `
-    <!-- YOLO diagonal stripes -->
-    <g aria-label="YOLO stripes">${stripes.join('')}</g>
+    <!-- ARM-mode diagonal stripes (firmware slot is still THEME_YOLO) -->
+    <g aria-label="ARM stripes">${stripes.join('')}</g>
 
     <!-- Alert frame (visible regardless of state — pure preview) -->
     <rect x="1" y="1" width="282" height="74" fill="none"
