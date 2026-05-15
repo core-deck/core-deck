@@ -361,10 +361,9 @@
           <button id="theme-reset" class="danger">Reset to defaults</button>
         </div>
         <p class="theme-help">
-          Changes preview on the device instantly via <code>save=false</code>.
-          Clicking <strong>Save to device</strong> persists every modified slot
-          to EEPROM so the colors survive a power cycle. <strong>Reset</strong>
-          restores the firmware defaults.
+          Edits stay local until you click <strong>Save to device</strong>,
+          which writes every modified slot to EEPROM so the colors survive a
+          power cycle. <strong>Reset</strong> restores the firmware defaults.
         </p>
       </div>
     </div>
@@ -1055,12 +1054,14 @@ function escapeHtml(s) {
 // Talks to /api/theme (GET to dump, PUT /api/theme/{slot} to set one
 // slot, POST /api/theme/reset to revert). Color picker is iro.js,
 // loaded lazily from a CDN the first time the user opens it. We
-// keep two copies of the palette: `themeLive` is what's currently
-// on the device's display (updated on every drag event via PUT
-// save=false), `themeSaved` is what's persisted to EEPROM (updated
-// when the user clicks "Save to device" or on initial GET). The
-// "Save" button diffs the two and re-PUTs the dirty slots with
-// save=true.
+// keep two copies of the palette: `themeLive` is what the user is
+// currently editing in the browser (updates immediately on every
+// drag, no network), `themeSaved` is what's persisted to EEPROM
+// (updated on initial GET and after a successful "Save to device"
+// click). The "Save" button diffs the two and PUTs the dirty
+// slots with save=true. Earlier versions live-pushed every drag
+// frame with save=false; that flooded HID and produced Timeout
+// toasts faster than the UI could render them.
 const THEME_SLOTS = [
   { id: 0, name: 'Session line' },
   { id: 1, name: 'Task lines' },
@@ -1411,15 +1412,13 @@ async function openIroPicker(slotId) {
   };
   updateHsvLabel();
 
-  // Live-push on every change. Debounce slightly so dragging the
-  // wheel doesn't queue 50 PUTs per second. The firmware is fine
-  // with bursts but the EEPROM-save guard already filters them on
-  // save=false; this is just to be polite over USB.
-  let pendingTimer = null;
+  // Update the local mirror + on-screen preview on every change.
+  // Nothing goes to the device until the user hits "Save to
+  // device" — pushing per-frame over HID is too lossy and the
+  // resulting Timeout toasts swamp the UI.
   iroPicker.on('color:change', () => {
     updateHsvLabel();
-    if (pendingTimer) clearTimeout(pendingTimer);
-    pendingTimer = setTimeout(() => pushSlotPreview(slotId, iroPicker.color.hsv), 40);
+    applySlotChangeLocally(slotId, iroPicker.color.hsv);
   });
 
   $('#iro-overlay').style.display = '';
@@ -1434,21 +1433,19 @@ function closeIroPicker() {
   iroCurrentSlot = null;
 }
 
-async function pushSlotPreview(slotId, hsv) {
+// iro.js gives us 0-360 / 0-100 / 0-100 — convert to the firmware's
+// 0-255 domain, update the in-memory palette, and re-render the
+// swatch row + SVG preview. No network traffic here; the device
+// only gets the change on "Save to device".
+function applySlotChangeLocally(slotId, hsv) {
   const hue = Math.round((hsv.h / 360) * 255);
   const sat = Math.round((hsv.s / 100) * 255);
   const val = Math.round((hsv.v / 100) * 255);
-  try {
-    await api('PUT', `/api/theme/${slotId}`, { hue, sat, val, save: false });
-    // Update local mirror + re-render swatch + preview.
-    const c = themeLive.find(c => c.slot === slotId);
-    if (c) { c.hue = hue; c.sat = sat; c.val = val; }
-    else { themeLive.push({ slot: slotId, hue, sat, val }); }
-    renderThemeSlots();
-    renderThemePreview();
-  } catch (e) {
-    toast(`set theme failed: ${e.message}`, 'err');
-  }
+  const c = themeLive.find(c => c.slot === slotId);
+  if (c) { c.hue = hue; c.sat = sat; c.val = val; }
+  else { themeLive.push({ slot: slotId, hue, sat, val }); }
+  renderThemeSlots();
+  renderThemePreview();
 }
 
 async function saveThemeToDevice() {
