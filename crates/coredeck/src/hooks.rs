@@ -1049,13 +1049,17 @@ async fn handle_post_tool_use(state: &DaemonState, event: &HookEvent) {
     }
 }
 
-/// PermissionRequest: if YOLO is enabled, auto-approve immediately
-/// (except ExitPlanMode — the user should explicitly approve the plan).
-/// Otherwise, ship the request to the device as an interactive alert and
-/// park the HTTP response on a oneshot. The next HID input from the
-/// device resolves it (Esc / Ctrl-C → deny, anything else → allow).
-/// Falls back to Claude's own terminal prompt on timeout, missing
-/// device, or when another alert is already live.
+/// PermissionRequest: for user-input tools (ExitPlanMode,
+/// AskUserQuestion) the hook always passes through to Claude's
+/// terminal prompt — Allow/Deny corrupt the turn there. For every
+/// other tool, if Auto-approve is enabled and the wrapper is
+/// enrolled we approve immediately; if Auto-approve is on but the
+/// wrapper hasn't enrolled yet we surface an enrollment alert on
+/// the device; otherwise we ship the request to the device as a
+/// per-tool Allow/Deny alert and park the HTTP response on a
+/// oneshot until the user decides on the device or the timeout
+/// elapses. Falls back to Claude's own terminal prompt on timeout,
+/// missing device, or when another alert is already live.
 async fn handle_permission_request(
     state: &DaemonState,
     event: &HookEvent,
@@ -1093,15 +1097,33 @@ async fn handle_permission_request(
         }
     }
 
-    // YOLO gating, with three guardrails:
-    //   1. Tools whose whole purpose is to wait on the user
-    //      (`ExitPlanMode`, `AskUserQuestion`) never auto-approve —
-    //      "approving" them just lets Claude resume with an empty
-    //      answer, which silently corrupts the turn.
-    //   2. Only auto-approve while the device is actually connected.
+    // Tools whose whole purpose is to wait on the user
+    // (`ExitPlanMode`, `AskUserQuestion`) must never resolve through
+    // this hook — Allow lets Claude resume with an empty answer and
+    // silently corrupts the turn; Deny tells Claude the user said
+    // "no" and skips the question. Both are wrong. The only safe
+    // response is the empty-decision passthrough, which makes Claude
+    // fall back to its own terminal prompt (and, for
+    // AskUserQuestion, the `show_idle_alert` raised earlier from
+    // PreToolUse continues to display the question on the device).
+    //
+    // This is intentionally unconditional on YOLO / connected /
+    // enrollment — there's no combination of those where intercept
+    // would be correct for these tools.
+    let user_input_tool = alerts::is_user_input_tool(tool);
+    if user_input_tool {
+        info!(
+            tool,
+            "User-input tool — passing PermissionRequest to Claude's terminal prompt"
+        );
+        return Json(serde_json::json!({})).into_response();
+    }
+
+    // YOLO gating, with two guardrails:
+    //   1. Only auto-approve while the device is actually connected.
     //      A cable pull / USB flake drops the kill-switch out of reach,
     //      so we fall back to an explicit prompt.
-    //   3. Per-wrapper opt-in. Even with global YOLO on, only wrappers
+    //   2. Per-wrapper opt-in. Even with global YOLO on, only wrappers
     //      that have opted in (auto-opted on YOLO ON for the focused
     //      wrapper, or via Allow on a "YOLO {tool}?" prompt) get the
     //      silent treatment. Others see an opt-in alert on their first
@@ -1116,8 +1138,7 @@ async fn handle_permission_request(
         Some(sid) => crate::wrapper::wrapper_id_for_session(state, sid).await,
         None => None,
     };
-    let user_input_tool = alerts::is_user_input_tool(tool);
-    if yolo && connected && !user_input_tool {
+    if yolo && connected {
         let (opted_in, opted_out) = match &wrapper_id {
             Some(wid) => (
                 crate::wrapper::is_yolo_opted_in(state, wid).await,
@@ -1145,11 +1166,6 @@ async fn handle_permission_request(
     } else if yolo && !connected {
         info!(
             "YOLO armed but device disconnected — NOT auto-approving {}",
-            tool
-        );
-    } else if yolo {
-        info!(
-            "YOLO: NOT auto-approving {} — requires explicit approval",
             tool
         );
     }
