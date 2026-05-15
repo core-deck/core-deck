@@ -192,11 +192,19 @@
   }
   /* Preview column: fixed width = 2× device (568×152 px). Don't
      stretch — the device is 284×76, 2× is the closest "honest"
-     scale that still fits comfortably alongside the slot list. */
+     scale that still fits comfortably alongside the slot list.
+     align-items: center keeps the SVG and help text centered when
+     the column wraps below the slot list on narrow screens. */
   .theme-preview-wrap {
     display: flex; flex-direction: column; gap: 10px;
     flex: 0 0 568px;
     max-width: 100%;
+    align-items: center;
+  }
+  .theme-preview-wrap > .theme-preview-header,
+  .theme-preview-wrap > .theme-actions,
+  .theme-preview-wrap > .theme-help {
+    align-self: stretch;
   }
   .theme-preview-label { color: var(--muted); font-size: 12px; }
   .theme-preview {
@@ -347,15 +355,14 @@
       <div class="theme-slots" id="theme-slots"></div>
       <div class="theme-preview-wrap">
         <div class="theme-preview-header">
-          <span class="theme-preview-label">Live preview &mdash; main display (284&times;76, 2&times;)</span>
+          <span class="theme-preview-label">Live preview (284&times;76, 2&times;)</span>
           <span class="theme-preview-toggle">
-            <button type="button" class="toggle-btn is-active" id="preview-mode-active" data-mode="active">Active task</button>
-            <button type="button" class="toggle-btn" id="preview-mode-idle" data-mode="idle">Idle</button>
+            <button type="button" class="toggle-btn is-active" data-mode="active">Active task</button>
+            <button type="button" class="toggle-btn" data-mode="idle">Idle</button>
+            <button type="button" class="toggle-btn" data-mode="alert">Alert</button>
           </span>
         </div>
         <svg class="theme-preview" id="theme-preview" viewBox="0 0 284 76" preserveAspectRatio="xMidYMid meet"></svg>
-        <div class="theme-preview-label">Alert overlay (shown while alerts are pending)</div>
-        <svg class="theme-preview" id="theme-alert-preview" viewBox="0 0 284 76" preserveAspectRatio="xMidYMid meet"></svg>
         <div class="theme-actions">
           <button id="theme-save" class="primary">Save to device</button>
           <button id="theme-reset" class="danger">Reset to defaults</button>
@@ -1062,6 +1069,10 @@ function escapeHtml(s) {
 // slots with save=true. Earlier versions live-pushed every drag
 // frame with save=false; that flooded HID and produced Timeout
 // toasts faster than the UI could render them.
+// Slots 8 (SoftkeyLabel) and 9 (SoftkeySep) exist in the firmware
+// and protocol but aren't exposed here — the softkey overlay is
+// transient and doesn't warrant a tuning UI. Their values still
+// round-trip through GET/save unchanged.
 const THEME_SLOTS = [
   { id: 0, name: 'Session line' },
   { id: 1, name: 'Task lines' },
@@ -1074,8 +1085,6 @@ const THEME_SLOTS = [
   { id: 5, name: 'ARM hazard stripes' },
   { id: 6, name: 'Active tab' },
   { id: 7, name: 'Inactive tab' },
-  { id: 8, name: 'Softkey labels' },
-  { id: 9, name: 'Softkey separators' },
 ];
 let themeLive = null;     // [{slot, hue, sat, val}, ...]
 let themeSaved = null;
@@ -1125,21 +1134,19 @@ function renderThemeSlots() {
   }
 }
 
-// Build the SVG preview. Faithfully mirrors the firmware's normal
-// display mode (display_render in display.c) at native 284×76 —
-// same text y-coords, same tab-dot geometry, same 3-pixel-wide ARM
-// stripe columns, same 2-pixel context bar at the bottom.
-//
-// The main preview has an "Active task" / "Idle" toggle so the
-// user can see how the TaskEmpty slot (slot 2) renders as a
-// centered "No active task" placeholder. The alert-overlay preview
-// below shows the perimeter alert frame and alert text styling.
+// Build the SVG preview. Faithfully mirrors the firmware's display
+// modes at native 284×76 — same text y-coords, same tab-dot
+// geometry, same 3-pixel-wide ARM stripe columns. The three modes
+// correspond to display.c functions:
+//   'active' → display_render() with a live task
+//   'idle'   → display_render() with no task (placeholder branch)
+//   'alert'  → display_render_alert_overlay()
 const ARM_STRIPE_W = 3;     // YOLO_STRIPE_W from display.c
 const ARM_STRIPE_P = 6;     // YOLO_STRIPE_P from display.c
 
-// Toggle state for the main preview. Flipped by the
-// `.theme-preview-toggle` buttons; nothing else reads it.
-let previewIdle = false;
+// Which preview to render. One of 'active' | 'idle' | 'alert',
+// driven by the `.theme-preview-toggle` buttons.
+let previewMode = 'active';
 
 // Demo strings — generic enough to not look like a snapshot of the
 // developer's current project, specific enough to be representative.
@@ -1198,6 +1205,25 @@ function previewBackground(armCss, patternId) {
   `;
 }
 
+// Build the 6 tab indicators shared by every mode. tab[0] is an
+// alerted tab (filled THEME_ALERT square — the firmware overrides
+// the normal circle when a tab has an unread alert, in either
+// display mode), tab[1] is the focused/active tab (+1 radius),
+// the rest demo both filled and outlined inactive variants.
+function tabRowSvg(alertCss, tabActiveCss, tabInactiveCss) {
+  const tabs = tabCenters(6);
+  return [
+    `<rect x="${tabs[0] - 4}" y="61" width="8" height="8" fill="${alertCss}"/>`,
+    `<circle cx="${tabs[1]}" cy="65" r="5" fill="${tabActiveCss}"/>`,
+    `<circle cx="${tabs[2]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+    `<circle cx="${tabs[3]}" cy="65" r="4" fill="none" stroke="${tabInactiveCss}" stroke-width="1"/>`,
+    `<circle cx="${tabs[4]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+    `<circle cx="${tabs[5]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
+  ].join('');
+}
+
+const PREVIEW_TEXT_FONT = "ui-monospace, 'SF Mono', Menlo, monospace";
+
 function renderThemePreview() {
   const svg = $('#theme-preview');
   const c = id => findSlot(themeLive, id);
@@ -1212,127 +1238,67 @@ function renderThemePreview() {
   const tabActiveCss   = cssFor(6);
   const tabInactiveCss = cssFor(7);
 
-  // 6 tabs: alert on [0], active on [1], the rest demonstrating
-  // both filled (loaded/working) and outlined (inactive) variants.
-  const tabs = tabCenters(6);
-  const tabSvg = [
-    // tab[0] alert — filled square, side = 2*base_radius
-    `<rect x="${tabs[0] - 4}" y="61" width="8" height="8" fill="${alertCss}"/>`,
-    // tab[1] active — filled circle, r = base+1 (firmware: `if (is_active) r++;`)
-    `<circle cx="${tabs[1]}" cy="65" r="5" fill="${tabActiveCss}"/>`,
-    // tab[2] inactive loaded — filled circle
-    `<circle cx="${tabs[2]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
-    // tab[3] inactive idle — outline circle
-    `<circle cx="${tabs[3]}" cy="65" r="4" fill="none" stroke="${tabInactiveCss}" stroke-width="1"/>`,
-    // tab[4..5] inactive filled
-    `<circle cx="${tabs[4]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
-    `<circle cx="${tabs[5]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
-  ];
-
-  // Context bar at the very bottom, ~50% width.
-  const ctxBarW = 142;
-
-  // Text block depending on the toggle. Firmware draws task at
-  // y=25 + task2 at y=42 when both are present; placeholder at
-  // y=33 in the empty branch.
-  const textSvg = previewIdle
-    ? `<text x="142" y="33" fill="${taskEmptyCss}"
-             text-anchor="middle" dominant-baseline="hanging"
-             font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-             font-size="11">No active task</text>`
-    : `<text x="142" y="25" fill="${taskCss}"
-             text-anchor="middle" dominant-baseline="hanging"
-             font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-             font-size="11">${DEMO_TASK}</text>
-       <text x="142" y="42" fill="${taskCss}"
-             text-anchor="middle" dominant-baseline="hanging"
-             font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-             font-size="11">${DEMO_TASK2}</text>`;
+  // ── Mode-specific body ──
+  // 'alert': five concentric THEME_ALERT rings around the perimeter
+  // (firmware animates them; we draw the peak-brightness frame
+  // using base_v[] scaled to opacity), session line, alert text
+  // wrapped over y=25 / y=42 in THEME_ALERT.
+  // 'idle': single "No active task" placeholder at y=33 in
+  // THEME_TASK_EMPTY.
+  // 'active' (default): two task lines at y=25 / y=42 in THEME_TASK
+  // plus the 2px context-usage bar at the bottom.
+  let body;
+  if (previewMode === 'alert') {
+    const ringOpacity = [1.0, 0.71, 0.47, 0.27, 0.24];
+    const rings = [];
+    for (let i = 0; i < 5; i++) {
+      rings.push(
+        `<rect x="${i + 0.5}" y="${i + 0.5}" width="${283 - 2 * i}" height="${75 - 2 * i}"
+               fill="none" stroke="${alertCss}" stroke-width="1" opacity="${ringOpacity[i]}"/>`,
+      );
+    }
+    body = `
+      ${rings.join('')}
+      <text x="142" y="2" fill="${sessionCss}"
+            text-anchor="middle" dominant-baseline="hanging"
+            font-family="${PREVIEW_TEXT_FONT}"
+            font-size="14" font-weight="bold">${DEMO_ALERT_SESSION}</text>
+      <text x="142" y="25" fill="${alertCss}"
+            text-anchor="middle" dominant-baseline="hanging"
+            font-family="${PREVIEW_TEXT_FONT}"
+            font-size="11">${DEMO_ALERT_TEXT_L1}</text>
+      <text x="142" y="42" fill="${alertCss}"
+            text-anchor="middle" dominant-baseline="hanging"
+            font-family="${PREVIEW_TEXT_FONT}"
+            font-size="11">${DEMO_ALERT_TEXT_L2}</text>
+    `;
+  } else {
+    const sessionText = `
+      <text x="142" y="2" fill="${sessionCss}"
+            text-anchor="middle" dominant-baseline="hanging"
+            font-family="${PREVIEW_TEXT_FONT}"
+            font-size="14" font-weight="bold">${DEMO_SESSION}</text>`;
+    const taskText = previewMode === 'idle'
+      ? `<text x="142" y="33" fill="${taskEmptyCss}"
+               text-anchor="middle" dominant-baseline="hanging"
+               font-family="${PREVIEW_TEXT_FONT}"
+               font-size="11">No active task</text>`
+      : `<text x="142" y="25" fill="${taskCss}"
+               text-anchor="middle" dominant-baseline="hanging"
+               font-family="${PREVIEW_TEXT_FONT}"
+               font-size="11">${DEMO_TASK}</text>
+         <text x="142" y="42" fill="${taskCss}"
+               text-anchor="middle" dominant-baseline="hanging"
+               font-family="${PREVIEW_TEXT_FONT}"
+               font-size="11">${DEMO_TASK2}</text>`;
+    const ctxBar = `<rect x="0" y="74" width="142" height="2" fill="${ctxBarCss}"/>`;
+    body = sessionText + taskText + ctxBar;
+  }
 
   svg.innerHTML = `
     ${previewBackground(armCss, 'armPatternMain')}
-
-    <!-- Session line — large bold, centered at top, y=2 -->
-    <text x="142" y="2" fill="${sessionCss}"
-          text-anchor="middle" dominant-baseline="hanging"
-          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-          font-size="14" font-weight="bold">${DEMO_SESSION}</text>
-
-    ${textSvg}
-
-    <!-- Tab dots row at y=65 -->
-    ${tabSvg.join('')}
-
-    <!-- Context usage bar: 2px tall at the very bottom -->
-    <rect x="0" y="74" width="${ctxBarW}" height="2" fill="${ctxBarCss}"/>
-  `;
-
-  renderAlertOverlayPreview(cssFor);
-}
-
-// Alert overlay preview — mirrors display_render_alert_overlay()
-// in display.c. Five concentric THEME_ALERT rings around the
-// perimeter (firmware animates them; we show the peak frame),
-// session at y=2 in THEME_SESSION, alert text wrapped over y=25 /
-// y=42 in THEME_ALERT, plus the tab row drawn the same way as in
-// main mode (alerted tabs become THEME_ALERT squares).
-function renderAlertOverlayPreview(cssFor) {
-  const svg = $('#theme-alert-preview');
-  if (!svg) return;
-
-  const sessionCss     = cssFor(0);
-  const alertCss       = cssFor(3);
-  const armCss         = cssFor(5);
-  const tabActiveCss   = cssFor(6);
-  const tabInactiveCss = cssFor(7);
-
-  // Five concentric rings; outer→inner brightness from firmware's
-  // base_v[] array, scaled to opacity. The 60/255 floor matches
-  // the animated minimum.
-  const ringOpacity = [1.0, 0.71, 0.47, 0.27, 0.24];
-  const rings = [];
-  for (let i = 0; i < 5; i++) {
-    rings.push(
-      `<rect x="${i + 0.5}" y="${i + 0.5}" width="${283 - 2 * i}" height="${75 - 2 * i}"
-             fill="none" stroke="${alertCss}" stroke-width="1" opacity="${ringOpacity[i]}"/>`,
-    );
-  }
-
-  // Tabs: same layout as main mode. tab[0] is the alerted one
-  // (filled square in THEME_ALERT — same code path the firmware
-  // uses for alerts in either mode).
-  const tabs = tabCenters(6);
-  const tabSvg = [
-    `<rect x="${tabs[0] - 4}" y="61" width="8" height="8" fill="${alertCss}"/>`,
-    `<circle cx="${tabs[1]}" cy="65" r="5" fill="${tabActiveCss}"/>`,
-    `<circle cx="${tabs[2]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
-    `<circle cx="${tabs[3]}" cy="65" r="4" fill="none" stroke="${tabInactiveCss}" stroke-width="1"/>`,
-    `<circle cx="${tabs[4]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
-    `<circle cx="${tabs[5]}" cy="65" r="4" fill="${tabInactiveCss}"/>`,
-  ];
-
-  svg.innerHTML = `
-    ${previewBackground(armCss, 'armPatternAlert')}
-
-    ${rings.join('')}
-
-    <!-- Session name -->
-    <text x="142" y="2" fill="${sessionCss}"
-          text-anchor="middle" dominant-baseline="hanging"
-          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-          font-size="14" font-weight="bold">${DEMO_ALERT_SESSION}</text>
-
-    <!-- Alert text — two wrapped lines in THEME_ALERT -->
-    <text x="142" y="25" fill="${alertCss}"
-          text-anchor="middle" dominant-baseline="hanging"
-          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-          font-size="11">${DEMO_ALERT_TEXT_L1}</text>
-    <text x="142" y="42" fill="${alertCss}"
-          text-anchor="middle" dominant-baseline="hanging"
-          font-family="ui-monospace, 'SF Mono', Menlo, monospace"
-          font-size="11">${DEMO_ALERT_TEXT_L2}</text>
-
-    ${tabSvg.join('')}
+    ${body}
+    ${tabRowSvg(alertCss, tabActiveCss, tabInactiveCss)}
   `;
 }
 
@@ -1493,9 +1459,9 @@ $('#theme-save').addEventListener('click', saveThemeToDevice);
 $('#theme-reset').addEventListener('click', resetThemeOnDevice);
 document.querySelectorAll('.theme-preview-toggle .toggle-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    previewIdle = btn.dataset.mode === 'idle';
+    previewMode = btn.dataset.mode;
     document.querySelectorAll('.theme-preview-toggle .toggle-btn').forEach(b => {
-      b.classList.toggle('is-active', b.dataset.mode === btn.dataset.mode);
+      b.classList.toggle('is-active', b.dataset.mode === previewMode);
     });
     if (themeLive) renderThemePreview();
   });
