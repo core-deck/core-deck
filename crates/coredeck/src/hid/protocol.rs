@@ -80,6 +80,12 @@ pub enum HidCommand {
     GetVersion = 0x09,
     /// Signal host is disconnecting — firmware goes idle immediately
     Disconnect = 0x0A,
+    /// Update one display-theme HSV slot (single packet, 5-byte payload)
+    SetTheme = 0x0B,
+    /// Read one slot or dump all slots (single-byte payload; 0xFF = all)
+    GetTheme = 0x0C,
+    /// Reset the whole palette to firmware defaults
+    ResetTheme = 0x0D,
     /// Device state report (unsolicited from device)
     StateReport = 0x10,
     /// Type a string into the active terminal (unsolicited from device)
@@ -109,6 +115,9 @@ impl HidCommand {
             0x08 => Some(HidCommand::Alert),
             0x09 => Some(HidCommand::GetVersion),
             0x0A => Some(HidCommand::Disconnect),
+            0x0B => Some(HidCommand::SetTheme),
+            0x0C => Some(HidCommand::GetTheme),
+            0x0D => Some(HidCommand::ResetTheme),
             0x10 => Some(HidCommand::StateReport),
             0x11 => Some(HidCommand::TypeString),
             0x12 => Some(HidCommand::KeyEvent),

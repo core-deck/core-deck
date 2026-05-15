@@ -287,6 +287,87 @@ pub fn decode_ws_frame(data: &[u8]) -> Option<(u8, u16, &[u8])> {
 /// Default daemon listen address
 pub const DEFAULT_DAEMON_ADDR: &str = "127.0.0.1:19384";
 
+// ── Display theme ──────────────────────────────────────────────────
+//
+// Firmware exposes 10 HSV color slots for the on-device display
+// (session line, task lines, alert frame, context bar, etc.) via
+// HID commands 0x0B/0x0C/0x0D. The settings page lets users tune
+// each slot with a color picker; the daemon mirrors that to the
+// device. Slot enum + default table are firmware-side ground
+// truth — we duplicate the slot count + names here so the host
+// can render labels without round-tripping for each.
+
+/// Number of theme color slots the firmware exposes. Bump in
+/// lockstep with `theme_slot_t` in `firmware/keyboards/core_deck/
+/// rev1/theme.h`. The protocol's GET-all response also carries
+/// this as a leading byte, so a daemon talking to a firmware with
+/// extra slots will still drive the first N correctly.
+pub const THEME_SLOT_COUNT: usize = 10;
+
+/// Firmware slot ids. Indices match `theme_slot_t`. Used as the
+/// `slot` field in `ThemeColor` and as path param in REST.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum ThemeSlot {
+    Session = 0,
+    Task = 1,
+    TaskEmpty = 2,
+    Alert = 3,
+    CtxBar = 4,
+    Yolo = 5,
+    TabActive = 6,
+    TabInactive = 7,
+    SoftkeyLabel = 8,
+    SoftkeySep = 9,
+}
+
+impl ThemeSlot {
+    pub fn from_index(idx: u8) -> Option<Self> {
+        match idx {
+            0 => Some(Self::Session),
+            1 => Some(Self::Task),
+            2 => Some(Self::TaskEmpty),
+            3 => Some(Self::Alert),
+            4 => Some(Self::CtxBar),
+            5 => Some(Self::Yolo),
+            6 => Some(Self::TabActive),
+            7 => Some(Self::TabInactive),
+            8 => Some(Self::SoftkeyLabel),
+            9 => Some(Self::SoftkeySep),
+            _ => None,
+        }
+    }
+}
+
+/// One slot's color as the firmware stores it — HSV triplet to
+/// match Quantum Painter's color API on the device side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThemeColor {
+    /// Slot index, 0..THEME_SLOT_COUNT.
+    pub slot: u8,
+    pub hue: u8,
+    pub sat: u8,
+    pub val: u8,
+}
+
+/// Response for `GET /api/theme` — the whole palette.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThemePalette {
+    pub colors: Vec<ThemeColor>,
+}
+
+/// Request for `PUT /api/theme/{slot}`. `save=true` persists to
+/// EEPROM, `save=false` just updates the live frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetThemeRequest {
+    pub hue: u8,
+    pub sat: u8,
+    pub val: u8,
+    #[serde(default)]
+    pub save: bool,
+}
+
 /// Response for GET /api/status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {

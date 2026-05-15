@@ -100,6 +100,33 @@ pub fn build_clear_alert(tab: usize, mode: ProtocolMode) -> Vec<HidPacket> {
     build_chunked_packets(HidCommand::Alert, json.to_string().as_bytes(), mode)
 }
 
+/// Build a set-theme-slot packet (5-byte payload: slot, h, s, v, save).
+/// Firmware applies the new color on the next render frame; `save=true`
+/// also persists to EEPROM.
+pub fn build_set_theme(
+    slot: u8,
+    hue: u8,
+    sat: u8,
+    val: u8,
+    save: bool,
+    mode: ProtocolMode,
+) -> Vec<HidPacket> {
+    let payload = [slot, hue, sat, val, if save { 0x01 } else { 0x00 }];
+    build_chunked_packets(HidCommand::SetTheme, &payload, mode)
+}
+
+/// Build a get-theme query. `slot=0xFF` dumps the whole palette,
+/// any other value reads a single slot.
+pub fn build_get_theme(slot: u8, mode: ProtocolMode) -> Vec<HidPacket> {
+    build_chunked_packets(HidCommand::GetTheme, &[slot], mode)
+}
+
+/// Build a reset-theme command (no payload). Response is the same
+/// dump-all format as GetTheme with slot=0xFF.
+pub fn build_reset_theme(mode: ProtocolMode) -> Vec<HidPacket> {
+    build_chunked_packets(HidCommand::ResetTheme, &[], mode)
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::protocol::{ProtocolMode, FLAG_END, FLAG_START};
@@ -203,5 +230,30 @@ mod tests {
         assert_eq!(packets.len(), 1);
         assert_eq!(packets[0].flags(), FLAG_START | FLAG_END);
         assert_eq!(packets[0].command(), Some(HidCommand::GetVersion));
+    }
+
+    #[test]
+    fn test_build_set_theme() {
+        let packets = build_set_theme(3, 10, 200, 255, true, S);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].command(), Some(HidCommand::SetTheme));
+        let payload = packets[0].payload();
+        assert_eq!(&payload[..5], &[3, 10, 200, 255, 0x01]);
+    }
+
+    #[test]
+    fn test_build_get_theme_all() {
+        let packets = build_get_theme(0xFF, S);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].command(), Some(HidCommand::GetTheme));
+        assert_eq!(packets[0].payload()[0], 0xFF);
+    }
+
+    #[test]
+    fn test_build_reset_theme() {
+        let packets = build_reset_theme(S);
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].flags(), FLAG_START | FLAG_END);
+        assert_eq!(packets[0].command(), Some(HidCommand::ResetTheme));
     }
 }

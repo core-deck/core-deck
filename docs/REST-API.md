@@ -426,6 +426,57 @@ Reset all three soft keys to their keymap defaults.
 
 ---
 
+### GET /api/theme
+
+Dump the device's display-theme palette (10 HSV slots). Each slot
+controls a region of the on-device display — session text, task
+lines, tab indicators, alert frame, etc. See
+[ThemePalette](Types.md#themepalette) for the slot table.
+
+**Response: 200 OK**
+
+```json
+{
+  "colors": [
+    {"slot": 0, "hue": 0, "sat": 0, "val": 255},
+    {"slot": 1, "hue": 170, "sat": 160, "val": 255},
+    ...
+  ]
+}
+```
+
+---
+
+### PUT /api/theme/{slot}
+
+Set one theme slot (0–9). `save=false` updates the live frame only;
+`save=true` also persists to EEPROM. The settings page uses
+`save=false` while the user drags a color picker, then `save=true`
+once on the "Save to device" click for every dirty slot.
+
+```json
+{
+  "hue": 30,
+  "sat": 225,
+  "val": 215,
+  "save": false
+}
+```
+
+**Response: 200 OK** — echoes the slot's new HSV as a single
+[ThemeColor](Types.md#themecolor).
+
+---
+
+### POST /api/theme/reset
+
+Reset the whole palette to firmware defaults and persist to EEPROM.
+
+**Response: 200 OK** — same shape as `GET /api/theme`, reflecting
+the defaults that were just applied.
+
+---
+
 ### GET /api/soft-keys/presets
 
 List saved soft-key preset bundles. Presets are user-defined named groupings of all three keys.

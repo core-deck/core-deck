@@ -420,6 +420,12 @@ async fn run_async(
             "/api/hooks/uninstall",
             axum::routing::post(rpc::post_hooks_uninstall),
         )
+        .route("/api/theme", axum::routing::get(rpc::get_theme))
+        .route("/api/theme/{slot}", axum::routing::put(rpc::put_theme_slot))
+        .route(
+            "/api/theme/reset",
+            axum::routing::post(rpc::post_theme_reset),
+        )
         .route("/api/soft-keys", axum::routing::get(rpc::get_soft_keys))
         .route(
             "/api/soft-keys/reset",

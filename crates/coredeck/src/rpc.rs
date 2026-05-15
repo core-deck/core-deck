@@ -16,7 +16,8 @@ use axum::{
 };
 use coredeck_protocol::{
     AlertRequest, ApiError, BrightnessRequest, ClearAlertRequest, DaemonStatus,
-    DisplayUpdateRequest, SetModeRequest, SoftKeyConfig, SoftKeyType,
+    DisplayUpdateRequest, SetModeRequest, SetThemeRequest, SoftKeyConfig, SoftKeyType,
+    ThemePalette,
 };
 use serde::Deserialize;
 use std::sync::Arc;
@@ -435,6 +436,114 @@ pub async fn post_soft_keys_reset(State(state): State<Arc<DaemonState>>) -> impl
 
     match result {
         Ok(configs) => Json(configs.to_vec()).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+// ── Display theme ──────────────────────────────────────────────────
+//
+// Three endpoints mirror the firmware's HID commands 0x0B/0x0C/0x0D.
+// The settings page dumps once on load, PUTs each slot as the user
+// drags a color picker (with save=false for the live preview, then
+// save=true on "save to device"), and POSTs reset on "restore
+// defaults".
+
+/// GET /api/theme — dump the current palette.
+pub async fn get_theme(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    if state.ws_client.lock().await.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    let hid = state.hid.lock().await;
+    if let Err(e) = ensure_device_open(&hid) {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(ApiError { error: e })).into_response();
+    }
+
+    let result = hid.get_theme_all();
+    drop(hid);
+
+    match result {
+        Ok(colors) => Json(ThemePalette { colors }).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// PUT /api/theme/{slot} — set one slot. Body: SetThemeRequest.
+pub async fn put_theme_slot(
+    State(state): State<Arc<DaemonState>>,
+    Path(slot): Path<u8>,
+    Json(req): Json<SetThemeRequest>,
+) -> impl IntoResponse {
+    if state.ws_client.lock().await.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    let hid = state.hid.lock().await;
+    if let Err(e) = ensure_device_open(&hid) {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(ApiError { error: e })).into_response();
+    }
+
+    let result = hid.set_theme(slot, req.hue, req.sat, req.val, req.save);
+    drop(hid);
+
+    match result {
+        Ok(color) => Json(color).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/theme/reset — restore firmware defaults; returns the dump.
+pub async fn post_theme_reset(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    if state.ws_client.lock().await.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ApiError {
+                error: "device locked by WebSocket client".into(),
+            }),
+        )
+            .into_response();
+    }
+
+    let hid = state.hid.lock().await;
+    if let Err(e) = ensure_device_open(&hid) {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(ApiError { error: e })).into_response();
+    }
+
+    let result = hid.reset_theme();
+    drop(hid);
+
+    match result {
+        Ok(colors) => Json(ThemePalette { colors }).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError {

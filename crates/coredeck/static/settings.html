@@ -150,6 +150,83 @@
   .toast.err { border-color: var(--red); }
   .data-input { flex: 1; min-width: 0; }
   .checkbox-row { display: flex; align-items: center; gap: 6px; }
+
+  /* Display theme section */
+  .theme-status { color: var(--muted); font-size: 13px; }
+  .theme-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(280px, auto);
+    gap: 24px;
+    align-items: start;
+  }
+  @media (max-width: 720px) {
+    .theme-layout { grid-template-columns: 1fr; }
+  }
+  .theme-slots { display: grid; gap: 6px; }
+  .theme-slot {
+    display: grid;
+    grid-template-columns: 28px 1fr auto;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--panel);
+    cursor: pointer;
+    transition: border-color 0.1s;
+  }
+  .theme-slot:hover { border-color: var(--accent); }
+  .theme-slot .swatch {
+    width: 24px; height: 24px; border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.15);
+  }
+  .theme-slot .name { font-size: 13px; }
+  .theme-slot .hsv {
+    color: var(--muted); font-size: 11px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .theme-preview-wrap {
+    display: flex; flex-direction: column; gap: 10px;
+    min-width: 280px;
+  }
+  .theme-preview-label { color: var(--muted); font-size: 12px; }
+  .theme-preview {
+    width: 100%;
+    height: auto;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    /* Crisp pixel rendering — the device is a small panel, so don't
+       smooth the SVG. */
+    image-rendering: pixelated;
+    shape-rendering: crispEdges;
+  }
+  .theme-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .theme-help { color: var(--muted); font-size: 12px; margin: 0; }
+  .theme-help code { background: var(--panel-2); padding: 1px 4px; border-radius: 2px; }
+
+  /* Color-picker modal */
+  .iro-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 100;
+  }
+  .iro-modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 20px;
+    min-width: 280px;
+    display: flex; flex-direction: column; gap: 12px;
+    align-items: center;
+  }
+  .iro-modal h3 { margin: 0; font-size: 14px; font-weight: 500; }
+  .iro-hsv {
+    color: var(--muted); font-size: 11px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .iro-actions { display: flex; gap: 8px; }
 </style>
 </head>
 <body>
@@ -232,6 +309,41 @@
       <button id="softkeys-reset" class="danger">Reset all to defaults</button>
     </div>
   </section>
+
+  <section id="theme-section">
+    <h2>Display Theme</h2>
+    <div class="theme-status" id="theme-status">checking device…</div>
+    <div class="theme-layout" id="theme-body" style="display:none">
+      <div class="theme-slots" id="theme-slots"></div>
+      <div class="theme-preview-wrap">
+        <div class="theme-preview-label">Live preview (284×76, scaled)</div>
+        <svg class="theme-preview" id="theme-preview" viewBox="0 0 284 76" preserveAspectRatio="xMidYMid meet"></svg>
+        <div class="theme-actions">
+          <button id="theme-save" class="primary">Save to device</button>
+          <button id="theme-reset" class="danger">Reset to defaults</button>
+        </div>
+        <p class="theme-help">
+          Changes preview on the device instantly via <code>save=false</code>.
+          Clicking <strong>Save to device</strong> persists every modified slot
+          to EEPROM so the colors survive a power cycle. <strong>Reset</strong>
+          restores the firmware defaults.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- Color picker modal — opened when the user clicks a slot swatch.
+       iro.js is loaded lazily on first open via jsDelivr CDN. -->
+  <div id="iro-overlay" class="iro-overlay" style="display:none">
+    <div class="iro-modal">
+      <h3 id="iro-title">Edit color</h3>
+      <div id="iro-picker"></div>
+      <div class="iro-hsv" id="iro-hsv"></div>
+      <div class="iro-actions">
+        <button id="iro-close">Done</button>
+      </div>
+    </div>
+  </div>
 
   <section>
     <h2>Connected Wrappers</h2>
@@ -900,6 +1012,310 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]));
 }
 
+// ── Display theme ──────────────────────────────────────────────────
+//
+// Talks to /api/theme (GET to dump, PUT /api/theme/{slot} to set one
+// slot, POST /api/theme/reset to revert). Color picker is iro.js,
+// loaded lazily from a CDN the first time the user opens it. We
+// keep two copies of the palette: `themeLive` is what's currently
+// on the device's display (updated on every drag event via PUT
+// save=false), `themeSaved` is what's persisted to EEPROM (updated
+// when the user clicks "Save to device" or on initial GET). The
+// "Save" button diffs the two and re-PUTs the dirty slots with
+// save=true.
+const THEME_SLOTS = [
+  { id: 0, name: 'Session line' },
+  { id: 1, name: 'Task lines' },
+  { id: 2, name: 'No-task placeholder' },
+  { id: 3, name: 'Alert frame & text' },
+  { id: 4, name: 'Context usage bar' },
+  { id: 5, name: 'YOLO hazard stripes' },
+  { id: 6, name: 'Active tab' },
+  { id: 7, name: 'Inactive tab' },
+  { id: 8, name: 'Softkey labels' },
+  { id: 9, name: 'Softkey separators' },
+];
+let themeLive = null;     // [{slot, hue, sat, val}, ...]
+let themeSaved = null;
+let iroLoadPromise = null;
+let iroPicker = null;
+let iroCurrentSlot = null;
+
+function hsvDeviceToCss(hue, sat, val) {
+  // Firmware HSV uses 0..255 for each component (QMK / Quantum
+  // Painter convention). Convert to standard h:0-360, s/l:0-100 for
+  // CSS hsl() — saturation and value map directly to HSL after the
+  // V → L transform. Use the standard HSV → HSL formula:
+  //   l = v * (1 - s/2);  s_l = (v - l) / min(l, 1 - l)  (with the
+  // edge case of l == 0 or 1 producing s_l = 0).
+  const h = (hue / 255) * 360;
+  const sN = sat / 255;
+  const vN = val / 255;
+  const l = vN * (1 - sN / 2);
+  const denom = Math.min(l, 1 - l);
+  const sL = denom === 0 ? 0 : (vN - l) / denom;
+  return `hsl(${h.toFixed(1)}, ${(sL * 100).toFixed(1)}%, ${(l * 100).toFixed(1)}%)`;
+}
+
+function findSlot(palette, id) {
+  return palette.find(c => c.slot === id) || { slot: id, hue: 0, sat: 0, val: 0 };
+}
+
+function renderThemeSlots() {
+  const root = $('#theme-slots');
+  root.innerHTML = '';
+  for (const meta of THEME_SLOTS) {
+    const c = findSlot(themeLive, meta.id);
+    const row = document.createElement('div');
+    row.className = 'theme-slot';
+    row.tabIndex = 0;
+    row.dataset.slot = String(meta.id);
+    row.innerHTML = `
+      <span class="swatch" style="background:${hsvDeviceToCss(c.hue, c.sat, c.val)}"></span>
+      <span class="name">${escapeHtml(meta.name)}</span>
+      <span class="hsv">${c.hue},${c.sat},${c.val}</span>
+    `;
+    row.addEventListener('click', () => openIroPicker(meta.id));
+    row.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openIroPicker(meta.id); }
+    });
+    root.appendChild(row);
+  }
+}
+
+// Build the SVG preview. Mirrors the firmware's display layout in
+// rough proportion — session line up top, task lines below, tab
+// dots toward the bottom-right, context bar at the very bottom,
+// YOLO stripes overlaid diagonally, alert frame around the
+// perimeter, softkey separators near the bottom edge. Not pixel-
+// accurate to the firmware but shows every theme slot at once so
+// the user can judge interactions between them.
+function renderThemePreview() {
+  const svg = $('#theme-preview');
+  const c = id => findSlot(themeLive, id);
+  const cssFor = id => { const x = c(id); return hsvDeviceToCss(x.hue, x.sat, x.val); };
+  // YOLO stripes — diagonal pattern across the whole canvas.
+  // Repeat a thin line every 14px at 45°.
+  const stripes = [];
+  for (let i = -76; i < 284; i += 14) {
+    stripes.push(`<line x1="${i}" y1="0" x2="${i + 76}" y2="76" stroke="${cssFor(5)}" stroke-width="2" opacity="0.35"/>`);
+  }
+  // Alert frame — 2px border inset 1px from edges.
+  const alertCss = cssFor(3);
+  // Softkey separators — two horizontal lines near the bottom-right
+  // softkey overlay area (firmware draws these to right of dots).
+  const sepCss = cssFor(9);
+  // Tab dots — three near the right edge.
+  const activeCss = cssFor(6);
+  const inactiveCss = cssFor(7);
+  // Softkey dot identifiers (single-color "●●●" stand-ins)
+  const labelCss = cssFor(8);
+
+  svg.innerHTML = `
+    <!-- YOLO diagonal stripes -->
+    <g aria-label="YOLO stripes">${stripes.join('')}</g>
+
+    <!-- Alert frame (visible regardless of state — pure preview) -->
+    <rect x="1" y="1" width="282" height="74" fill="none"
+          stroke="${alertCss}" stroke-width="2" opacity="0.85"/>
+
+    <!-- Session line -->
+    <text x="8" y="17" font-family="ui-monospace, Menlo, monospace"
+          font-size="11" fill="${cssFor(0)}">my-session ↦</text>
+
+    <!-- Task line -->
+    <text x="8" y="33" font-family="ui-monospace, Menlo, monospace"
+          font-size="11" fill="${cssFor(1)}">Building tests…</text>
+
+    <!-- No-active-task placeholder (shown for slot 2 demo) -->
+    <text x="8" y="47" font-family="ui-monospace, Menlo, monospace"
+          font-size="9" fill="${cssFor(2)}">No active task</text>
+
+    <!-- Tab dots — bottom right cluster (active circle + 2 inactive) -->
+    <circle cx="232" cy="62" r="4" fill="${activeCss}"/>
+    <circle cx="246" cy="62" r="4" fill="none" stroke="${inactiveCss}" stroke-width="1"/>
+    <circle cx="260" cy="62" r="4" fill="${inactiveCss}"/>
+
+    <!-- Softkey labels (placeholder dots near the bottom-left) -->
+    <text x="8" y="69" font-family="ui-monospace, Menlo, monospace"
+          font-size="10" fill="${labelCss}">● ● ●</text>
+
+    <!-- Softkey separators (horizontal lines bottom-right area) -->
+    <line x1="200" y1="50" x2="276" y2="50" stroke="${sepCss}" stroke-width="1"/>
+    <line x1="200" y1="56" x2="276" y2="56" stroke="${sepCss}" stroke-width="1"/>
+
+    <!-- Context usage bar (very bottom, ~60% width) -->
+    <rect x="0" y="74" width="170" height="2" fill="${cssFor(4)}"/>
+  `;
+}
+
+function setThemeSection(visible, statusText) {
+  $('#theme-status').textContent = statusText || '';
+  $('#theme-status').style.display = visible ? 'none' : '';
+  $('#theme-body').style.display = visible ? '' : 'none';
+}
+
+async function refreshTheme() {
+  try {
+    const palette = await api('GET', '/api/theme');
+    themeLive = palette.colors.map(c => ({ ...c }));
+    themeSaved = palette.colors.map(c => ({ ...c }));
+    renderThemeSlots();
+    renderThemePreview();
+    setThemeSection(true);
+  } catch (e) {
+    // Most common: device locked by a WS client (409) or no device
+    // connected (503). Show the status string; reset to empty so we
+    // don't try to render a stale palette.
+    themeLive = null;
+    themeSaved = null;
+    setThemeSection(false, `not available (${e.message})`);
+  }
+}
+
+async function ensureIroLoaded() {
+  if (window.iro) return;
+  if (!iroLoadPromise) {
+    iroLoadPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/@jaames/iro@5';
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('failed to load iro.js color picker'));
+      document.head.appendChild(s);
+    });
+  }
+  await iroLoadPromise;
+}
+
+async function openIroPicker(slotId) {
+  try {
+    await ensureIroLoaded();
+  } catch (e) {
+    toast(e.message, 'err');
+    return;
+  }
+  iroCurrentSlot = slotId;
+  const c = findSlot(themeLive, slotId);
+  const meta = THEME_SLOTS.find(m => m.id === slotId);
+  $('#iro-title').textContent = meta ? meta.name : `Slot ${slotId}`;
+  $('#iro-picker').innerHTML = '';
+
+  // iro.js uses h:0-360, s:0-100, v:0-100. Convert from device 0-255.
+  const initial = {
+    h: (c.hue / 255) * 360,
+    s: (c.sat / 255) * 100,
+    v: (c.val / 255) * 100,
+  };
+  iroPicker = new iro.ColorPicker('#iro-picker', {
+    width: 220,
+    color: initial,
+    layout: [
+      { component: iro.ui.Wheel },
+      { component: iro.ui.Slider, options: { sliderType: 'value' } },
+      { component: iro.ui.Slider, options: { sliderType: 'saturation' } },
+    ],
+  });
+
+  const updateHsvLabel = () => {
+    const hsv = iroPicker.color.hsv;
+    const dh = Math.round((hsv.h / 360) * 255);
+    const ds = Math.round((hsv.s / 100) * 255);
+    const dv = Math.round((hsv.v / 100) * 255);
+    $('#iro-hsv').textContent = `device HSV: ${dh}, ${ds}, ${dv}`;
+  };
+  updateHsvLabel();
+
+  // Live-push on every change. Debounce slightly so dragging the
+  // wheel doesn't queue 50 PUTs per second. The firmware is fine
+  // with bursts but the EEPROM-save guard already filters them on
+  // save=false; this is just to be polite over USB.
+  let pendingTimer = null;
+  iroPicker.on('color:change', () => {
+    updateHsvLabel();
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(() => pushSlotPreview(slotId, iroPicker.color.hsv), 40);
+  });
+
+  $('#iro-overlay').style.display = '';
+}
+
+function closeIroPicker() {
+  $('#iro-overlay').style.display = 'none';
+  if (iroPicker) {
+    iroPicker = null;
+    $('#iro-picker').innerHTML = '';
+  }
+  iroCurrentSlot = null;
+}
+
+async function pushSlotPreview(slotId, hsv) {
+  const hue = Math.round((hsv.h / 360) * 255);
+  const sat = Math.round((hsv.s / 100) * 255);
+  const val = Math.round((hsv.v / 100) * 255);
+  try {
+    await api('PUT', `/api/theme/${slotId}`, { hue, sat, val, save: false });
+    // Update local mirror + re-render swatch + preview.
+    const c = themeLive.find(c => c.slot === slotId);
+    if (c) { c.hue = hue; c.sat = sat; c.val = val; }
+    else { themeLive.push({ slot: slotId, hue, sat, val }); }
+    renderThemeSlots();
+    renderThemePreview();
+  } catch (e) {
+    toast(`set theme failed: ${e.message}`, 'err');
+  }
+}
+
+async function saveThemeToDevice() {
+  if (!themeLive || !themeSaved) return;
+  // Re-PUT every slot whose live value differs from the last-saved
+  // snapshot, with save=true to commit to EEPROM. We could find a
+  // single "save current" command, but the per-slot API is what the
+  // firmware exposes and the writes are cheap.
+  const dirty = themeLive.filter(c => {
+    const orig = findSlot(themeSaved, c.slot);
+    return orig.hue !== c.hue || orig.sat !== c.sat || orig.val !== c.val;
+  });
+  if (dirty.length === 0) {
+    toast('no changes to save', 'ok');
+    return;
+  }
+  try {
+    for (const c of dirty) {
+      await api('PUT', `/api/theme/${c.slot}`, {
+        hue: c.hue, sat: c.sat, val: c.val, save: true,
+      });
+    }
+    themeSaved = themeLive.map(c => ({ ...c }));
+    toast(`saved ${dirty.length} slot${dirty.length === 1 ? '' : 's'} to device`, 'ok');
+  } catch (e) {
+    toast(`save failed: ${e.message}`, 'err');
+  }
+}
+
+async function resetThemeOnDevice() {
+  if (!confirm('Reset all 10 slots to firmware defaults? This writes to EEPROM.')) return;
+  try {
+    const palette = await api('POST', '/api/theme/reset');
+    themeLive = palette.colors.map(c => ({ ...c }));
+    themeSaved = palette.colors.map(c => ({ ...c }));
+    renderThemeSlots();
+    renderThemePreview();
+    toast('theme reset to defaults', 'ok');
+  } catch (e) {
+    toast(`reset failed: ${e.message}`, 'err');
+  }
+}
+
+$('#theme-save').addEventListener('click', saveThemeToDevice);
+$('#theme-reset').addEventListener('click', resetThemeOnDevice);
+$('#iro-close').addEventListener('click', closeIroPicker);
+$('#iro-overlay').addEventListener('click', e => {
+  if (e.target.id === 'iro-overlay') closeIroPicker();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('#iro-overlay').style.display !== 'none') closeIroPicker();
+});
+
 // ── Boot ───────────────────────────────────────────────────────────
 async function loadAll() {
   await Promise.all([
@@ -907,6 +1323,7 @@ async function loadAll() {
     refreshHooks(),
     refreshSoftkeys(),
     refreshWrappers(),
+    refreshTheme(),
   ]);
   await refreshPresets();
   // Populate brightness slider from initial value once status loads.

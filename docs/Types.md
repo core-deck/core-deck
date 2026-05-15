@@ -202,6 +202,60 @@ Soft key configuration (used in WS `SoftKeyResponse`).
 | `key_type` | [SoftKeyType](#softkeytype) | Assignment type |
 | `data` | u8[] | Type-specific data (max 128 bytes) |
 
+## ThemeColor
+
+One slot of the on-device display theme. HSV components match
+Quantum Painter's color API on the firmware side (each 0–255).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `slot` | u8 | Slot index (0–9), see [ThemePalette](#themepalette) |
+| `hue` | u8 | Hue (0–255 maps to 0°–360°) |
+| `sat` | u8 | Saturation (0 = grayscale, 255 = pure color) |
+| `val` | u8 | Value / brightness (0 = black, 255 = full) |
+
+## ThemePalette
+
+Returned by `GET /api/theme` and `POST /api/theme/reset`. The 10
+slots are:
+
+| Slot | Name | Used for |
+|------|------|----------|
+| 0 | `Session` | Top line session name + alert overlay session header |
+| 1 | `Task` | Task lines 2–3 |
+| 2 | `TaskEmpty` | "No active task" placeholder |
+| 3 | `Alert` | Alert frame, alert text, alert tab indicators |
+| 4 | `CtxBar` | Context-window usage bar at the bottom |
+| 5 | `Yolo` | YOLO diagonal hazard stripes |
+| 6 | `TabActive` | Active tab circle |
+| 7 | `TabInactive` | Inactive / loaded / working tab circles + overflow `>` |
+| 8 | `SoftkeyLabel` | Softkey overlay label text + dot identifiers |
+| 9 | `SoftkeySep` | Softkey overlay horizontal separators |
+
+```json
+{
+  "colors": [
+    {"slot": 0, "hue": 0, "sat": 0, "val": 255},
+    {"slot": 1, "hue": 170, "sat": 160, "val": 255}
+  ]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `colors` | [ThemeColor](#themecolor)[] | One entry per slot, in slot order |
+
+## SetThemeRequest
+
+Body for `PUT /api/theme/{slot}`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `hue` | u8 | New hue (0–255) |
+| `sat` | u8 | New saturation (0–255) |
+| `val` | u8 | New value (0–255) |
+| `save` | boolean | When `true`, persist to EEPROM (slow — 100–500 ms) |
+
 ## ApiError
 
 Error response returned by all REST endpoints on failure.

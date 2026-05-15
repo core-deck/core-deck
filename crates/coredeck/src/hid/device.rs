@@ -820,6 +820,101 @@ impl HidManager {
         Ok(())
     }
 
+    /// Set one display theme slot. `save=true` persists the new HSV
+    /// to EEPROM (same flash-stall caveat as `set_soft_key` — the
+    /// firmware blocks ~100-500ms before replying, so we widen the
+    /// wait for that case).
+    pub fn set_theme(
+        &self,
+        slot: u8,
+        hue: u8,
+        sat: u8,
+        val: u8,
+        save: bool,
+    ) -> Result<coredeck_protocol::ThemeColor> {
+        let device_guard = self.device.lock();
+        let device = device_guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("Device not connected"))?;
+
+        let proto_mode = self.mode();
+        let packets = commands::build_set_theme(slot, hue, sat, val, save, proto_mode);
+        send_packets_to_device(device, &packets, proto_mode)?;
+
+        let timeout_ms = if save { 1500 } else { 200 };
+        let response = read_response_with_timeout(
+            device,
+            HidCommand::SetTheme,
+            &self.event_tx,
+            proto_mode,
+            timeout_ms,
+        )?;
+
+        if response.data.len() < 4 {
+            return Err(anyhow!(
+                "set_theme response too short: {} bytes",
+                response.data.len()
+            ));
+        }
+        debug!(
+            "Theme slot {} set to HSV({},{},{}) save={}",
+            slot, hue, sat, val, save
+        );
+        Ok(coredeck_protocol::ThemeColor {
+            slot: response.data[0],
+            hue: response.data[1],
+            sat: response.data[2],
+            val: response.data[3],
+        })
+    }
+
+    /// Dump the whole palette (sends slot=0xFF). Response is
+    /// `[count, h0, s0, v0, h1, s1, v1, ...]` spanning two packets
+    /// in VIAL mode.
+    pub fn get_theme_all(&self) -> Result<Vec<coredeck_protocol::ThemeColor>> {
+        let device_guard = self.device.lock();
+        let device = device_guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("Device not connected"))?;
+
+        let proto_mode = self.mode();
+        let packets = commands::build_get_theme(0xFF, proto_mode);
+        send_packets_to_device(device, &packets, proto_mode)?;
+
+        let response = read_response_with_timeout(
+            device,
+            HidCommand::GetTheme,
+            &self.event_tx,
+            proto_mode,
+            500,
+        )?;
+
+        parse_theme_dump(&response.data)
+    }
+
+    /// Reset the palette to firmware defaults and return the resulting
+    /// dump. Persists to EEPROM, so widen the timeout like SetTheme(save).
+    pub fn reset_theme(&self) -> Result<Vec<coredeck_protocol::ThemeColor>> {
+        let device_guard = self.device.lock();
+        let device = device_guard
+            .as_ref()
+            .ok_or_else(|| anyhow!("Device not connected"))?;
+
+        let proto_mode = self.mode();
+        let packets = commands::build_reset_theme(proto_mode);
+        send_packets_to_device(device, &packets, proto_mode)?;
+
+        let response = read_response_with_timeout(
+            device,
+            HidCommand::ResetTheme,
+            &self.event_tx,
+            proto_mode,
+            1500,
+        )?;
+
+        parse_theme_dump(&response.data)
+    }
+
     /// Set device LED mode
     pub fn set_mode(&self, mode: DeviceMode) -> Result<()> {
         let device_guard = self.device.lock();
@@ -1067,6 +1162,37 @@ fn read_raw_packet(
         Ok(_) => Ok(None), // Timeout
         Err(e) => Err(anyhow!("HID read error: {}", e)),
     }
+}
+
+/// Parse the GetTheme/ResetTheme dump payload (`[count, h0, s0, v0,
+/// h1, s1, v1, ...]`) into a `Vec<ThemeColor>`. Validates length;
+/// stops at `count` even if the response carries extra trailing
+/// bytes — firmware may evolve to add slots without breaking older
+/// daemons.
+fn parse_theme_dump(data: &[u8]) -> Result<Vec<coredeck_protocol::ThemeColor>> {
+    if data.is_empty() {
+        return Err(anyhow!("theme dump response is empty"));
+    }
+    let count = data[0] as usize;
+    let expected = 1 + count * 3;
+    if data.len() < expected {
+        return Err(anyhow!(
+            "theme dump truncated: count={} but only {} bytes",
+            count,
+            data.len()
+        ));
+    }
+    let mut out = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = 1 + i * 3;
+        out.push(coredeck_protocol::ThemeColor {
+            slot: i as u8,
+            hue: data[off],
+            sat: data[off + 1],
+            val: data[off + 2],
+        });
+    }
+    Ok(out)
 }
 
 /// Read a complete chunked response for a specific command.
