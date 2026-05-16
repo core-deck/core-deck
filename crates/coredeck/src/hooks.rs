@@ -1443,15 +1443,36 @@ async fn handle_session_start(state: &DaemonState, event: &HookEvent) {
     let mut claude = state.claude_state.write().await;
     let s = claude.touch_session(sid);
 
-    // Carry the "Compacting…" placeholder forward when Claude resumes a
-    // freshly compacted session. PreCompact already painted it on the
-    // previous session_id; if compaction renumbers the session, the device
-    // would otherwise drop back to a blank line until the next hook fires.
-    // The next UserPromptSubmit / PreToolUse / Stop will overwrite this.
+    // PreCompact pinned "Compacting…" while compaction was running.
+    // SessionStart source=compact firing means compaction is *done* —
+    // Claude is about to either resume the prior turn or go idle
+    // waiting for the user. Either way, "Compacting…" is no longer
+    // accurate:
+    //  - mid-turn continuation: the next PreToolUse / Stop overwrites
+    //    the placeholder within a tick or two — anything we set here
+    //    is transient.
+    //  - auto-compact at the tail of a turn (the case that exposed
+    //    this bug): no follow-up hook ever fires, because Claude has
+    //    nothing left to do until the user types. The previous code
+    //    left the device stuck on "Compacting… · ∞s" forever.
+    //
+    // Restore the task subject from the registry if any, else fall
+    // back to "Thinking…". The fresh-session-id case (compact
+    // renumbered the session, so `touch_session` minted a blank
+    // entry) also lands here and gets seeded with "Thinking…" so we
+    // don't paint a blank task line until the next hook arrives.
     if source == "compact" {
-        s.current_task = Some("Compacting…".to_string());
+        let needs_reset = s.current_task.is_none()
+            || matches!(s.current_task.as_deref(), Some("Compacting…"));
+        if needs_reset {
+            let restored = s
+                .active_task_id
+                .as_ref()
+                .and_then(|id| s.task_registry.get(id).cloned());
+            s.current_task = restored.or_else(|| Some("Thinking…".to_string()));
+            s.phase_started_at_unix = Some(now_unix());
+        }
         s.active = true;
-        s.phase_started_at_unix = Some(now_unix());
     }
 }
 
@@ -1484,8 +1505,8 @@ async fn handle_session_end(state: &DaemonState, event: &HookEvent) {
 /// without an explicit task line the device just shows the prior phase's
 /// "Thinking…" frozen with a climbing elapsed counter. Replace it with
 /// "Compacting…" so the user can tell why Claude is paused. The 1Hz
-/// ticker keeps the elapsed suffix advancing; the next non-compact hook
-/// (or SessionStart-source=compact's own paint) supersedes this.
+/// ticker keeps the elapsed suffix advancing; SessionStart-source=compact
+/// (or any non-compact hook) takes the placeholder back off.
 async fn handle_pre_compact(state: &DaemonState, event: &HookEvent) {
     let trigger = event.trigger.as_deref().unwrap_or("?");
     let session = event.session_id.as_deref().unwrap_or("?");
