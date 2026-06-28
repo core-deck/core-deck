@@ -12,16 +12,16 @@ echo ""
 
 # Prompt for values if not provided
 if [ -z "$APPLE_ID" ]; then
-    read -p "Apple ID (email): " APPLE_ID
+    read -r -p "Apple ID (email): " APPLE_ID
 fi
 
 if [ -z "$TEAM_ID" ]; then
-    read -p "Team ID: " TEAM_ID
+    read -r -p "Team ID: " TEAM_ID
 fi
 
 if [ -z "$APP_PASSWORD" ]; then
     echo "App-specific password (create at appleid.apple.com):"
-    read -s APP_PASSWORD
+    read -r -s APP_PASSWORD
     echo ""
 fi
 

@@ -29,15 +29,62 @@ The daemon hosts every user-facing surface:
   device info, "Open Settings…", "Quit Daemon".
 - **HTTP-served settings page** at `/` and `/settings` — HTML/CSS/JS
   embedded in the daemon binary, opened in the user's default browser
-  via the tray menu. Hosts the soft-key editor.
+  via the tray menu. Hosts the soft-key editor, soft-key presets, and
+  the device theme editor.
 - **Hook-driven session state** — per-session metadata gathered from
   Claude Code's HTTP hooks (PreToolUse, PostToolUse, Stop, Notification,
   PermissionRequest, UserPromptSubmit, SessionStart, SessionEnd,
-  PreCompact, statusLine, subagentStatusLine), keyed by `session_id`,
+  PreCompact, TaskCreated, TaskCompleted, statusLine,
+  subagentStatusLine), keyed by `session_id`,
   bound to wrappers via the `COREDECK_WRAPPER_ID` env var that the
   SessionStart command hook reads.
 
 ## Done (recent highlights)
+
+- **Hardening batch from the full-project review** (`COMPLETE_REVIEW.md`).
+  Browser lockdown: the wide-open CORS layer is gone and every route
+  (including both WS upgrade paths) now refuses requests whose `Origin`
+  isn't the daemon's own loopback origin, with `Host` validated too when
+  bound to loopback — web pages can no longer drive `WrapperWrite` or
+  program soft keys via DNS rebinding. Linux device fixes: HID writes
+  now carry the hidraw report-ID byte (middle chunks of ≥3-chunk
+  standalone messages were being corrupted), and udev unplug events
+  match on the `PRODUCT` uevent property (sysfs attributes are already
+  gone on `remove`, so disconnects were never detected). Wrapper: panic
+  hook + SIGTERM/SIGHUP handler restore the terminal (raw mode + OSC
+  1004) on every exit path, and the daemon only unregisters a wrapper
+  if the closing connection still owns the registry entry
+  (`conn_token`), fixing the `--ssh` duplicate-id and reconnect races.
+  Release pipeline: the ad-hoc sign step no longer clobbers Developer
+  ID signatures and `create-dmg.sh` is invoked with flags it actually
+  accepts. CI now lints/tests the whole workspace (previously
+  `coredeck-claude` was never checked); the dead root `tests/` dir
+  (GUI-era, referenced a deleted crate) is removed.
+  Follow-up sweep closed the rest of the review: the `0x85`
+  event/response tag collision was resolved (`ClaudeHookEvent` →
+  `0x8B`), the daemon now enforces `seq > 0` on commands, raise/spawn
+  helpers run off the HID event loop under a 5s timeout, the alert
+  state machine gained per-alert ids (fixing the post-timeout clobber
+  and the classify/resolve races), the wrapper coalesces its offline
+  event backlog and recognises split focus reports, the three
+  session-title chains collapsed into one `session_label`, the HID read
+  paths share one `TypeString` buffer, firmware `Error` responses
+  surface via `ProtoError`, and the version is centralised in
+  `[workspace.package]` with a tag-mismatch guard in `release.yml`. CI
+  also caches deps, checks MSRV (1.75), runs `shellcheck`, and uses
+  `--locked`; the Linux `install.sh` + udev rules moved into `linux/`
+  so they're reviewable and shellchecked. Full findings and per-item
+  status: `COMPLETE_REVIEW.md`.
+
+- **Browser theme editor + soft-key presets API.** The settings page
+  hosts a device theme editor — 10 HSV palette slots with a single
+  centered live preview (including Alert mode), edited locally in the
+  browser and PUT to the device per dirty slot on Save — backed by
+  `GET /api/theme`, `PUT /api/theme/{slot}` (with a `save` flag for
+  live-frame-only vs EEPROM), and `POST /api/theme/reset`. Soft-key
+  preset bundles (hardcoded built-ins + user-saved, upsert by name)
+  ship via `GET /api/soft-keys/presets`, `POST .../apply`,
+  `POST .../save`, and `DELETE .../{name}`.
 
 - **Daemon-only architecture.** Old GUI crate and its
   egui/wezterm/glutin/eframe dep tree deleted; the daemon
@@ -53,7 +100,8 @@ The daemon hosts every user-facing surface:
   to set active.
 - **Hook coverage.** Daemon handles PreToolUse, PostToolUse,
   PermissionRequest, Stop, Notification, UserPromptSubmit,
-  SessionStart, SessionEnd, PreCompact, statusLine, subagentStatusLine.
+  SessionStart, SessionEnd, PreCompact, TaskCreated, TaskCompleted,
+  statusLine, subagentStatusLine.
   Each hook routes by `session_id` into `SessionState`.
 - **Mode-toggle and soft-keys via wrapper.** Daemon injects bytes into
   the active wrapper's PTY via `DaemonToWrapper::Write`. Mode-LED
@@ -152,7 +200,12 @@ The daemon hosts every user-facing surface:
   `hooks install` + idempotent launchd registration in one shot, then
   prints the `alias claude=coredeck-claude` snippet (we deliberately
   don't auto-edit the user's shell rc). The cask uninstall stops the
-  launchd agent and `--zap` clears hook config + logs. For users who
+  launchd agent; `--zap` additionally trashes the launchd plist, the
+  daemon log, the two hook shim scripts, and the daemon data dir —
+  but the hook *entries* in `~/.claude/settings.json` stay behind
+  (pointing at the now-deleted shims), so run
+  `coredeck hooks uninstall` before uninstalling for a clean removal.
+  For users who
   install the .app from a DMG without brew, the tray menu surfaces an
   "⚠ Install Claude Code hooks…" item until hooks are present.
 - **Remote claude over SSH.** `coredeck-claude --ssh user@host` opens

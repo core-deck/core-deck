@@ -2,8 +2,8 @@
 
 use super::commands;
 use super::protocol::{
-    DeviceMode, DeviceState, HidCommand, HidPacket, ProtocolMode, ResponsePacket, SoftKeyConfig,
-    SoftKeyType, PACKET_SIZE, VIAL_PREFIX,
+    DeviceMode, DeviceState, HidCommand, HidPacket, ProtoError, ProtocolMode, ResponsePacket,
+    SoftKeyConfig, SoftKeyType, PACKET_SIZE, VIAL_PREFIX,
 };
 use crate::state::{DaemonEvent, DaemonEventSender};
 use crate::HidConfig;
@@ -56,6 +56,15 @@ pub struct HidManager {
     /// Last display payload sent (for deduplication).
     /// Shared with monitor threads so disconnect clears it.
     last_display_payload: Arc<Mutex<String>>,
+    /// Accumulator for chunked device-initiated `TypeString` payloads.
+    /// Shared across every read path — the background reader thread, host
+    /// command `read_response*`, and `drain_response` — so a multi-chunk
+    /// TypeString that straddles the boundary between a poll read and a
+    /// host-command read reassembles into one buffer instead of being
+    /// split across per-call buffers (which corrupted the typed text).
+    /// Always accessed while the device lock is held, so it's effectively
+    /// uncontended.
+    type_string_buf: Arc<Mutex<Vec<u8>>>,
     /// Native USB hotplug watcher (macOS IOKit / Linux udev). None on
     /// platforms without a backend or when watcher init failed and the
     /// poll fallback took over.
@@ -102,6 +111,7 @@ impl HidManager {
             stop_monitor: Arc::new(AtomicBool::new(false)),
             protocol_mode: Arc::new(AtomicU8::new(ProtocolMode::Standalone as u8)),
             last_display_payload: Arc::new(Mutex::new(String::new())),
+            type_string_buf: Arc::new(Mutex::new(Vec::new())),
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             hotplug_watcher: None,
         };
@@ -170,31 +180,43 @@ impl HidManager {
                                 Some(event) = hotplug_rx.recv() => {
                                     match event {
                                         HotplugEvent::DeviceArrived => {
-                                            // Small delay to let the device initialize
-                                            tokio::time::sleep(Duration::from_millis(100)).await;
-
-                                            // Refresh device list to see the new device
-                                            {
-                                                let mut api_guard = api.lock();
-                                                let _ = api_guard.refresh_devices();
-                                            }
-
-                                            // Check presence (enumerate only, no open)
-                                            let name = {
-                                                let api_guard = api.lock();
-                                                let (avail, name) = check_device_presence(&api_guard, &config);
+                                            // hidapi enumeration can lag IOKit's arrival
+                                            // notification (slow hubs, composite-device
+                                            // enumeration), so retry the refresh+presence
+                                            // check a few times before giving up rather
+                                            // than emitting DeviceAvailable for a device
+                                            // that isn't enumerable yet.
+                                            let mut found_name: Option<Option<String>> = None;
+                                            for _ in 0..10 {
+                                                tokio::time::sleep(Duration::from_millis(100)).await;
+                                                {
+                                                    let mut api_guard = api.lock();
+                                                    let _ = api_guard.refresh_devices();
+                                                }
+                                                let (avail, name) = {
+                                                    let api_guard = api.lock();
+                                                    check_device_presence(&api_guard, &config)
+                                                };
                                                 if avail {
                                                     device_available.store(true, Ordering::Relaxed);
                                                     *cached_device_name.lock() = name.clone();
+                                                    found_name = Some(name);
+                                                    break;
                                                 }
-                                                name
-                                            };
+                                            }
 
-                                            let device_name = name.unwrap_or_else(|| "Core Deck".to_string());
-                                            info!("Device available via hotplug: {}", device_name);
-                                            let _ = event_tx.send(DaemonEvent::DeviceAvailable {
-                                                device_name,
-                                            });
+                                            match found_name {
+                                                Some(name) => {
+                                                    let device_name = name.unwrap_or_else(|| "Core Deck".to_string());
+                                                    info!("Device available via hotplug: {}", device_name);
+                                                    let _ = event_tx.send(DaemonEvent::DeviceAvailable {
+                                                        device_name,
+                                                    });
+                                                }
+                                                None => {
+                                                    warn!("Hotplug arrival but device never enumerated after 1s of retries; ignoring");
+                                                }
+                                            }
                                         }
                                         HotplugEvent::DeviceRemoved => {
                                             device_available.store(false, Ordering::Relaxed);
@@ -327,6 +349,7 @@ impl HidManager {
         let stop_monitor = Arc::clone(&self.stop_monitor);
         let protocol_mode = Arc::clone(&self.protocol_mode);
         let last_display_payload = Arc::clone(&self.last_display_payload);
+        let type_string_buf = Arc::clone(&self.type_string_buf);
         let event_tx = self.event_tx.clone();
         let ping_interval = Duration::from_millis(self.config.ping_interval_ms);
 
@@ -334,7 +357,6 @@ impl HidManager {
             info!("HID reader thread started");
             let mut consecutive_failures: u32 = 0;
             let mut last_ping = Instant::now() - ping_interval; // trigger immediate first ping
-            let mut type_string_buf: Vec<u8> = Vec::new();
 
             while !stop_monitor.load(Ordering::Relaxed) {
                 if !connected.load(Ordering::Relaxed) {
@@ -358,7 +380,7 @@ impl HidManager {
                                             dispatch_incoming_packet(
                                                 &pkt,
                                                 &event_tx,
-                                                &mut type_string_buf,
+                                                &mut type_string_buf.lock(),
                                             );
                                             true
                                         }
@@ -401,7 +423,7 @@ impl HidManager {
                             *last_display_payload.lock() = String::new();
                             let _ = event_tx.send(DaemonEvent::HidDisconnected);
                             consecutive_failures = 0;
-                            type_string_buf.clear();
+                            type_string_buf.lock().clear();
                             continue;
                         }
                     }
@@ -415,7 +437,11 @@ impl HidManager {
                             ProtocolMode::from_byte(protocol_mode.load(Ordering::Relaxed));
                         match read_raw_packet(dev, 20, poll_mode) {
                             Ok(Some(pkt)) => {
-                                dispatch_incoming_packet(&pkt, &event_tx, &mut type_string_buf);
+                                dispatch_incoming_packet(
+                                    &pkt,
+                                    &event_tx,
+                                    &mut type_string_buf.lock(),
+                                );
                             }
                             Ok(None) => {} // Timeout, no data
                             Err(e) => {
@@ -434,6 +460,16 @@ impl HidManager {
     /// Try to connect to the Core Deck device
     pub fn try_connect(&self) -> Result<()> {
         let api = self.api.lock();
+
+        // Re-check under the api lock: open_device's pre-check is racy, so
+        // two callers (the WS handler and the wrapper handler) can both
+        // pass it and reach here. The first to take this lock connects and
+        // stores `connected = true` before releasing it; the second then
+        // sees it and bails rather than double-opening (which would drop
+        // the first handle and emit a duplicate HidConnected).
+        if self.connected.load(Ordering::Relaxed) {
+            return Ok(());
+        }
 
         // Find device by VID/PID and usage page
         let device_info = api
@@ -475,7 +511,8 @@ impl HidManager {
             .context("Failed to set non-blocking mode")?;
 
         // Detect protocol mode and firmware version before storing
-        let (detected_mode, firmware_version) = detect_protocol_mode(&device, &self.event_tx);
+        let (detected_mode, firmware_version) =
+            detect_protocol_mode(&device, &self.event_tx, &self.type_string_buf);
         self.protocol_mode
             .store(detected_mode as u8, Ordering::Relaxed);
 
@@ -589,7 +626,13 @@ impl HidManager {
                     debug!("Failed to send GetVersion: {}", e);
                     return "unknown".to_string();
                 }
-                match read_response(device, HidCommand::GetVersion, &self.event_tx, mode) {
+                match read_response(
+                    device,
+                    HidCommand::GetVersion,
+                    &self.event_tx,
+                    mode,
+                    &self.type_string_buf,
+                ) {
                     Ok(response) if response.status == 0 => {
                         let version = String::from_utf8_lossy(&response.data).trim().to_string();
                         if version.is_empty() {
@@ -654,6 +697,7 @@ impl HidManager {
             &self.event_tx,
             mode,
             first_timeout_ms,
+            &self.type_string_buf,
         )?;
 
         info!("Soft key {} set", index);
@@ -680,8 +724,14 @@ impl HidManager {
         send_packets_to_device(device, &packets, mode)?;
 
         // Read response — expect chunked response with key config data
-        let response =
-            read_response_with_timeout(device, HidCommand::GetSoftKey, &self.event_tx, mode, 1000)?;
+        let response = read_response_with_timeout(
+            device,
+            HidCommand::GetSoftKey,
+            &self.event_tx,
+            mode,
+            1000,
+            &self.type_string_buf,
+        )?;
 
         // Parse response: [key_index, key_type, ...entry_data]
         // The firmware sends: send_response(cmd, status=0x00, [key_index, type, data...])
@@ -736,7 +786,13 @@ impl HidManager {
         send_packets_to_device(device, &packets, mode)?;
 
         // Read the response — firmware now returns effective assignments
-        let response = read_response(device, HidCommand::ResetSoftKeys, &self.event_tx, mode)?;
+        let response = read_response(
+            device,
+            HidCommand::ResetSoftKeys,
+            &self.event_tx,
+            mode,
+            &self.type_string_buf,
+        )?;
 
         // Parse response data: [type, kc_hi, kc_lo] x 3
         let mut configs = [
@@ -757,13 +813,22 @@ impl HidManager {
             },
         ];
 
+        // Re-pad to the fixed 9-byte layout: the chunked transport trims
+        // trailing zeros, which can drop the last key's kc_lo when it's
+        // 0x00 (leaving that key stuck at Default). The trimmed bytes were
+        // zeros, so padding back is faithful.
+        let mut resp_data = response.data.clone();
+        if resp_data.len() < 9 {
+            resp_data.resize(9, 0);
+        }
+
         for (i, config) in configs.iter_mut().enumerate().take(3) {
             let offset = i * 3;
-            if offset + 2 < response.data.len() {
+            if offset + 2 < resp_data.len() {
                 let key_type =
-                    SoftKeyType::from_byte(response.data[offset]).unwrap_or(SoftKeyType::Default);
-                let kc_hi = response.data[offset + 1];
-                let kc_lo = response.data[offset + 2];
+                    SoftKeyType::from_byte(resp_data[offset]).unwrap_or(SoftKeyType::Default);
+                let kc_hi = resp_data[offset + 1];
+                let kc_lo = resp_data[offset + 2];
                 *config = SoftKeyConfig {
                     index: i as u8,
                     key_type,
@@ -848,6 +913,7 @@ impl HidManager {
             &self.event_tx,
             proto_mode,
             timeout_ms,
+            &self.type_string_buf,
         )?;
 
         if response.data.len() < 4 {
@@ -887,6 +953,7 @@ impl HidManager {
             &self.event_tx,
             proto_mode,
             500,
+            &self.type_string_buf,
         )?;
 
         parse_theme_dump(&response.data)
@@ -910,6 +977,7 @@ impl HidManager {
             &self.event_tx,
             proto_mode,
             1500,
+            &self.type_string_buf,
         )?;
 
         parse_theme_dump(&response.data)
@@ -937,7 +1005,6 @@ impl HidManager {
     /// handles device-initiated state reports (button presses, YOLO switch).
     fn drain_response(&self, device: &HidDevice) {
         let mode = self.mode();
-        let mut type_string_buf = Vec::new();
         for _ in 0..3 {
             match read_raw_packet(device, 50, mode) {
                 Ok(Some(pkt)) => {
@@ -951,7 +1018,11 @@ impl HidManager {
                     // Forward key/string/ping events but skip StateReport —
                     // it's a confirmation echo, not a user action
                     if is_device_initiated && pkt.command() != Some(HidCommand::StateReport) {
-                        dispatch_incoming_packet(&pkt, &self.event_tx, &mut type_string_buf);
+                        dispatch_incoming_packet(
+                            &pkt,
+                            &self.event_tx,
+                            &mut self.type_string_buf.lock(),
+                        );
                     }
                     // If this is END packet of a response, we're done
                     if pkt.is_end() && !is_device_initiated {
@@ -1023,11 +1094,18 @@ fn check_device_presence(api: &HidApi, config: &HidConfig) -> (bool, Option<Stri
 fn detect_protocol_mode(
     device: &HidDevice,
     event_tx: &DaemonEventSender,
+    type_string_buf: &Mutex<Vec<u8>>,
 ) -> (ProtocolMode, String) {
     // --- Phase 1: try VIAL mode ---
     let vial_packets = commands::build_get_version(ProtocolMode::Vial);
     if send_packets_to_device(device, &vial_packets, ProtocolMode::Vial).is_ok() {
-        match read_response(device, HidCommand::GetVersion, event_tx, ProtocolMode::Vial) {
+        match read_response(
+            device,
+            HidCommand::GetVersion,
+            event_tx,
+            ProtocolMode::Vial,
+            type_string_buf,
+        ) {
             Ok(response) if response.status == 0 => {
                 let version = String::from_utf8_lossy(&response.data).trim().to_string();
                 if !version.is_empty() {
@@ -1062,6 +1140,7 @@ fn detect_protocol_mode(
         HidCommand::GetVersion,
         event_tx,
         ProtocolMode::Standalone,
+        type_string_buf,
     ) {
         Ok(response) if response.status == 0 => {
             let version = String::from_utf8_lossy(&response.data).trim().to_string();
@@ -1113,16 +1192,15 @@ fn send_single_packet(device: &HidDevice, packet: &HidPacket, mode: ProtocolMode
         ProtocolMode::Standalone => *bytes,
     };
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let data = {
-        let mut data = Vec::with_capacity(PACKET_SIZE + 1);
-        data.push(0x00); // Report ID
-        data.extend_from_slice(&wire);
-        data
-    };
-
-    #[cfg(target_os = "linux")]
-    let data = wire.to_vec();
+    // hidapi's write contract is platform-independent: the first byte is the
+    // report ID (0x00 for unnumbered reports) and is stripped before the
+    // bytes hit the wire. On Linux hidraw the kernel strips a leading 0x00;
+    // omitting it made the kernel eat the first *payload* byte instead, which
+    // corrupted every standalone-mode chunk whose flags byte was 0x00
+    // (i.e. the middle chunks of any 3+-chunk message).
+    let mut data = Vec::with_capacity(PACKET_SIZE + 1);
+    data.push(0x00); // Report ID
+    data.extend_from_slice(&wire);
 
     let written = device
         .write(&data)
@@ -1169,19 +1247,31 @@ fn read_raw_packet(
 /// stops at `count` even if the response carries extra trailing
 /// bytes — firmware may evolve to add slots without breaking older
 /// daemons.
+/// Max theme slots we'll accept in a dump — guards against a corrupt
+/// `count` byte driving a huge allocation. The device has 10 slots.
+const MAX_THEME_SLOTS: usize = 64;
+
 fn parse_theme_dump(data: &[u8]) -> Result<Vec<coredeck_protocol::ThemeColor>> {
     if data.is_empty() {
         return Err(anyhow!("theme dump response is empty"));
     }
     let count = data[0] as usize;
-    let expected = 1 + count * 3;
-    if data.len() < expected {
-        return Err(anyhow!(
-            "theme dump truncated: count={} but only {} bytes",
-            count,
-            data.len()
-        ));
+    if count > MAX_THEME_SLOTS {
+        return Err(anyhow!("theme dump count={} exceeds sane max", count));
     }
+    let expected = 1 + count * 3;
+    // The chunked transport trims trailing zero padding, which can also
+    // eat a legitimate trailing 0x00 — e.g. a final slot with val=0
+    // (black). The trimmed bytes were zeros by definition, so re-pad up
+    // to the declared length to reconstruct the original.
+    let mut buf;
+    let data = if data.len() < expected {
+        buf = data.to_vec();
+        buf.resize(expected, 0);
+        &buf[..]
+    } else {
+        data
+    };
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
         let off = 1 + i * 3;
@@ -1202,8 +1292,9 @@ fn read_response(
     expected_cmd: HidCommand,
     event_tx: &DaemonEventSender,
     mode: ProtocolMode,
+    type_string_buf: &Mutex<Vec<u8>>,
 ) -> Result<ResponsePacket> {
-    read_response_with_timeout(device, expected_cmd, event_tx, mode, 200)
+    read_response_with_timeout(device, expected_cmd, event_tx, mode, 200, type_string_buf)
 }
 
 /// Like `read_response` but lets the caller widen the wait for the
@@ -1217,11 +1308,11 @@ fn read_response_with_timeout(
     event_tx: &DaemonEventSender,
     mode: ProtocolMode,
     first_timeout_ms: i32,
+    type_string_buf: &Mutex<Vec<u8>>,
 ) -> Result<ResponsePacket> {
     let mut payload = Vec::new();
     let mut got_start = false;
     let mut _command_byte = 0u8;
-    let mut type_string_buf = Vec::new();
 
     // Read packets until we get a complete response (up to reasonable limit)
     for _ in 0..20 {
@@ -1247,7 +1338,7 @@ fn read_response_with_timeout(
                 | Some(HidCommand::Ping)
         );
         if is_device_initiated {
-            dispatch_incoming_packet(&pkt, event_tx, &mut type_string_buf);
+            dispatch_incoming_packet(&pkt, event_tx, &mut type_string_buf.lock());
             continue;
         }
 
@@ -1279,6 +1370,21 @@ fn read_response_with_timeout(
             }
 
             let status = if payload.is_empty() { 0 } else { payload[0] };
+
+            // A firmware Error response (command 0xFF) means the device
+            // rejected the command — surface it instead of handing back a
+            // success-looking ResponsePacket the caller would misread.
+            if pkt.command() == Some(HidCommand::Error) {
+                let desc = ProtoError::from_byte(status)
+                    .map(|e| e.description())
+                    .unwrap_or("unknown firmware error");
+                return Err(anyhow!(
+                    "firmware error response: {} (code 0x{:02X})",
+                    desc,
+                    status
+                ));
+            }
+
             let data = if payload.len() > 1 {
                 payload[1..].to_vec()
             } else {

@@ -6,14 +6,14 @@ Companion software for the Core Deck macropad — a hardware control surface for
 
 The system consists of two binaries:
 
-- **`coredeck`** — Background daemon that owns the HID device, runs the tray icon, and serves the HTTP REST + WebSocket APIs on `127.0.0.1:19384`. The settings UI is browser-based, served by the daemon. This is the only binary needed to drive the device.
+- **`coredeck`** — Background daemon that owns the HID device, runs the tray icon, and serves the HTTP REST + WebSocket APIs on `127.0.0.1:19384`. The settings UI is browser-based, served by the daemon; it hosts the soft-key editor, named soft-key presets, and a device theme editor with live preview. This is the only binary needed to drive the device.
 - **`coredeck-claude`** — Thin wrapper that runs `claude` under a PTY and registers the session with the daemon (via `/wrapper-ws`) so soft keys, the rotary encoder, and tab cycling drive the active Claude session.
 
 Third-party tools can also integrate with the daemon directly via its REST API.
 
 ## Building
 
-Requires Rust 1.75+ (stable).
+Requires Rust 1.86+ (stable).
 
 ```bash
 # macOS: ensure Xcode CLI tools are installed
@@ -80,7 +80,8 @@ rules and `coredeck setup` (systemd user unit + Claude Code hooks).
 The short version:
 
 ```bash
-sudo apt install build-essential pkg-config libudev-dev libhidapi-dev
+sudo apt install build-essential pkg-config libudev-dev libhidapi-dev \
+                 libgtk-3-dev libxdo-dev libayatana-appindicator3-dev
 cargo build --workspace --release
 
 # Drop binaries on PATH and install udev rules — see docs/linux-setup.md
@@ -101,9 +102,10 @@ alias claude="coredeck-claude"
 If you'd rather drive things piecewise:
 
 ```bash
-# One-time: register Claude Code hooks (writes ~/.claude/settings.json
-# with HTTP hook entries pointing at the daemon, plus a tiny curl shim
-# so claude doesn't error when the daemon isn't running).
+# One-time: register Claude Code hooks (writes command-type hook entries
+# to ~/.claude/settings.json that invoke a tiny curl shim, which POSTs
+# each event to the daemon and swallows connection errors so claude
+# doesn't error when the daemon isn't running).
 coredeck hooks install
 
 # Start the daemon

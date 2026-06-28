@@ -46,7 +46,11 @@ pub async fn wrapper_ws_handler(
     ws.on_upgrade(move |socket| handle_wrapper_ws(socket, state))
 }
 
+/// Monotonic per-connection token source for `Wrapper::conn_token`.
+static CONN_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
+    let conn_token = CONN_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     // Wait for the first frame, which must be a Register.
@@ -69,40 +73,38 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         }
     };
 
-    let (wrapper_id, pid, cwd, started_at_unix, host_terminal, cached_session_id, is_remote) =
-        match register {
-            WrapperToDaemon::Register {
-                wrapper_id,
-                pid,
-                cwd,
-                started_at_unix,
-                host_terminal,
-                session_id: cached_session_id,
-                is_remote,
-            } => (
-                wrapper_id,
-                pid,
-                cwd,
-                started_at_unix,
-                host_terminal,
-                cached_session_id,
-                is_remote,
-            ),
-            WrapperToDaemon::Goodbye { .. }
-            | WrapperToDaemon::FocusChanged { .. }
-            | WrapperToDaemon::TitleHint { .. } => {
-                debug!("wrapper sent non-Register frame first; ignoring");
-                return;
-            }
-        };
+    let WrapperToDaemon::Register {
+        wrapper_id,
+        pid,
+        cwd,
+        started_at_unix,
+        host_terminal,
+        session_id: cached_session_id,
+        is_remote,
+        wrapper_version,
+    } = register
+    else {
+        debug!("wrapper sent non-Register frame first; ignoring");
+        return;
+    };
 
     info!(
         wrapper_id = %wrapper_id,
         pid,
         cwd = %cwd,
         host = ?host_terminal.as_ref().map(|h| &h.kind),
+        wrapper_version = wrapper_version.as_deref().unwrap_or("<pre-0.2>"),
         "wrapper connected",
     );
+    if let Some(wv) = wrapper_version.as_deref() {
+        if wv != env!("CARGO_PKG_VERSION") {
+            info!(
+                wrapper = wv,
+                daemon = env!("CARGO_PKG_VERSION"),
+                "wrapper/daemon version mismatch — protocol fields may differ"
+            );
+        }
+    }
 
     // Channel that owns daemon→wrapper command flow.
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<DaemonToWrapper>();
@@ -151,6 +153,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
                 is_focused: false,
                 last_permission_mode,
                 tx: cmd_tx.clone(),
+                conn_token,
             },
         );
         adopted
@@ -168,6 +171,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
     // Ack.
     let _ = cmd_tx.send(DaemonToWrapper::Registered {
         wrapper_id: wrapper_id.clone(),
+        daemon_version: Some(env!("CARGO_PKG_VERSION").to_string()),
     });
 
     // Open the HID device if available. The daemon needs it to push
@@ -197,14 +201,10 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         }
     });
 
-    // Reader loop — Goodbye, focus updates, then disconnect.
+    // Reader loop — focus updates, title hints, then disconnect.
     while let Some(msg) = ws_rx.next().await {
         match msg {
             Ok(Message::Text(t)) => match serde_json::from_str::<WrapperToDaemon>(t.as_str()) {
-                Ok(WrapperToDaemon::Goodbye { exit_code, .. }) => {
-                    debug!(wrapper_id = %wrapper_id, ?exit_code, "wrapper said goodbye");
-                    break;
-                }
                 Ok(WrapperToDaemon::FocusChanged { focused, .. }) => {
                     {
                         let mut wrappers = state.wrappers.write().await;
@@ -235,14 +235,31 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
     }
 
     writer.abort();
-    {
+    // Only unregister if the registry entry still belongs to THIS
+    // connection. A newer Register under the same wrapper_id (persistent
+    // --ssh ids, or a fresh reconnect racing this socket's close) has
+    // already replaced the entry — removing it here would silently drop
+    // a live wrapper until its own connection happened to flap.
+    let removed = {
         let mut wrappers = state.wrappers.write().await;
-        wrappers.remove(&wrapper_id);
+        match wrappers.get(&wrapper_id) {
+            Some(w) if w.conn_token == conn_token => {
+                wrappers.remove(&wrapper_id);
+                true
+            }
+            _ => false,
+        }
+    };
+    if removed {
+        drop_yolo_enrollment_for_wrapper(&state, &wrapper_id).await;
+        emit_tab_list(&state).await;
+        info!(wrapper_id = %wrapper_id, "wrapper disconnected");
+    } else {
+        debug!(
+            wrapper_id = %wrapper_id,
+            "stale wrapper connection closed; registry entry belongs to a newer connection"
+        );
     }
-    drop_yolo_enrollment_for_wrapper(&state, &wrapper_id).await;
-    emit_tab_list(&state).await;
-
-    info!(wrapper_id = %wrapper_id, "wrapper disconnected");
 }
 
 /// `POST /wrapper/register` — bind a Claude `session_id` to a `wrapper_id`.
@@ -350,17 +367,37 @@ pub async fn emit_tab_list(state: &Arc<DaemonState>) {
 /// device variant lives inline in `push_to_device` and uses
 /// `short_cwd_label` for the 24-char width. Remote (`--ssh`) tabs get
 /// a leading `↦ ` so they're easy to spot in the menu.
-pub fn tab_label_long(tab: &WrapperTab) -> String {
-    let base = tab
-        .session_name
-        .clone()
-        .or_else(|| tab.terminal_title.clone())
-        .unwrap_or_else(|| pretty_cwd(&tab.cwd));
-    if tab.is_remote {
-        format!("↦ {}", base)
+/// The canonical session-label priority used on every surface — tray,
+/// device, and alert overlay: `session_name → terminal_title → <cwd
+/// fallback>`, with a leading `↦ ` for remote (`--ssh`) sessions. The cwd
+/// fallback is formatted differently per surface (the tray allows a wider
+/// cap than the 24-char device line), so the caller passes the already-
+/// formatted string rather than a raw cwd.
+pub fn session_label(
+    session_name: Option<&str>,
+    terminal_title: Option<&str>,
+    cwd_fallback: &str,
+    is_remote: bool,
+) -> String {
+    let base = session_name
+        .filter(|s| !s.is_empty())
+        .or_else(|| terminal_title.filter(|s| !s.is_empty()))
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| cwd_fallback.to_string());
+    if is_remote {
+        format!("↦ {base}")
     } else {
         base
     }
+}
+
+pub fn tab_label_long(tab: &WrapperTab) -> String {
+    session_label(
+        tab.session_name.as_deref(),
+        tab.terminal_title.as_deref(),
+        &pretty_cwd(&tab.cwd),
+        tab.is_remote,
+    )
 }
 
 /// Soft cap for tray-menu cwd labels — wider than the device's 24,
@@ -443,21 +480,16 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
         None => return,
     };
 
-    let session_label = {
-        let base = active
-            .session_name
-            .clone()
-            .or_else(|| active.terminal_title.clone())
-            .unwrap_or_else(|| short_cwd_label(&active.cwd));
-        // `↦ ` marks remote (`--ssh`) sessions on the device too. The
-        // glyph (U+21A6 RIGHTWARDS ARROW FROM BAR) is in Terminus'
-        // coverage so the firmware draws it without extra atlas work.
-        if active.is_remote {
-            format!("↦ {}", base)
-        } else {
-            base
-        }
-    };
+    // Same priority as the tray and alert surfaces (session_name →
+    // terminal_title → cwd), but with the device's narrower cwd cap. The
+    // `↦ ` remote marker (U+21A6, in Terminus' coverage) is applied by
+    // `session_label`.
+    let label = session_label(
+        active.session_name.as_deref(),
+        active.terminal_title.as_deref(),
+        &short_cwd_label(&active.cwd),
+        active.is_remote,
+    );
     // Line 1 priority: subagent label (parent's tools are subordinate while
     // a subagent is running) > the parent's current_task.
     let task = active
@@ -482,7 +514,7 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
     let tabs_state: Vec<u8> = snapshot.tabs.iter().map(|t| t.tab_state).collect();
 
     let update = DisplayUpdate {
-        session: session_label,
+        session: label,
         task,
         task2,
         tabs: tabs_state,
@@ -1115,22 +1147,8 @@ pub async fn set_active_wrapper(state: &Arc<DaemonState>, wrapper_id: &str) -> R
 }
 
 /// Look up a wrapper by `session_id` and send a `Write { bytes }` to it.
-/// Returns true if the wrapper was found and the write was queued.
-#[allow(dead_code)]
-pub async fn write_to_session(state: &Arc<DaemonState>, session_id: &str, bytes: Vec<u8>) -> bool {
-    let wrappers = state.wrappers.read().await;
-    let Some(w) = wrappers
-        .values()
-        .find(|w| w.session_id.as_deref() == Some(session_id))
-    else {
-        return false;
-    };
-    w.tx.send(DaemonToWrapper::Write { bytes }).is_ok()
-}
-
 /// Look up a wrapper by `wrapper_id` and send a `Write { bytes }` to it.
 /// Returns true if the wrapper was found and the write was queued.
-#[allow(dead_code)]
 pub async fn write_to_wrapper(state: &Arc<DaemonState>, wrapper_id: &str, bytes: Vec<u8>) -> bool {
     let wrappers = state.wrappers.read().await;
     let Some(w) = wrappers.get(wrapper_id) else {
@@ -1182,5 +1200,37 @@ pub async fn route_hid_type_string(state: &Arc<DaemonState>, text: &str, send_en
             debug!(error = %e, "wrapper type-string route failed");
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::session_label;
+
+    #[test]
+    fn label_priority() {
+        // session_name wins.
+        assert_eq!(
+            session_label(Some("my-proj"), Some("a title"), "~/x", false),
+            "my-proj"
+        );
+        // terminal_title is next.
+        assert_eq!(
+            session_label(None, Some("a title"), "~/x", false),
+            "a title"
+        );
+        // cwd fallback last.
+        assert_eq!(session_label(None, None, "~/x", false), "~/x");
+        // empty name/title skip to next.
+        assert_eq!(session_label(Some(""), Some(""), "~/x", false), "~/x");
+    }
+
+    #[test]
+    fn label_remote_prefix() {
+        assert_eq!(
+            session_label(Some("my-proj"), None, "~/x", true),
+            "↦ my-proj"
+        );
+        assert_eq!(session_label(None, None, "~/x", true), "↦ ~/x");
     }
 }

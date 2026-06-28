@@ -1,10 +1,10 @@
 [package]
 name = "coredeck"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.75"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "CoreDeck daemon: owns the HID device and serves the HTTP/WS APIs and Claude Code hook endpoints"
-license = "GPL-3.0-or-later"
+license.workspace = true
 
 [[bin]]
 name = "coredeck"
@@ -19,7 +19,6 @@ tokio = { version = "1.43", features = ["full", "sync", "time", "process", "io-u
 
 # HTTP + WebSocket server
 axum = { version = "0.8", features = ["ws"] }
-tower-http = { version = "0.6", features = ["cors"] }
 
 # HTTP client — for the update checker. rustls-tls keeps us off
 # OpenSSL on Linux; default-features off skips cookies/blocking/etc.

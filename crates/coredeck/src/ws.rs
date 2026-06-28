@@ -147,6 +147,19 @@ async fn handle_ws_command(
         }
     };
 
+    // seq 0 is reserved for daemon-initiated events; a command echoing
+    // seq 0 back would make its response indistinguishable from an
+    // event. The protocol docs always required seq > 0 — enforce it.
+    if seq == 0 {
+        let err = encode_ws_frame(
+            WsResponseTag::CommandError as u8,
+            seq,
+            b"commands must use seq > 0 (0 is reserved for events)",
+        );
+        let _ = reply_tx.send(err);
+        return;
+    }
+
     let hid = state.hid.lock().await;
 
     let result: Result<Option<Vec<u8>>, String> = match cmd {
@@ -253,7 +266,11 @@ async fn handle_ws_command(
             )))
         }
         WsCommandTag::ClearAlert => {
-            if !payload.is_empty() {
+            // Single byte = raw tab index; anything longer is the JSON
+            // ClearAlertRequest form. (The old order — raw for any
+            // non-empty payload, JSON only when empty — made the JSON
+            // branch unreachable: `{"tab":0}` cleared tab 0x7B.)
+            if payload.len() == 1 {
                 let tab = payload[0] as usize;
                 hid.clear_alert(tab)
                     .map(|_| None)

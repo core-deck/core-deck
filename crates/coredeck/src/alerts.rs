@@ -21,12 +21,24 @@
 //! same state machine. Keeping the transitions in one place is cheaper
 //! than scattering them across two large files.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use crate::keymap::{KEYCODE_F20, KEYCODE_KNOB_NEXT, KEYCODE_KNOB_PREV};
 use crate::state::DaemonEvent;
 use crate::DaemonState;
+
+/// Monotonic id stamped on every installed alert (Idle or Pending). Lets
+/// a handler that parked on a specific alert verify the live alert is
+/// still *its* alert before tearing it down — the alert may have been
+/// resolved and replaced by a queued one in the meantime.
+static ALERT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_alert_id() -> u64 {
+    ALERT_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Outcome of an interactive permission decision from the device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +61,7 @@ pub enum AlertState {
     /// the next HID input, which is then forwarded normally. Keyed by
     /// session so a hook from a different session can't clobber it.
     Idle {
+        id: u64,
         session_id: String,
         tab_index: usize,
         label: String,
@@ -57,6 +70,7 @@ pub enum AlertState {
     /// Interactive permission prompt. Holds the oneshot the hook handler
     /// is awaiting; the next HID input resolves it.
     Pending {
+        id: u64,
         session_id: String,
         tool_name: Option<String>,
         tx: oneshot::Sender<DecisionOutcome>,
@@ -99,6 +113,15 @@ impl AlertState {
             AlertState::Pending { tab_index, .. } => *tab_index,
         }
     }
+
+    /// Unique id of the live alert, if any. `None` when nothing is showing.
+    fn id(&self) -> Option<u64> {
+        match self {
+            AlertState::None => None,
+            AlertState::Idle { id, .. } => Some(*id),
+            AlertState::Pending { id, .. } => Some(*id),
+        }
+    }
 }
 
 /// A Pending permission alert waiting in the queue because another
@@ -107,6 +130,10 @@ impl AlertState {
 /// path uses — so the hook handler awaits its decision the same way
 /// regardless of whether the alert was instant or queued.
 pub struct QueuedPending {
+    /// Allocated when the alert is first queued and preserved through
+    /// promotion, so the parked handler's `clear_alert_if(id)` targets
+    /// this alert whether it's still queued or already promoted.
+    pub id: u64,
     pub session_id: String,
     pub tool_name: Option<String>,
     pub label: String,
@@ -226,6 +253,17 @@ pub async fn show_idle_alert(
         .await
         .unwrap_or(0);
 
+    // Take the alert lock FIRST and hold it across the HID send, so the
+    // busy-check and the state write are atomic. Without this an alert
+    // installed by a concurrent hook task between the check and the
+    // write would be silently overwritten (and, if Pending, its oneshot
+    // dropped). HID-lock-after-alert-lock is the ordering used by every
+    // install path, so there's no deadlock risk.
+    let mut guard = state.alert_state.lock().await;
+    if guard.is_some() {
+        debug!("Idle alert suppressed; another alert raced in");
+        return;
+    }
     {
         let hid = state.hid.lock().await;
         if !hid.is_connected() {
@@ -237,9 +275,8 @@ pub async fn show_idle_alert(
             return;
         }
     }
-
-    let mut guard = state.alert_state.lock().await;
     *guard = AlertState::Idle {
+        id: next_alert_id(),
         session_id: session_id.to_string(),
         tab_index,
         label: session_label.to_string(),
@@ -265,20 +302,30 @@ pub async fn install_pending_alert(
     text: &str,
     details: Option<&str>,
     is_enrollment: bool,
-) -> Option<oneshot::Receiver<DecisionOutcome>> {
-    let busy = {
-        let guard = state.alert_state.lock().await;
-        guard.is_some()
-    };
+) -> Option<ParkedAlert> {
+    let tab_index = crate::wrapper::tab_index_for_session(state, &session_id)
+        .await
+        .unwrap_or(0);
 
-    if busy {
+    // Hold the alert lock across the whole decision — busy-check, HID
+    // send, and state write — so a concurrent install can't slip in
+    // between the check and the write and get silently overwritten.
+    // (alert-outer / hid-inner is the lock ordering used everywhere.)
+    let mut guard = state.alert_state.lock().await;
+
+    if guard.is_some() {
+        // Something's live — queue instead. The queue has its own lock,
+        // taken while we still hold the alert lock; nothing takes them
+        // in the opposite order.
         let mut queue = state.pending_queue.lock().await;
         if queue.len() >= PENDING_QUEUE_CAP {
             debug!("Permission alert dropped; queue full");
             return None;
         }
         let (tx, rx) = oneshot::channel();
+        let id = next_alert_id();
         queue.push_back(QueuedPending {
+            id,
             session_id: session_id.clone(),
             tool_name: tool_name.clone(),
             label: session_label.to_string(),
@@ -292,12 +339,11 @@ pub async fn install_pending_alert(
             depth = queue.len(),
             "permission alert queued behind a live alert",
         );
-        return Some(rx);
+        // The id is allocated now and preserved when this entry is
+        // promoted, so the parked handler's `clear_alert_if(id)` targets
+        // it correctly whether it's still queued or already live.
+        return Some(ParkedAlert { id, rx });
     }
-
-    let tab_index = crate::wrapper::tab_index_for_session(state, &session_id)
-        .await
-        .unwrap_or(0);
 
     {
         let hid = state.hid.lock().await;
@@ -312,8 +358,9 @@ pub async fn install_pending_alert(
     }
 
     let (tx, rx) = oneshot::channel();
-    let mut guard = state.alert_state.lock().await;
+    let id = next_alert_id();
     *guard = AlertState::Pending {
+        id,
         session_id,
         tool_name,
         tx,
@@ -323,7 +370,16 @@ pub async fn install_pending_alert(
         details: details.map(|s| s.to_string()),
         is_enrollment,
     };
-    Some(rx)
+    Some(ParkedAlert { id, rx })
+}
+
+/// Returned by `install_pending_alert`: the receiver the hook handler
+/// awaits, plus the alert's stable id (allocated at install time and
+/// preserved through queue promotion) so the handler can scope its
+/// post-timeout cleanup to *its own* alert via `clear_alert_if`.
+pub struct ParkedAlert {
+    pub id: u64,
+    pub rx: oneshot::Receiver<DecisionOutcome>,
 }
 
 /// Pop the next queued Pending alert and install it on the device.
@@ -348,6 +404,18 @@ pub async fn try_install_next_pending(state: &DaemonState) {
         let Some(q) = q else {
             return;
         };
+
+        // Skip entries whose parked handler already gave up (its 5-min
+        // timeout fired while the entry sat in the queue, dropping the
+        // receiver). Installing a device prompt nobody is awaiting just
+        // leaves dead UI on the device.
+        if q.tx.is_closed() {
+            debug!(
+                session = %q.session_id,
+                "queued PR skipped: handler already timed out / went away",
+            );
+            continue;
+        }
 
         // Skip past queued entries the user has already implicitly
         // answered via the active alert's enrollment decision —
@@ -416,6 +484,9 @@ pub async fn try_install_next_pending(state: &DaemonState) {
             return;
         }
         *guard = AlertState::Pending {
+            // Preserve the id allocated at queue time so the parked
+            // handler's `clear_alert_if(id)` still matches.
+            id: q.id,
             session_id: q.session_id,
             tool_name: q.tool_name,
             tx: q.tx,
@@ -445,19 +516,24 @@ pub async fn drop_queued_for_session(state: &DaemonState, session_id: &str) {
     }
 }
 
-/// Clear any currently-showing alert (sends `clear_alert` to the device
-/// and resets the state). If a Pending alert is replaced, its oneshot
-/// is dropped, which causes the awaiting hook handler to fall back.
-/// Pops the queued Pending head into the freshly empty slot.
-pub async fn clear_alert(state: &DaemonState) {
+/// Clear the live alert only if it's still the one identified by `id`.
+///
+/// Used by a parked PermissionRequest handler after its `oneshot`
+/// resolves or times out: on the normal device-resolve path the alert
+/// was already consumed and a queued sibling may have been promoted into
+/// its place, so an unconditional `clear_alert` here would tear down the
+/// *wrong* alert (dropping that sibling's oneshot and bouncing it back to
+/// the terminal). Scoping the clear to this handler's own id fixes that —
+/// it's a no-op once the alert has moved on.
+pub async fn clear_alert_if(state: &DaemonState, id: u64) {
     let cleared = {
         let mut guard = state.alert_state.lock().await;
-        if !guard.is_some() {
-            None
-        } else {
+        if guard.id() == Some(id) {
             let tab_index = guard.tab_index();
             *guard = AlertState::None;
             Some(tab_index)
+        } else {
+            None
         }
     };
 
@@ -468,7 +544,7 @@ pub async fn clear_alert(state: &DaemonState) {
     {
         let hid = state.hid.lock().await;
         if let Err(e) = hid.clear_alert(tab_index) {
-            debug!(error = %e, "clear_alert failed");
+            debug!(error = %e, "clear_alert_if failed");
         }
     }
     try_install_next_pending(state).await;
@@ -655,7 +731,7 @@ pub async fn consume_input_for_decision(state: &DaemonState, event: &DaemonEvent
     }
 
     // Snapshot under the lock; bail fast when nothing is showing.
-    let (alert_session_id, alert_is_idle) = {
+    let (alert_id, alert_session_id, alert_is_idle) = {
         let guard = state.alert_state.lock().await;
         if !guard.is_some() {
             // No alert. F20 still has meaning — it raises the active
@@ -667,7 +743,11 @@ pub async fn consume_input_for_decision(state: &DaemonState, event: &DaemonEvent
                 AlertOutcome::Passthrough
             };
         }
-        (guard.session_id().map(String::from), guard.is_idle())
+        (
+            guard.id(),
+            guard.session_id().map(String::from),
+            guard.is_idle(),
+        )
     };
 
     // F20 with alert. Two cases:
@@ -681,17 +761,25 @@ pub async fn consume_input_for_decision(state: &DaemonState, event: &DaemonEvent
     // and raises that terminal.
     if matches!(kind, InputKind::Focus) {
         if alert_is_idle {
-            let mut guard = state.alert_state.lock().await;
-            let prev = std::mem::take(&mut *guard);
-            drop(guard);
-            if let AlertState::Idle { tab_index, .. } = prev {
+            // Only clear if it's still the same idle alert we snapshotted
+            // — a promotion may have swapped it out from under us.
+            let prev = {
+                let mut guard = state.alert_state.lock().await;
+                if guard.id() == alert_id {
+                    Some(std::mem::take(&mut *guard))
+                } else {
+                    None
+                }
+            };
+            if let Some(AlertState::Idle { tab_index, .. }) = prev {
                 let hid = state.hid.lock().await;
                 if let Err(e) = hid.clear_alert(tab_index) {
                     debug!(error = %e, "clear_alert (idle, F20) failed");
                 }
+                // Slot is free — promote any queued Pending alert.
+                drop(hid);
+                try_install_next_pending(state).await;
             }
-            // Slot is free — promote any queued Pending alert.
-            try_install_next_pending(state).await;
         }
         return match alert_session_id {
             Some(sid) => AlertOutcome::FocusSession(sid),
@@ -720,8 +808,18 @@ pub async fn consume_input_for_decision(state: &DaemonState, event: &DaemonEvent
         return AlertOutcome::Passthrough;
     }
 
-    // The input is meaningful for the current alert; transition.
+    // The input is meaningful for the current alert; transition — but
+    // only if the live alert is still the one we classified against. A
+    // promotion (queue drain after a sibling resolved) can swap
+    // Pending(A) for Pending(B) between the snapshot above and here; the
+    // keypress was the user's answer to A, not B, so applying it to B
+    // would resolve the wrong prompt. On mismatch, pass through and let
+    // the user answer the now-current alert with a fresh keypress.
     let mut guard = state.alert_state.lock().await;
+    if guard.id() != alert_id {
+        debug!("alert changed between classify and resolve; passing input through");
+        return AlertOutcome::Passthrough;
+    }
     let prev = std::mem::take(&mut *guard);
     drop(guard);
 

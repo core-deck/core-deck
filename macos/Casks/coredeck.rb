@@ -13,6 +13,9 @@ cask "coredeck" do
   end
 
   auto_updates false
+  # Prebuilt DMG is Apple Silicon only (Intel was dropped from CI).
+  # Intel users build from source — see docs/Building.md.
+  depends_on arch: :arm64
   depends_on macos: ">= :big_sur"
 
   app "Core Deck.app"
@@ -29,10 +32,17 @@ cask "coredeck" do
             quit:      "com.coredeck.CoreDeck"
 
   # `brew uninstall --zap` removes user-level state too: launchd plist,
-  # Claude Code hook config, daemon logs, settings cache.
+  # daemon logs, the embedded hook scripts, and the daemon data dir
+  # (wrapper-id cache + soft-key presets).
+  #
+  # NOTE: this does NOT remove CoreDeck's hook *entries* from
+  # ~/.claude/settings.json (they'd be left pointing at the deleted
+  # scripts). Run `coredeck hooks uninstall` before `brew uninstall` for
+  # a fully clean removal.
   zap trash: [
     "~/Library/LaunchAgents/com.coredeck.daemon.plist",
     "~/Library/Logs/coredeck.log",
+    "~/Library/Application Support/com.coredeck.CoreDeck",
     "~/.claude/coredeck-hook.sh",
     "~/.claude/coredeck-register.sh",
   ]

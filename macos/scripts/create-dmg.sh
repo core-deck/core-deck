@@ -2,7 +2,7 @@
 # Create a signed DMG for Core Deck distribution
 # Run this after sign.sh
 
-set -e
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
@@ -10,7 +10,9 @@ DIST_DIR="$PROJECT_ROOT/dist"
 
 APP_NAME="Core Deck"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
-VERSION=$(grep '^version' "$PROJECT_ROOT/crates/coredeck/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+# Version lives in the workspace root [workspace.package] (the crate
+# manifests inherit it via version.workspace = true).
+VERSION=$(grep '^version' "$PROJECT_ROOT/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
 DMG_NAME="CoreDeck-${VERSION}"
 DMG_PATH="$DIST_DIR/$DMG_NAME.dmg"
 
@@ -121,7 +123,7 @@ fi
 # Notarize DMG
 if [ "$SKIP_NOTARIZE" = true ]; then
     echo "Skipping notarization as requested"
-elif [ -n "$KEYCHAIN_PROFILE" ] || [ -n "$APPLE_ID" ]; then
+elif [ -n "$KEYCHAIN_PROFILE" ] || { [ -n "$APPLE_ID" ] && [ -n "$TEAM_ID" ] && [ -n "$APP_PASSWORD" ]; }; then
     echo "=== Notarizing DMG ==="
 
     if [ -n "$KEYCHAIN_PROFILE" ]; then
@@ -129,6 +131,9 @@ elif [ -n "$KEYCHAIN_PROFILE" ] || [ -n "$APPLE_ID" ]; then
             --keychain-profile "$KEYCHAIN_PROFILE" \
             --wait
     else
+        # All three (apple-id, team-id, password) are required together —
+        # a half-set credential would call notarytool with an empty
+        # --team-id and fail the release mid-run.
         xcrun notarytool submit "$DMG_PATH" \
             --apple-id "$APPLE_ID" \
             --team-id "$TEAM_ID" \

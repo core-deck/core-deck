@@ -2,14 +2,13 @@
 # Build and bundle Core Deck for macOS
 # Creates a proper .app bundle ready for signing
 
-set -e
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 MACOS_DIR="$PROJECT_ROOT/macos"
 
 APP_NAME="Core Deck"
-BUNDLE_ID="com.coredeck.CoreDeck"
 EXECUTABLE_NAME="coredeck"
 WRAPPER_NAME="coredeck-claude"
 

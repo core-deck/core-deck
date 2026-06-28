@@ -101,7 +101,7 @@ Request body for `POST /api/alert` and payload for WS `Alert` command (tag `0x08
 
 ## ClearAlertRequest
 
-Request body for `POST /api/alert/clear` and alternative payload for WS `ClearAlert` command (tag `0x0A`).
+Request body for `POST /api/alert/clear`. (The WS `ClearAlert` command, tag `0x0A`, takes a raw 1-byte tab index, not this JSON shape.)
 
 ```json
 {
@@ -282,7 +282,11 @@ Constants for the tab state values used in `tabs` arrays:
 
 ## WrapperTabList
 
-Returned by `GET /api/wrappers` and broadcast over the main WS as part of `ClaudeHookEvent` activity. Snapshot of every connected `coredeck-claude` wrapper, including the per-session metadata gathered from hooks.
+Broadcast over the main WS as its own event (`WrapperTabList`, tag `0x8A`, seq=0) on every wrapper register/unregister, hook update, and active-tab change. Snapshot of every connected `coredeck-claude` wrapper, including the per-session metadata gathered from hooks.
+
+> **Note:** `GET /api/wrappers` does **not** return this type — that endpoint returns a bare JSON array of debug rows (`{wrapper_id, pid, cwd, started_at_unix, session_id, host_terminal_kind, active}`). The WS event is the only source of the full hook-derived snapshot.
+
+Fields whose value is `null` (and `subagent_count: 0` / `is_remote: false`) are **omitted** from the serialized JSON, not emitted as `null`.
 
 ```json
 {
@@ -302,9 +306,7 @@ Returned by `GET /api/wrappers` and broadcast over the main WS as part of `Claud
       "permission_mode": "default",
       "tab_state": 2,
       "context_percent": 42.5,
-      "cost_usd": 1.23,
-      "subagent_label": null,
-      "subagent_count": 0
+      "cost_usd": 1.23
     }
   ],
   "active_wrapper_id": "01HX..."
@@ -340,4 +342,35 @@ One row in the wrapper-tab snapshot. Most optional fields are `null` until the c
 | `context_percent` | float \| null | Context window usage percent |
 | `cost_usd` | float \| null | Session cost in USD |
 | `subagent_label` | string \| null | First in-flight subagent's label (with `(N)` prefix when more than one) |
-| `subagent_count` | u32 | Number of subagent rows reported in the latest tick |
+| `subagent_count` | u32 | Number of subagent rows reported in the latest tick (omitted when 0) |
+| `is_remote` | bool | True for `--ssh` wrappers; UI prefixes their labels with `↦` (omitted when false) |
+
+## WrapperWriteRequest
+
+Payload for the WS `WrapperWrite` command (tag `0x0B`). Injects raw bytes into a wrapper's PTY.
+
+```json
+{
+  "wrapper_id": "",
+  "bytes": [27, 91, 90]
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `wrapper_id` | string | Target wrapper id. Empty string targets the currently active wrapper |
+| `bytes` | array of u8 | Raw bytes written to the wrapper's PTY master |
+
+## SetActiveWrapperRequest
+
+Payload for the WS `SetActiveWrapper` command (tag `0x0C`).
+
+```json
+{
+  "wrapper_id": "01HX..."
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `wrapper_id` | string | Wrapper to mark active (HID input target) |

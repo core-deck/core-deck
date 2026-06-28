@@ -20,14 +20,53 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # --workspace matters: the root manifest sets default-members =
+      # ["crates/coredeck"], so without it coredeck-claude and
+      # coredeck-protocol are never linted or tested.
       - name: Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --workspace --all-features --locked
+
+  msrv:
+    # The crates declare rust-version = "1.86"; verify the workspace still
+    # builds on it so an accidental newer-stdlib use doesn't ship silently.
+    # 1.86 is the real floor — reqwest's TLS/idna stack pulls hyper-rustls
+    # (needs 1.85) and the icu crates (need 1.86). Expect to bump this as
+    # those transitive deps move.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.86
+        uses: dtolnay/rust-toolchain@1.86.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check on MSRV
+        run: cargo check --workspace --all-features --locked
+
+  shellcheck:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run shellcheck
+        # The two scripts under crates/coredeck/scripts are embedded into
+        # the daemon binary via include_str! and run on every hook, so
+        # they're part of the product surface.
+        run: |
+          shellcheck \
+            crates/coredeck/scripts/*.sh \
+            scripts/*.sh \
+            macos/scripts/*.sh \
+            linux/install.sh
 
   build-arm64:
     runs-on: macos-14  # ARM64 runner
@@ -37,8 +76,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Build release (ARM64)
-        run: cargo build --release --workspace --target aarch64-apple-darwin
+        run: cargo build --release --workspace --locked --target aarch64-apple-darwin
 
       - name: Verify binaries
         run: |
@@ -74,12 +115,21 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build release (${{ matrix.arch }} Linux)
-        run: cargo build --release --workspace --target ${{ matrix.rust_target }}
+        run: cargo build --release --workspace --locked --target ${{ matrix.rust_target }}
+
+      # Clippy here too — the Linux-only code paths (udev hotplug, GTK
+      # tray) never get linted by the macOS check job.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Verify binaries
         run: |

@@ -42,7 +42,6 @@ pub struct HidConfig {
     pub usage_page: u16,
     pub usage_id: u16,
     pub ping_interval_ms: u64,
-    pub reconnect_interval_ms: u64,
 }
 
 impl Default for HidConfig {
@@ -53,7 +52,6 @@ impl Default for HidConfig {
             usage_page: 0xFF60,
             usage_id: 0x61,
             ping_interval_ms: 5000,
-            reconnect_interval_ms: 2000,
         }
     }
 }
@@ -356,7 +354,12 @@ fn handle_tray_action(state: &Arc<DaemonState>, action: tray::DaemonTrayAction) 
                 rt.block_on(async {
                     if let Err(e) = wrapper::set_active_wrapper(&st, &wrapper_id).await {
                         info!("FocusWrapper({}) failed: {}", wrapper_id, e);
+                        return;
                     }
+                    // Raise the now-active session's host terminal, matching
+                    // the documented "click a row to set active and raise"
+                    // behaviour. Best-effort; the timeout lives in raise.rs.
+                    raise::raise_active(&st).await;
                 });
             });
             false
@@ -387,6 +390,87 @@ fn handle_tray_action(state: &Arc<DaemonState>, action: tray::DaemonTrayAction) 
             true
         }
     }
+}
+
+/// Middleware: refuse browser-originated cross-site requests.
+///
+/// The API is unauthenticated and can inject keystrokes into the active
+/// wrapper's PTY (`WrapperWrite` over `/ws`) and persist soft-key strings
+/// to device EEPROM, so it must not be reachable from web pages. Native
+/// local clients (curl, the wrapper, third-party tools) send no `Origin`
+/// header and pass untouched. Browsers attach `Origin` to every WebSocket
+/// upgrade, every cross-site request, and same-origin non-GET fetches —
+/// so the daemon's own settings page keeps working (its origin *is* the
+/// daemon), while a malicious page connecting to `ws://127.0.0.1:19384`
+/// or POSTing soft-key payloads is refused.
+///
+/// `Host` is validated as well to stop DNS rebinding on plain GETs (the
+/// rebound request arrives with `Host: attacker.example:19384`) — but
+/// only when the daemon is bound to loopback; an explicit non-loopback
+/// `--listen` opts out of the local-only model and Host can then be any
+/// reachable name.
+async fn loopback_guard(
+    axum::extract::State(state): axum::extract::State<Arc<DaemonState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let listen = state.listen_addr.as_str();
+    let port = listen.rsplit(':').next().unwrap_or("19384");
+
+    if let Some(origin) = req.headers().get(axum::http::header::ORIGIN) {
+        let allowed = origin.to_str().is_ok_and(|o| is_loopback_origin(o, port));
+        if !allowed {
+            warn!(
+                origin = %String::from_utf8_lossy(origin.as_bytes()),
+                path = %req.uri().path(),
+                "rejected request with non-loopback Origin"
+            );
+            return forbidden("Origin not allowed");
+        }
+    }
+
+    let loopback_bind = ["127.", "localhost:", "[::1]:"]
+        .iter()
+        .any(|p| listen.starts_with(p));
+    if loopback_bind {
+        if let Some(host) = req.headers().get(axum::http::header::HOST) {
+            let allowed = host
+                .to_str()
+                .is_ok_and(|h| is_loopback_hostport(h, port) || h == listen);
+            if !allowed {
+                warn!(
+                    host = %String::from_utf8_lossy(host.as_bytes()),
+                    path = %req.uri().path(),
+                    "rejected request with non-loopback Host"
+                );
+                return forbidden("Host not allowed");
+            }
+        }
+    }
+
+    next.run(req).await
+}
+
+fn forbidden(msg: &str) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        axum::Json(serde_json::json!({ "error": msg })),
+    )
+        .into_response()
+}
+
+/// `http://<loopback>:<port>` origins only (the daemon never serves TLS).
+fn is_loopback_origin(origin: &str, port: &str) -> bool {
+    origin
+        .strip_prefix("http://")
+        .is_some_and(|rest| is_loopback_hostport(rest, port))
+}
+
+fn is_loopback_hostport(hostport: &str, port: &str) -> bool {
+    ["127.0.0.1", "localhost", "[::1]"]
+        .iter()
+        .any(|h| hostport == format!("{h}:{port}"))
 }
 
 /// Run the async daemon (axum server + event processing)
@@ -469,12 +553,10 @@ async fn run_async(
             "/wrapper/register",
             axum::routing::post(wrapper::wrapper_register_session),
         )
-        .layer(
-            tower_http::cors::CorsLayer::new()
-                .allow_origin(tower_http::cors::Any)
-                .allow_methods(tower_http::cors::Any)
-                .allow_headers(tower_http::cors::Any),
-        )
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&state),
+            loopback_guard,
+        ))
         .with_state(Arc::clone(&state));
 
     // Start HTTP/WS server
@@ -659,7 +741,13 @@ async fn run_async(
             // Allow/Deny gesture when an alert happens to be up.
             if let DaemonEvent::HidKeyEvent { keycode } = &event {
                 if *keycode == keymap::KEYCODE_FRESH_SESSION {
-                    spawn::fresh_session_in_focused_cwd(&state_for_events).await;
+                    // Spawn off the event loop: this shells out to the
+                    // terminal (osascript/wmctrl/CLI), which can block,
+                    // and the event loop must keep draining HID input.
+                    let st = Arc::clone(&state_for_events);
+                    tokio::spawn(async move {
+                        spawn::fresh_session_in_focused_cwd(&st).await;
+                    });
                     continue;
                 }
             }
@@ -671,12 +759,20 @@ async fn run_async(
                 match alerts::consume_input_for_decision(&state_for_events, &event).await {
                     alerts::AlertOutcome::Consumed => continue,
                     alerts::AlertOutcome::FocusSession(sid) => {
+                        // set_active is fast internal state; the raise
+                        // shells out, so run it off the event loop.
                         let _ = wrapper::set_active_for_session(&state_for_events, &sid).await;
-                        raise::raise_for_session(&state_for_events, &sid).await;
+                        let st = Arc::clone(&state_for_events);
+                        tokio::spawn(async move {
+                            raise::raise_for_session(&st, &sid).await;
+                        });
                         continue;
                     }
                     alerts::AlertOutcome::RaiseActive => {
-                        raise::raise_active(&state_for_events).await;
+                        let st = Arc::clone(&state_for_events);
+                        tokio::spawn(async move {
+                            raise::raise_active(&st).await;
+                        });
                         continue;
                     }
                     alerts::AlertOutcome::Passthrough => {}
@@ -1016,8 +1112,9 @@ fn install_launchd_macos(listen: &str) {
 /// systemd user unit lives under `~/.config/systemd/user/coredeck.service`
 /// — no root needed. journald handles logs (so no redirect stanza is
 /// required). The unit `Restart=on-failure` mirrors launchd's
-/// `KeepAlive=true` for crash recovery; intentional `coredeck quit`
-/// exits cleanly so it doesn't loop. `WantedBy=default.target` ties
+/// `KeepAlive=true` for crash recovery; a clean exit (tray "Quit Daemon",
+/// exit code 0) doesn't trip the restart so it won't loop.
+/// `WantedBy=default.target` ties
 /// activation to the user's graphical/login session so the daemon
 /// comes up when the user logs in (no need for a display manager
 /// integration).
@@ -1164,5 +1261,41 @@ fn uninstall_launchd() {
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         eprintln!("auto-start uninstall is only supported on macOS and Linux at the moment");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loopback_origins_allowed() {
+        assert!(is_loopback_origin("http://127.0.0.1:19384", "19384"));
+        assert!(is_loopback_origin("http://localhost:19384", "19384"));
+        assert!(is_loopback_origin("http://[::1]:19384", "19384"));
+    }
+
+    #[test]
+    fn foreign_origins_rejected() {
+        // Cross-site pages, DNS-rebound names, wrong ports, wrong schemes.
+        assert!(!is_loopback_origin("http://evil.example:19384", "19384"));
+        assert!(!is_loopback_origin("http://127.0.0.1:3000", "19384"));
+        assert!(!is_loopback_origin("https://127.0.0.1:19384", "19384"));
+        assert!(!is_loopback_origin("null", "19384"));
+        assert!(!is_loopback_origin("file://", "19384"));
+        // Prefix tricks.
+        assert!(!is_loopback_origin(
+            "http://localhost:19384.evil.example",
+            "19384"
+        ));
+        assert!(!is_loopback_origin("http://127.0.0.1:193845", "19384"));
+    }
+
+    #[test]
+    fn loopback_hostports() {
+        assert!(is_loopback_hostport("127.0.0.1:19384", "19384"));
+        assert!(is_loopback_hostport("localhost:19384", "19384"));
+        assert!(!is_loopback_hostport("attacker.example:19384", "19384"));
+        assert!(!is_loopback_hostport("127.0.0.1", "19384"));
     }
 }

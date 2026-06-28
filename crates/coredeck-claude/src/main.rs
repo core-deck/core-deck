@@ -1,8 +1,7 @@
-// Hide console window on Windows release builds
-#![cfg_attr(
-    all(target_os = "windows", not(debug_assertions)),
-    windows_subsystem = "windows"
-)]
+// NOTE: do NOT set `windows_subsystem = "windows"` here. This binary is
+// a console PTY wrapper that proxies the user's stdin/stdout to `claude`;
+// detaching from the console (as the tray daemon does) would sever the
+// whole proxy. It must stay a console subsystem program.
 
 //! coredeck-claude — thin PTY wrapper around the `claude` CLI that
 //! registers each session with the local CoreDeck daemon.
@@ -48,38 +47,96 @@ const FOCUS_REPORTING_DISABLE: &[u8] = b"\x1b[?1004l";
 enum WrapperEvent {
     FocusIn,
     FocusOut,
-    /// Title text sniffed from OSC 9 in claude's PTY output.
+    /// Title text sniffed from OSC 0/1/2 in claude's PTY output.
     TitleHint(String),
 }
 
-/// Strip OSC 1004 focus events out of `buf` and emit them on `tx`.
-/// Returns the bytes that should still be forwarded to the PTY. Only
-/// recognises the patterns when they appear contiguously inside the same
-/// read — avoids the "bare ESC stuck waiting for next byte" pitfall when
-/// the user just presses Escape.
-fn extract_focus_events(buf: &[u8], tx: &mpsc::UnboundedSender<WrapperEvent>) -> Vec<u8> {
-    let mut out = Vec::with_capacity(buf.len());
-    let mut i = 0;
-    while i < buf.len() {
-        if i + 2 < buf.len() && buf[i] == 0x1b && buf[i + 1] == b'[' {
-            match buf[i + 2] {
-                b'I' => {
-                    let _ = tx.send(WrapperEvent::FocusIn);
-                    i += 3;
-                    continue;
+/// Strips OSC 1004 focus reports (`ESC [ I` / `ESC [ O`) from the user's
+/// stdin stream, emitting them on a channel and returning the bytes still
+/// destined for the PTY.
+///
+/// Stateful across reads so a report split across a read boundary is
+/// still recognised — but it carries over only a trailing `ESC [`
+/// (two bytes), never a lone `ESC`. A bare Escape keypress is just `ESC`
+/// with no `[`, so refusing to hold it keeps Escape responsive (vim et
+/// al.), which is the pitfall the byte-at-a-time approach was avoiding.
+/// The remaining un-handled case — a report split as `…ESC` | `[I…` — is
+/// rare (focus reports arrive as their own terminal write, not byte-
+/// interleaved with input) and degrades to leaking the bytes, never to
+/// delaying user input.
+#[derive(Default)]
+struct FocusStripper {
+    /// Carried prefix from the previous read: `[]`, or `[ESC, '[']`.
+    pending: Vec<u8>,
+}
+
+impl FocusStripper {
+    fn process(&mut self, buf: &[u8], tx: &mpsc::UnboundedSender<WrapperEvent>) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.pending.len() + buf.len());
+        // prefix = how much of `ESC [` we currently hold: 0, 1, or 2.
+        let mut prefix = self.pending.len();
+        self.pending.clear();
+
+        for &b in buf {
+            match prefix {
+                0 => {
+                    if b == 0x1b {
+                        prefix = 1;
+                    } else {
+                        out.push(b);
+                    }
                 }
-                b'O' => {
-                    let _ = tx.send(WrapperEvent::FocusOut);
-                    i += 3;
-                    continue;
+                1 => {
+                    // Have ESC.
+                    if b == b'[' {
+                        prefix = 2;
+                    } else {
+                        out.push(0x1b);
+                        if b == 0x1b {
+                            prefix = 1; // a fresh ESC
+                        } else {
+                            out.push(b);
+                            prefix = 0;
+                        }
+                    }
                 }
-                _ => {}
+                _ => {
+                    // Have ESC [.
+                    match b {
+                        b'I' => {
+                            let _ = tx.send(WrapperEvent::FocusIn);
+                            prefix = 0;
+                        }
+                        b'O' => {
+                            let _ = tx.send(WrapperEvent::FocusOut);
+                            prefix = 0;
+                        }
+                        _ => {
+                            // Some other CSI (e.g. ESC [ Z) — flush ESC [
+                            // and reprocess this byte.
+                            out.push(0x1b);
+                            out.push(b'[');
+                            if b == 0x1b {
+                                prefix = 1;
+                            } else {
+                                out.push(b);
+                                prefix = 0;
+                            }
+                        }
+                    }
+                }
             }
         }
-        out.push(buf[i]);
-        i += 1;
+
+        // Carry over only a complete `ESC [`; flush a lone trailing ESC
+        // immediately so the Escape key isn't delayed.
+        match prefix {
+            1 => out.push(0x1b),
+            2 => self.pending.extend_from_slice(&[0x1b, b'[']),
+            _ => {}
+        }
+        out
     }
-    out
 }
 
 /// Stateful sniffer for OSC sequences in claude's PTY output. We do
@@ -351,8 +408,11 @@ fn extract_ssh_host(args: &mut Vec<String>) -> Option<String> {
                 args.remove(i);
                 return Some(host);
             }
-            args.remove(i);
-            return None;
+            // `--ssh` with no following value is a usage error — don't
+            // silently degrade to local mode, which would surprise a user
+            // who meant to connect to a remote box.
+            eprintln!("coredeck-claude: --ssh requires a <user@host> argument");
+            std::process::exit(2);
         }
         if let Some(value) = args[i].strip_prefix("--ssh=") {
             let host = value.to_string();
@@ -426,12 +486,15 @@ fn wrapper_id_cache_path(host: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Local TCP port the daemon listens on, parsed out of `daemon_addr`
-/// (`host:port` form). Falls back to 19384 on a parse miss.
+/// (`host:port` form). Falls back to the default daemon address's port on
+/// a parse miss, so the wrapper's tunnel port can't silently diverge from
+/// the daemon's actual default.
 fn local_daemon_port(daemon_addr: &str) -> u16 {
-    daemon_addr
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse().ok())
+    fn port_of(addr: &str) -> Option<u16> {
+        addr.rsplit(':').next().and_then(|p| p.parse().ok())
+    }
+    port_of(daemon_addr)
+        .or_else(|| port_of(DEFAULT_DAEMON_ADDR))
         .unwrap_or(19384)
 }
 
@@ -544,13 +607,42 @@ type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 /// call `resize()` while reader/writer halves stay alive elsewhere.
 type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 
+/// True while the host terminal is in raw mode with OSC 1004 focus
+/// reporting enabled. Lets `restore_terminal` be idempotent and safe to
+/// call from the panic hook, the signal task, and the normal exit path
+/// in any order.
+static TERMINAL_RAW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Best-effort terminal restore: undo OSC 1004 focus reporting and leave
+/// raw mode. No-op unless raw mode was enabled; only the first caller
+/// does work.
+fn restore_terminal() {
+    if !TERMINAL_RAW.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    let _ = handle.write_all(FOCUS_REPORTING_DISABLE);
+    let _ = handle.flush();
+    drop(handle);
+    let _ = terminal::disable_raw_mode();
+}
+
 fn main() {
     init_tracing();
+    // Restore the user's terminal on *any* panic (any thread) — the
+    // raw-mode + OSC 1004 state otherwise outlives us and garbles the
+    // user's shell.
+    let prev_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        prev_hook(info);
+    }));
     let exit_code = match run() {
         Ok(code) => code,
         Err(e) => {
             // Make sure the user always sees the error even after we toggled raw mode.
-            let _ = terminal::disable_raw_mode();
+            restore_terminal();
             eprintln!("coredeck-claude: {:#}", e);
             1
         }
@@ -664,6 +756,7 @@ fn run() -> Result<i32> {
     let stdin_is_tty = std::io::stdin().is_terminal();
     if stdin_is_tty {
         terminal::enable_raw_mode().context("enable_raw_mode")?;
+        TERMINAL_RAW.store(true, std::sync::atomic::Ordering::SeqCst);
         // Enable OSC 1004 focus reporting in the host terminal. Modern
         // terminals (iTerm2, Kitty, WezTerm, Ghostty, modern xterm)
         // honour this; older ones ignore it and we silently degrade to
@@ -681,8 +774,8 @@ fn run() -> Result<i32> {
     let title_tx = focus_tx.clone();
 
     // PTY → user stdout (sync thread, tight loop). Bytes are passed
-    // through unchanged; an OSC 9 sniffer runs alongside and emits
-    // title hints to the WS task without touching the stdout stream.
+    // through unchanged; an OSC 0/1/2 title sniffer runs alongside and
+    // emits title hints to the WS task without touching the stdout stream.
     let pty_to_stdout = std::thread::spawn(move || {
         let mut reader = master_reader;
         let mut buf = [0u8; 8192];
@@ -707,13 +800,16 @@ fn run() -> Result<i32> {
                         // assumption. ConEmu's `9;4;0;...` progress
                         // updates would otherwise show up on the device
                         // as "4;0;" right after session start.
-                        if !matches!(param, 0 | 1 | 2) {
+                        if !matches!(param, 0..=2) {
                             return;
                         }
-                        if let Ok(text) = std::str::from_utf8(body) {
-                            if let Some(title) = keep_title_hint(text) {
-                                titles.push(title);
-                            }
+                        // Lossy decode: a body truncated mid-codepoint at
+                        // the OSC_BODY_CAP would fail a strict from_utf8
+                        // and drop an otherwise-good title. Replace the
+                        // stray bytes instead of discarding the title.
+                        let text = String::from_utf8_lossy(body);
+                        if let Some(title) = keep_title_hint(&text) {
+                            titles.push(title);
                         }
                     });
                     for title in titles {
@@ -733,13 +829,14 @@ fn run() -> Result<i32> {
     let focus_tx_for_stdin = focus_tx.clone();
     let _stdin_to_pty = std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
+        let mut stripper = FocusStripper::default();
         let stdin = std::io::stdin();
         let mut handle = stdin.lock();
         loop {
             match handle.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let forward = extract_focus_events(&buf[..n], &focus_tx_for_stdin);
+                    let forward = stripper.process(&buf[..n], &focus_tx_for_stdin);
                     if forward.is_empty() {
                         continue;
                     }
@@ -778,6 +875,28 @@ fn run() -> Result<i32> {
             focus_rx,
         ));
 
+        // SIGTERM/SIGHUP: restore the terminal before dying, otherwise
+        // the user's shell is left in raw mode with focus reports
+        // spraying `^[[I`/`^[[O` into the prompt. The child claude still
+        // holds the PTY slave; our exit closes the master and the kernel
+        // HUPs the child's process group, so it winds down on its own.
+        #[cfg(unix)]
+        let _signal_handle = tokio::spawn(async {
+            use tokio::signal::unix::{signal, SignalKind};
+            let (Ok(mut term), Ok(mut hup)) = (
+                signal(SignalKind::terminate()),
+                signal(SignalKind::hangup()),
+            ) else {
+                return;
+            };
+            let code = tokio::select! {
+                _ = term.recv() => 143, // 128 + SIGTERM
+                _ = hup.recv() => 129,  // 128 + SIGHUP
+            };
+            restore_terminal();
+            std::process::exit(code);
+        });
+
         #[cfg(unix)]
         let _sigwinch_handle = {
             let master_for_signal = Arc::clone(&master);
@@ -812,22 +931,15 @@ fn run() -> Result<i32> {
         .context("joining child wait task")?
         .context("child.wait")?;
 
-        // Best-effort goodbye: abort cleanly. Daemon also treats WS close as unregister.
+        // The WS close itself is the unregister signal — the daemon tears
+        // the wrapper entry down when the connection drops.
         ws_handle.abort();
 
         Ok::<i32, anyhow::Error>(exit_status.exit_code() as i32)
     })?;
 
-    if stdin_is_tty {
-        // Best-effort: undo OSC 1004 so the host terminal stops emitting
-        // focus events at us after exit.
-        let stdout = std::io::stdout();
-        let mut handle = stdout.lock();
-        let _ = handle.write_all(FOCUS_REPORTING_DISABLE);
-        let _ = handle.flush();
-        drop(handle);
-        let _ = terminal::disable_raw_mode();
-    }
+    // No-op when stdin wasn't a tty (raw mode never enabled).
+    restore_terminal();
     // The stdin reader thread is still blocked on stdin.read; let process exit reap it.
     let _ = pty_to_stdout.join();
 
@@ -891,6 +1003,7 @@ async fn run_ws(
             host_terminal: Some(host_terminal.clone()),
             session_id: cached_session_id.clone(),
             is_remote,
+            wrapper_version: Some(env!("CARGO_PKG_VERSION").to_string()),
         };
         let txt = match serde_json::to_string(&reg) {
             Ok(s) => s,
@@ -900,6 +1013,52 @@ async fn run_ws(
             backoff_ms = next_backoff_ms(0);
             continue 'reconnect;
         }
+
+        // Coalesce any backlog that piled up while the daemon was down.
+        // `focus_rx` isn't drained during the offline backoff, so hours
+        // of per-keystroke title updates and stale focus flips can be
+        // waiting. Collapse them to the latest focus state + latest
+        // title and send just those, rather than replaying the history
+        // (which would churn the daemon's active-wrapper/alert logic).
+        {
+            let mut latest_focus: Option<bool> = None;
+            let mut latest_title: Option<String> = None;
+            while let Ok(ev) = focus_rx.try_recv() {
+                match ev {
+                    WrapperEvent::FocusIn => latest_focus = Some(true),
+                    WrapperEvent::FocusOut => latest_focus = Some(false),
+                    WrapperEvent::TitleHint(t) => latest_title = Some(t),
+                }
+            }
+            let mut coalesced: Vec<WrapperToDaemon> = Vec::new();
+            if let Some(focused) = latest_focus {
+                coalesced.push(WrapperToDaemon::FocusChanged {
+                    wrapper_id: wrapper_id.clone(),
+                    focused,
+                });
+            }
+            if let Some(title) = latest_title {
+                coalesced.push(WrapperToDaemon::TitleHint {
+                    wrapper_id: wrapper_id.clone(),
+                    title,
+                });
+            }
+            let mut send_failed = false;
+            for msg in coalesced {
+                if let Ok(txt) = serde_json::to_string(&msg) {
+                    if ws_tx.send(Message::Text(txt.into())).await.is_err() {
+                        send_failed = true;
+                        break;
+                    }
+                }
+            }
+            if send_failed {
+                backoff_ms = next_backoff_ms(backoff_ms);
+                continue 'reconnect;
+            }
+        }
+
+        let connected_at = std::time::Instant::now();
 
         loop {
             tokio::select! {
@@ -925,8 +1084,16 @@ async fn run_ws(
                         }
                     };
                     match cmd {
-                        DaemonToWrapper::Registered { .. } => {
-                            debug!("wrapper registered with daemon");
+                        DaemonToWrapper::Registered { daemon_version, .. } => {
+                            let daemon_version = daemon_version.as_deref().unwrap_or("<pre-0.2>");
+                            debug!(daemon_version, "wrapper registered with daemon");
+                            if daemon_version != env!("CARGO_PKG_VERSION") {
+                                debug!(
+                                    wrapper = env!("CARGO_PKG_VERSION"),
+                                    daemon = daemon_version,
+                                    "wrapper/daemon version mismatch"
+                                );
+                            }
                         }
                         DaemonToWrapper::Write { bytes } => {
                             if let Ok(mut w) = pty_writer.lock() {
@@ -971,8 +1138,15 @@ async fn run_ws(
         }
 
         debug!("wrapper WS disconnected; will reconnect");
-        // Don't hot-loop if the daemon hangs up immediately after Register.
-        backoff_ms = 1000;
+        // A connection that lived a while then dropped is a normal flap —
+        // reconnect promptly (1s). One that died almost immediately (the
+        // daemon accepting then closing in a crash loop) must back off
+        // exponentially instead of hammering at a fixed 1 Hz forever.
+        if connected_at.elapsed() >= std::time::Duration::from_secs(10) {
+            backoff_ms = 1000;
+        } else {
+            backoff_ms = next_backoff_ms(backoff_ms);
+        }
     }
 }
 
@@ -982,5 +1156,115 @@ fn next_backoff_ms(prev: u64) -> u64 {
         1000
     } else {
         prev.saturating_mul(2).min(30_000)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::sync::mpsc;
+
+    fn drain(rx: &mut mpsc::UnboundedReceiver<WrapperEvent>) -> Vec<WrapperEvent> {
+        let mut v = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            v.push(ev);
+        }
+        v
+    }
+
+    #[test]
+    fn focus_stripper_contiguous() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut s = FocusStripper::default();
+        // FocusIn embedded between normal bytes.
+        let out = s.process(b"ab\x1b[Icd", &tx);
+        assert_eq!(out, b"abcd");
+        assert!(matches!(drain(&mut rx)[..], [WrapperEvent::FocusIn]));
+    }
+
+    #[test]
+    fn focus_stripper_split_across_reads() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut s = FocusStripper::default();
+        // "ESC [" ends read 1; "O" starts read 2 → FocusOut, no leaked bytes.
+        let out1 = s.process(b"x\x1b[", &tx);
+        assert_eq!(out1, b"x");
+        assert!(drain(&mut rx).is_empty());
+        let out2 = s.process(b"Oy", &tx);
+        assert_eq!(out2, b"y");
+        assert!(matches!(drain(&mut rx)[..], [WrapperEvent::FocusOut]));
+    }
+
+    #[test]
+    fn focus_stripper_lone_escape_not_held() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut s = FocusStripper::default();
+        // A lone trailing ESC (Escape key) must be forwarded immediately,
+        // not held — otherwise interactive Escape would be delayed.
+        let out = s.process(b"\x1b", &tx);
+        assert_eq!(out, b"\x1b");
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn focus_stripper_passes_other_csi() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut s = FocusStripper::default();
+        // Shift-Tab (ESC [ Z) must pass through untouched.
+        let out = s.process(b"\x1b[Z", &tx);
+        assert_eq!(out, b"\x1b[Z");
+        assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn osc_sniffer_emits_title_bel_terminated() {
+        let mut sniffer = OscSniffer::new();
+        let mut titles = Vec::new();
+        sniffer.feed(b"\x1b]2;my title\x07rest", |p, body| {
+            if matches!(p, 0..=2) {
+                titles.push(String::from_utf8_lossy(body).into_owned());
+            }
+        });
+        assert_eq!(titles, vec!["my title".to_string()]);
+    }
+
+    #[test]
+    fn osc_sniffer_st_terminated_and_split() {
+        let mut sniffer = OscSniffer::new();
+        let mut titles = Vec::new();
+        let mut emit = |p: u32, body: &[u8]| {
+            if matches!(p, 0..=2) {
+                titles.push(String::from_utf8_lossy(body).into_owned());
+            }
+        };
+        // Body split across two feeds, ST (ESC \) terminated.
+        sniffer.feed(b"\x1b]0;hel", &mut emit);
+        sniffer.feed(b"lo\x1b\\", &mut emit);
+        assert_eq!(titles, vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn keep_title_hint_strips_and_filters() {
+        // Default cwd title dropped.
+        assert_eq!(keep_title_hint("~/proj — Claude Code"), None);
+        assert_eq!(keep_title_hint("Claude Code"), None);
+        // Leading spinner glyph stripped.
+        assert_eq!(
+            keep_title_hint("✻ Building the thing"),
+            Some("Building the thing".to_string())
+        );
+        // Plain title kept.
+        assert_eq!(
+            keep_title_hint("my session"),
+            Some("my session".to_string())
+        );
+        // Empty/whitespace dropped.
+        assert_eq!(keep_title_hint("   "), None);
+    }
+
+    #[test]
+    fn local_daemon_port_falls_back_to_default() {
+        assert_eq!(local_daemon_port("127.0.0.1:5000"), 5000);
+        assert_eq!(local_daemon_port("garbage"), 19384);
     }
 }

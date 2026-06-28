@@ -2,15 +2,25 @@
 
 Base URL: `http://127.0.0.1:19384` (configurable via `--listen`)
 
-All endpoints accept and return JSON. CORS is fully open (any origin, method, and headers).
+All endpoints accept and return JSON.
+
+**Browser access is restricted.** The API is unauthenticated but can inject
+keystrokes into terminal sessions, so the daemon refuses browser-originated
+cross-site requests: any request (HTTP or WebSocket upgrade) carrying an
+`Origin` header that isn't `http://127.0.0.1:<port>`, `http://localhost:<port>`,
+or `http://[::1]:<port>` for the daemon's own port gets **403 Forbidden**, and
+no CORS headers are served. When bound to loopback (the default) the `Host`
+header is validated the same way to block DNS rebinding. Native local clients
+(curl, scripts, third-party tools) send no `Origin` header and are unaffected;
+the daemon's own settings page is same-origin and unaffected.
 
 ## Locking Semantics
 
-- **Read-only endpoints** (`GET /api/status`) always work.
-- **Mutating endpoints** check for the WebSocket exclusive lock:
+- **Read-only endpoints** that don't touch the device (`GET /api/status`, `GET /api/wrappers`, `GET /api/hooks/status`, `GET /api/soft-keys/presets`) always work.
+- **Mutating endpoints** — and the GETs that query the device (`GET /api/version`, `GET /api/soft-keys`, `GET /api/theme`) — check for the WebSocket exclusive lock:
   - If a WS client holds the lock: returns **409 Conflict** with `{"error": "device locked by WebSocket client"}`.
-  - If no WS client is connected: the endpoint transiently opens the HID device, performs the operation, then closes it.
-- If the device is not physically available, mutating endpoints return **503 Service Unavailable** with `{"error": "Device not available"}`.
+  - If no WS client is connected: the endpoint uses the daemon's persistent HID handle (the daemon keeps the device open for its lifetime, reopening on demand if a recent disconnect left it closed).
+- If the device is not physically available, device-touching endpoints return **503 Service Unavailable** with `{"error": "Device not available"}` — or, when the device is present but opening it fails, the underlying open-failure message in the same `{"error": ...}` shape.
 
 ## Endpoints
 
@@ -258,6 +268,10 @@ Query the firmware version string from the device.
 | 409 | WebSocket client holds the lock |
 | 503 | Device not available |
 
+If the device is open but the version query itself fails (send error,
+bad response, firmware without the command), the endpoint still
+returns **200** with `{"version": "unknown"}` — it never 500s.
+
 **Example:**
 
 ```bash
@@ -332,16 +346,34 @@ The daemon replaces the session's tracked subagent list wholesale on every tick 
 | 200 | Event processed |
 | 400 | Malformed JSON |
 
-**PermissionRequest with YOLO:** When the device YOLO switch is on, the daemon responds with an auto-approve payload:
+An unrecognized `event_type` is not an error — the daemon logs it at
+debug level and returns **200** with an empty body.
 
-```json
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PermissionRequest",
-    "decision": {"behavior": "allow"}
-  }
-}
-```
+**PermissionRequest flow:** This is the one hook whose response carries a decision. Three outcomes are possible:
+
+1. **Auto-approve.** Requires *all three* of: the device physically connected, the Auto-approve (YOLO) hardware switch on, and the requesting session's wrapper enrolled in auto-approve (per-wrapper opt-in — the wrapper focused when the switch flips on is auto-enrolled; others get an "Auto-approve this tab?" prompt first). When all hold, the daemon immediately responds:
+
+   ```json
+   {
+     "hookSpecificOutput": {
+       "hookEventName": "PermissionRequest",
+       "decision": {"behavior": "allow"}
+     }
+   }
+   ```
+
+2. **Interactive decision.** Otherwise the daemon parks the HTTP response and shows the prompt on the device — **the POST blocks until the user decides, up to the daemon's internal 5-minute timeout**. Allow on the device returns the allow payload above; Deny returns:
+
+   ```json
+   {
+     "hookSpecificOutput": {
+       "hookEventName": "PermissionRequest",
+       "decision": {"behavior": "deny", "message": "Rejected from CoreDeck device"}
+     }
+   }
+   ```
+
+3. **Passthrough.** An empty body `{}` is returned when the daemon has no decision to make — timeout, no device to show the prompt on (or another alert already live), the wrapper opted out of auto-approve, or a missing `session_id`. Claude Code then falls back to its own terminal prompt.
 
 > **Note:** Claude Code sends snake_case in request payloads but expects camelCase in the PermissionRequest response.
 
@@ -357,8 +389,7 @@ Report whether Claude Code hooks are currently installed in `~/.claude/settings.
 
 ```json
 {
-  "installed": true,
-  "settings_path": "/Users/vden/.claude/settings.json"
+  "installed": true
 }
 ```
 
@@ -366,9 +397,9 @@ Report whether Claude Code hooks are currently installed in `~/.claude/settings.
 
 ### POST /api/hooks/install
 
-Install Claude Code hooks (equivalent to `coredeck hooks install`). Writes a curl-shim script to `~/.claude/coredeck-hook.sh` and merges hook entries into `~/.claude/settings.json`. Existing user-defined hook entries for the same event are preserved; only blocks the daemon previously wrote get replaced.
+Install Claude Code hooks (equivalent to `coredeck hooks install`). Writes a curl-shim script to `~/.claude/coredeck-hook.sh` and a SessionStart correlation script to `~/.claude/coredeck-register.sh`, merges hook entries into `~/.claude/settings.json`, and sets the `statusLine`/`subagentStatusLine` keys. Existing user-defined hook entries for the same event are preserved; only blocks the daemon previously wrote get replaced.
 
-**Response: 200 OK** with the new install status.
+**Response: 200 OK** with an empty body, or **500** with an [ApiError](Types.md#apierror) on failure.
 
 ---
 
@@ -376,15 +407,63 @@ Install Claude Code hooks (equivalent to `coredeck hooks install`). Writes a cur
 
 Remove the daemon's hook entries from `~/.claude/settings.json`. Symmetric with install — strips only entries the daemon owns and leaves user blocks alone.
 
-**Response: 200 OK** with the new install status.
+**Response: 200 OK** with an empty body, or **500** with an [ApiError](Types.md#apierror) on failure.
+
+---
+
+### POST /wrapper/register
+
+Bind a Claude `session_id` to a connected wrapper. Posted by the
+SessionStart hook script (`~/.claude/coredeck-register.sh`), which
+reads `$COREDECK_WRAPPER_ID` from its inherited environment (set by
+`coredeck-claude`) and `session_id` from the hook's stdin payload.
+This is the linchpin of session correlation — the daemon never has to
+guess which wrapper a session belongs to. Not subject to the WS lock.
+
+**Request body:** [WrapperRegisterSession](Types.md)
+
+```json
+{
+  "wrapper_id": "01HX...",
+  "session_id": "ba8fc727-..."
+}
+```
+
+On success the daemon also pushes a `SessionBound` message to the
+wrapper (so it can echo the binding back after a daemon restart) and
+promotes the session to active on the device.
+
+**Response codes:**
+
+| Code | Condition |
+|------|-----------|
+| 200 | Bound (empty body) |
+| 404 | No connected wrapper with that `wrapper_id` |
 
 ---
 
 ### GET /api/wrappers
 
-Report the daemon's current wrapper / tab list — same data the device uses to draw its tab indicator.
+Debug view of the connected wrappers. Returns a bare JSON **array** of
+rows — *not* the [WrapperTabList](Types.md#wrappertablist) type (the
+full hook-derived snapshot is only available as the `WrapperTabList`
+event on the main WS).
 
-**Response: 200 OK** — see [WrapperTabList](Types.md#wrappertablist).
+**Response: 200 OK**
+
+```json
+[
+  {
+    "wrapper_id": "01HX...",
+    "pid": 49321,
+    "cwd": "/Users/vden/work/agentdeck/app",
+    "started_at_unix": 1746360000,
+    "session_id": "ba8fc727-...",
+    "host_terminal_kind": "ITerm2",
+    "active": true
+  }
+]
+```
 
 ---
 
@@ -392,17 +471,18 @@ Report the daemon's current wrapper / tab list — same data the device uses to 
 
 Read all three soft-key configurations from the device.
 
-**Response: 200 OK**
+**Response: 200 OK** — a bare JSON array (no envelope)
 
 ```json
-{
-  "keys": [
-    {"index": 0, "key_type": "Default", "data": []},
-    {"index": 1, "key_type": "Keycode", "data": [0, 40]},
-    {"index": 2, "key_type": "String", "data": [1, 104, 105]}
-  ]
-}
+[
+  {"index": 0, "key_type": "Default", "data": []},
+  {"index": 1, "key_type": "Keycode", "data": [0, 40]},
+  {"index": 2, "key_type": "String", "data": [1, 104, 105]}
+]
 ```
+
+Also returns **409** while a WS client holds the lock, **503** when no
+device is available, and **500** if a key read fails.
 
 ---
 
@@ -423,6 +503,10 @@ Update a single soft key (index 0–2). Same payload semantics as the WebSocket 
 ### POST /api/soft-keys/reset
 
 Reset all three soft keys to their keymap defaults.
+
+**Response: 200 OK** — the post-reset configurations, same bare-array
+shape as `GET /api/soft-keys`, so clients can refresh without a
+follow-up GET.
 
 ---
 
@@ -449,10 +533,11 @@ lines, tab indicators, alert frame, etc. See
 
 ### PUT /api/theme/{slot}
 
-Set one theme slot (0–9). `save=false` updates the live frame only;
-`save=true` also persists to EEPROM. The settings page uses
-`save=false` while the user drags a color picker, then `save=true`
-once on the "Save to device" click for every dirty slot.
+Set one theme slot (0–9). `save=false` updates the live frame only
+(useful for previewing a color on the device without committing it);
+`save=true` also persists to EEPROM. The settings page previews
+edits locally in the browser and PUTs each dirty slot with
+`save=true` when the user clicks "Save to device".
 
 ```json
 {
@@ -479,33 +564,79 @@ the defaults that were just applied.
 
 ### GET /api/soft-keys/presets
 
-List saved soft-key preset bundles. Presets are user-defined named groupings of all three keys.
+List soft-key preset bundles — both the hardcoded built-ins and the
+user's saved presets. A preset names a full configuration of all three
+keys.
+
+**Response: 200 OK**
+
+```json
+{
+  "builtin": [
+    {"name": "Default",
+     "description": "Esc+Esc (clear input), Ctrl+O (verbose), /model (models)",
+     "keys": [{"key_type": "Sequence", "data": [41, 41]},
+              {"key_type": "Keycode", "data": [1, 18]},
+              {"key_type": "String", "data": [1, 47, 109, 111, 100, 101, 108]}]}
+  ],
+  "user": [
+    {"name": "git workflow",
+     "keys": [{"key_type": "String", "data": [1, 103, 115]},
+              {"key_type": "String", "data": [1, 103, 100]},
+              {"key_type": "Keycode", "data": [0, 40]}]}
+  ]
+}
+```
 
 ---
 
 ### POST /api/soft-keys/presets/apply
 
-Apply a named preset to the device.
-
-```json
-{"name": "git workflow", "save": true}
-```
-
----
-
-### POST /api/soft-keys/presets/save
-
-Save the current soft-key configuration as a named preset.
+Apply a named preset (built-in or user) to the device. EEPROM is
+committed once on the last key write.
 
 ```json
 {"name": "git workflow"}
 ```
 
+**Response: 200 OK** on success; **404** when no preset has that name;
+**409**/**503**/**500** with [ApiError](Types.md#apierror) for
+lock/device/write failures.
+
+---
+
+### POST /api/soft-keys/presets/save
+
+Save a named user preset. The body must carry the full three-key
+configuration — the server does **not** capture the device's current
+keys; read them via `GET /api/soft-keys` first (this is what the
+settings page does).
+
+```json
+{
+  "name": "git workflow",
+  "description": "status / diff / enter",
+  "keys": [
+    {"key_type": "String", "data": [1, 103, 115]},
+    {"key_type": "String", "data": [1, 103, 100]},
+    {"key_type": "Keycode", "data": [0, 40]}
+  ]
+}
+```
+
+`description` is optional. Upserts by name.
+
+**Response: 200 OK** on success; **400** with [ApiError](Types.md#apierror)
+for an empty name or a name colliding with a built-in preset.
+
 ---
 
 ### DELETE /api/soft-keys/presets/{name}
 
-Delete a saved preset.
+Delete a saved user preset.
+
+**Response: 200 OK** on success; **400** for built-in names (immutable);
+**404** when the preset doesn't exist.
 
 ---
 

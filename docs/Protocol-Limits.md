@@ -32,8 +32,8 @@ Per-tab alerts also use tab indices 0–15.
 | Limit | Value |
 |-------|-------|
 | Range | **0–255** |
-| Default | 255 (full brightness) |
-| Dimmed level | 178 (~70% of full) |
+| Default | 178 (`DISPLAY_BL_DEFAULT_LEVEL` — reduced for the high-VLT cover) |
+| Dimmed level | 125 (`DISPLAY_BL_DIM_LEVEL`) |
 
 ## Device Modes
 
@@ -68,7 +68,7 @@ Cycle order on the physical mode button: Default → Accept → Plan → Default
 |-------|-------|
 | Max JSON payload | **512 bytes** |
 
-The firmware reassembly buffer (`PROTO_REASSEMBLY_SIZE`) is 512 bytes. JSON payloads sent via `UpdateDisplay` or `Alert` commands must fit within this limit. The HID chunked protocol splits larger host payloads into 30-byte chunks (32-byte HID report minus 2-byte header) and reassembles them on the device.
+The firmware reassembly buffer (`PROTO_REASSEMBLY_SIZE`) is 512 bytes. JSON payloads sent via `UpdateDisplay` or `Alert` commands must fit within this limit. The HID chunked protocol splits larger host payloads into 30-byte chunks (32-byte HID report minus 2-byte header) and reassembles them on the device. In VIAL mode every packet additionally carries a `0x80` prefix byte, so chunks shrink to 29 payload bytes.
 
 ## Timeouts
 
@@ -77,7 +77,7 @@ The firmware reassembly buffer (`PROTO_REASSEMBLY_SIZE`) is 512 bytes. JSON payl
 | Ping timeout | **30 seconds** | Firmware dims the display backlight after 30s without any host communication (ping, data, or command) |
 | Idle timeout | **15 minutes** | Firmware dims the display after 15 minutes without content changes (display updates or alerts) |
 
-Both timeouts dim the display to the dimmed brightness level (178/255). Any new communication or user activity (key press) restores full brightness.
+Both timeouts dim the display to the dimmed brightness level (125/255). Any new communication or user activity (key press) restores the configured brightness.
 
 ## WebSocket Sequence Numbers
 
@@ -86,8 +86,8 @@ Both timeouts dim the display to the dimmed brightness level (178/255). Any new 
 | Range | **u16 (0–65535)** |
 | Reserved | `0` is reserved for events; commands must use `seq > 0` |
 
-Clients should use a monotonically incrementing counter for command sequence numbers, wrapping from 65535 back to 1 (skipping 0).
+Clients should use a monotonically incrementing counter for command sequence numbers, wrapping from 65535 back to 1 (skipping 0). The daemon enforces this: a command frame with `seq == 0` is rejected with a `CommandError`.
 
 ## WebSocket Exclusivity
 
-Only one WebSocket client may be connected at a time. Attempting a second connection returns HTTP 409 on the WebSocket upgrade request. While a client holds the lock, all mutating HTTP REST endpoints also return 409.
+Only one WebSocket client may be connected at a time. Attempting a second connection returns HTTP 409 on the WebSocket upgrade request. While a client holds the lock, all mutating HTTP REST endpoints return 409, as do the GET endpoints that talk to the device (`GET /api/version`, `GET /api/soft-keys`, `GET /api/theme`).

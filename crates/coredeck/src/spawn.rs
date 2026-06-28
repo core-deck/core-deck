@@ -358,11 +358,11 @@ fn applescript_quote(s: &str) -> String {
 }
 
 async fn run(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
+    // Reuse raise.rs's timeout wrapper: these spawn helpers run from the
+    // HID event loop's spawned tasks and must not block indefinitely.
+    let output = crate::raise::output_with_timeout(Command::new(program).args(args))
         .await
-        .map_err(|e| format!("{program} spawn failed: {e}"))?;
+        .map_err(|e| format!("{program} {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(

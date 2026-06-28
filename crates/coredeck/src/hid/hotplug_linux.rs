@@ -174,10 +174,30 @@ fn run_watcher(
     info!("udev hotplug watcher stopped");
 }
 
-/// True when a `usb_device` event is for the right VID/PID. udev
-/// exposes `idVendor` / `idProduct` as 4-char hex strings without a
-/// `0x` prefix (e.g. `feed`, `0803`).
+/// True when a `usb_device` event is for the right VID/PID.
+///
+/// VID/PID must come from the `PRODUCT` *property* — properties travel
+/// inside the uevent netlink message itself, so they're readable on
+/// `remove` events too. Sysfs attributes (`idVendor`/`idProduct`) are
+/// already torn down by the time a removal reaches userspace; matching
+/// on them meant `DeviceRemoved` was never forwarded and the daemon
+/// kept reporting a phantom device until replug.
+///
+/// `PRODUCT` format for `usb_device` events: `vid/pid/bcdDevice` in
+/// lowercase hex without leading zeros (e.g. `feed/803/100`).
 fn matches_device(event: &udev::Event, vendor_id: u16, product_id: u16) -> bool {
+    if let Some(product) = event.property_value("PRODUCT").and_then(|s| s.to_str()) {
+        let mut parts = product.split('/');
+        let vid = parts.next().and_then(|p| u16::from_str_radix(p, 16).ok());
+        let pid = parts.next().and_then(|p| u16::from_str_radix(p, 16).ok());
+        if let (Some(v), Some(p)) = (vid, pid) {
+            return v == vendor_id && p == product_id;
+        }
+    }
+
+    // Fallback for events without a parseable PRODUCT property: sysfs
+    // attributes. These only work while the device is present, i.e. on
+    // `add` events.
     let dev = event.device();
     let vid = dev
         .attribute_value("idVendor")
@@ -194,7 +214,7 @@ fn matches_device(event: &udev::Event, vendor_id: u16, product_id: u16) -> bool 
             // attributes. The `match_subsystem_devtype("usb",
             // "usb_device")` filter we set on the monitor should
             // already weed those out, but be defensive.
-            warn!("udev event missing idVendor/idProduct");
+            warn!("udev event missing PRODUCT property and idVendor/idProduct attributes");
             false
         }
     }

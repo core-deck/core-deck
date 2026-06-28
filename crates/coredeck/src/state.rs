@@ -221,6 +221,12 @@ pub struct Wrapper {
     pub is_focused: bool,
     /// Channel for sending DaemonToWrapper messages back over the wrapper's WS.
     pub tx: mpsc::UnboundedSender<DaemonToWrapper>,
+    /// Identity of the WS connection that registered this entry. A new
+    /// Register under the same `wrapper_id` (persistent `--ssh` ids, or
+    /// a reconnect racing a half-open socket's close) overwrites the
+    /// entry with a fresh token; the old connection's teardown then sees
+    /// the mismatch and must NOT remove the live entry.
+    pub conn_token: u64,
 }
 
 /// Tray updates sent from async code to the main thread

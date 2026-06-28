@@ -22,9 +22,10 @@ the ticket onto the `.app`.
    xcode-select --install
    ```
 
-2. **Rust toolchains** (for universal binary)
+2. **Rust toolchain** (releases are arm64-only)
    ```bash
    rustup target add aarch64-apple-darwin
+   # Only needed for local Intel/universal experiments:
    rustup target add x86_64-apple-darwin
    ```
 
@@ -74,10 +75,14 @@ macos/
 ./macos/scripts/bundle.sh --arch x86_64
 ```
 
-**Universal Binary Note:** Building a universal binary locally requires native C libraries
-(cairo, freetype) for both architectures, which is complex to set up. The recommended
-approach is to use GitHub Actions for universal builds - the workflow automatically
-builds on separate runners (ARM and Intel) and combines them with `lipo`.
+**Architecture Note:** Official releases are **Apple Silicon (arm64) only** — the
+Intel build was dropped from `release.yml` when GitHub's `macos-13` runner queue
+started blocking tagged releases (see README/ROADMAP). The release workflow runs
+`bundle.sh --arm64-only`, which bundles the prebuilt aarch64 binaries. The
+`--universal` and `--lipo-only` flags are kept in `bundle.sh` for local builds and
+in case the Intel job is ever re-added; building a universal binary locally
+requires native C libraries (cairo, freetype) for both architectures, which is
+complex to set up.
 
 ### 3. Set Up Notarization (One Time)
 
@@ -219,8 +224,18 @@ file is kept around in case that changes. Distribute via Developer ID
 
 ## Version Updates
 
-When releasing a new version:
+The crate version has a single source of truth — `[workspace.package]`
+in the root `Cargo.toml` (the three crates inherit it via
+`version.workspace = true`). A few non-Cargo places still need a manual
+bump alongside it:
 
-1. Update version in `crates/coredeck/Cargo.toml`
-2. Update version in `macos/Info.plist` (CFBundleVersion and CFBundleShortVersionString)
-3. Rebuild and re-sign
+1. Root `Cargo.toml` `[workspace.package] version` — the one Cargo value
+   to change (all three crates follow)
+2. `macos/Info.plist` — both `CFBundleVersion` and
+   `CFBundleShortVersionString` (`bundle.sh` copies the plist verbatim;
+   it does not stamp the Cargo version)
+3. `macos/Casks/coredeck.rb` — the cask `version` (in the tap copy)
+4. The git tag (`vX.Y.Z`) — `release.yml`'s `verify-version` job fails
+   the build if the tag doesn't match the root `Cargo.toml` version, so
+   a mismatch is caught before any artifacts are produced
+5. Rebuild and re-sign

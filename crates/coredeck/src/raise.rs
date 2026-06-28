@@ -261,22 +261,20 @@ for (const c of list) {{
 "#
     );
 
-    let load_output = Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.KWin",
-            "--object-path",
-            "/Scripting",
-            "--method",
-            "org.kde.kwin.Scripting.loadScriptFromText",
-            &script,
-            "coredeck-raise",
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("gdbus spawn failed: {e}"))?;
+    let load_output = output_with_timeout(Command::new("gdbus").args([
+        "call",
+        "--session",
+        "--dest",
+        "org.kde.KWin",
+        "--object-path",
+        "/Scripting",
+        "--method",
+        "org.kde.kwin.Scripting.loadScriptFromText",
+        &script,
+        "coredeck-raise",
+    ]))
+    .await
+    .map_err(|e| format!("gdbus {e}"))?;
 
     if !load_output.status.success() {
         return Err(format!(
@@ -291,20 +289,18 @@ for (const c of list) {{
         .ok_or_else(|| format!("couldn't parse KWin script id from: {}", stdout.trim()))?;
     let object_path = format!("/Scripting/Script{id}");
 
-    let run_output = Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.KWin",
-            "--object-path",
-            &object_path,
-            "--method",
-            "org.kde.kwin.Script.run",
-        ])
-        .output()
-        .await
-        .map_err(|e| format!("gdbus run-call spawn failed: {e}"))?;
+    let run_output = output_with_timeout(Command::new("gdbus").args([
+        "call",
+        "--session",
+        "--dest",
+        "org.kde.KWin",
+        "--object-path",
+        &object_path,
+        "--method",
+        "org.kde.kwin.Script.run",
+    ]))
+    .await
+    .map_err(|e| format!("gdbus run-call {e}"))?;
 
     if !run_output.status.success() {
         return Err(format!(
@@ -317,19 +313,17 @@ for (const c of list) {{
     // Best-effort: ask KWin to drop the loaded-script slot. Failure
     // here doesn't matter — KWin will tidy up on its own restart and
     // a few orphan scripts are cheap.
-    let _ = Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.KWin",
-            "--object-path",
-            &object_path,
-            "--method",
-            "org.kde.kwin.Script.stop",
-        ])
-        .output()
-        .await;
+    let _ = output_with_timeout(Command::new("gdbus").args([
+        "call",
+        "--session",
+        "--dest",
+        "org.kde.KWin",
+        "--object-path",
+        &object_path,
+        "--method",
+        "org.kde.kwin.Script.stop",
+    ]))
+    .await;
 
     Ok(())
 }
@@ -429,12 +423,25 @@ async fn activate_x11_window(window_id: &str) -> Result<(), String> {
 
 // ── Helpers ────────────────────────────────────────────────────────
 
+/// Cap on how long any raise helper command may run. These run from the
+/// HID event loop's spawned tasks, so a hung `osascript` (e.g. blocked
+/// on a permission dialog), stalled `gdbus`/`wmctrl`, or wedged terminal
+/// CLI must not pin a task forever.
+pub(crate) const COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run a command to completion under `COMMAND_TIMEOUT`.
+pub(crate) async fn output_with_timeout(cmd: &mut Command) -> Result<std::process::Output, String> {
+    match tokio::time::timeout(COMMAND_TIMEOUT, cmd.output()).await {
+        Ok(Ok(o)) => Ok(o),
+        Ok(Err(e)) => Err(format!("spawn failed: {e}")),
+        Err(_) => Err(format!("timed out after {COMMAND_TIMEOUT:?}")),
+    }
+}
+
 async fn run(program: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
+    let output = output_with_timeout(Command::new(program).args(args))
         .await
-        .map_err(|e| format!("{program} spawn failed: {e}"))?;
+        .map_err(|e| format!("{program} {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(

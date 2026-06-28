@@ -1,10 +1,10 @@
 [package]
 name = "coredeck-protocol"
-version = "0.1.0"
-edition = "2021"
-rust-version = "1.75"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
 description = "Shared types and wire format for CoreDeck daemon-app communication"
-license = "GPL-3.0-or-later"
+license.workspace = true
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

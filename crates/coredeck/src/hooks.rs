@@ -220,11 +220,10 @@ pub async fn handle_hook(
 
     if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
         let json = serde_json::to_string(&v).unwrap_or_default();
-        if json.len() > 200 {
-            info!("HOOK {}: {}...", event_type, &json[..200]);
-        } else {
-            info!("HOOK {}: {}", event_type, json);
-        }
+        // truncate_chars, not a byte slice — `&json[..200]` panics when a
+        // multi-byte code point straddles the cut, and hook bodies carry
+        // user-written prompt text.
+        info!("HOOK {}: {}", event_type, truncate_chars(&json, 200));
     }
 
     forward_hook_to_app(&state, &event_type, &body).await;
@@ -234,6 +233,14 @@ pub async fn handle_hook(
 }
 
 /// Handle statusline data (context window, cost, model info).
+/// Handle a `statusLine` refresh tick. Claude Code's `statusLine` is
+/// single-valued, so to receive this data feed the daemon has to own the
+/// hook — which means it also owns what the hook's stdout renders. We
+/// return 200 with an **empty body** on purpose (the daemon drives the
+/// device display, not the terminal), so installing CoreDeck blanks
+/// Claude Code's in-terminal status line. That's the accepted tradeoff
+/// of routing status to the device; `install` warns before overwriting a
+/// pre-existing user `statusLine`.
 async fn handle_statusline(state: &DaemonState, body: &[u8]) -> axum::response::Response {
     let data: StatuslineData = match serde_json::from_slice(body) {
         Ok(d) => d,
@@ -337,9 +344,10 @@ async fn handle_subagent_statusline(state: &DaemonState, body: &[u8]) -> axum::r
     StatusCode::OK.into_response()
 }
 
-/// Best-effort `startTime` → unix-seconds. Accepts either a number
-/// (assumed ms epoch when > 10^12, else seconds) or an ISO-8601 string.
-/// Returns `None` for anything else.
+/// Best-effort `startTime` → unix-seconds. Accepts a number (assumed ms
+/// epoch when > 10^12, else seconds). ISO-8601 strings are not parsed —
+/// Claude Code always sends a numeric epoch here, so the string case is
+/// treated as "unknown" rather than pulling in a date-parsing dep.
 fn coerce_start_time_unix(v: serde_json::Value) -> Option<u64> {
     match v {
         serde_json::Value::Number(n) => {
@@ -347,7 +355,6 @@ fn coerce_start_time_unix(v: serde_json::Value) -> Option<u64> {
             let secs = if f > 1e12 { f / 1000.0 } else { f };
             Some(secs as u64)
         }
-        serde_json::Value::String(_) => None,
         _ => None,
     }
 }
@@ -379,7 +386,11 @@ async fn handle_claude_hook(
             s.permission_mode = event.permission_mode.clone();
         }
         let is_active = claude.active_session_id.as_deref() == Some(sid.as_str());
-        let changed = is_active && prev != event.permission_mode;
+        // Only a "change" when the event actually carried a mode that
+        // differs from what we had — a hook that omits `permission_mode`
+        // leaves `s.permission_mode` untouched, so it isn't a change even
+        // though `prev != event.permission_mode` (None) would say so.
+        let changed = is_active && event.permission_mode.is_some() && prev != event.permission_mode;
         // Only persist when the event carries a real value AND it
         // differs from what we had — saves disk writes on the common
         // "every hook re-asserts the same mode" case.
@@ -1177,7 +1188,12 @@ async fn handle_permission_request(
 
     // Stash request details for the Notification(permission_prompt) handler
     // (still useful for the GUI app's WS alert path when no device is
-    // available).
+    // available). Keyed by session only: with parallel tool calls in one
+    // session this holds the most-recently-seen tool's details, and the
+    // notification carries no tool identity to disambiguate against — so
+    // the legacy WS envelope may show a sibling tool's input. Acceptable
+    // for that compat path; the device's interactive alert path keeps its
+    // own per-alert state and is unaffected.
     {
         let mut claude = state.claude_state.write().await;
         claude.pending_permissions.insert(
@@ -1205,7 +1221,7 @@ async fn handle_permission_request(
         format!("Allow {}?", tool)
     };
 
-    let rx = match alerts::install_pending_alert(
+    let parked = match alerts::install_pending_alert(
         state,
         session_id.clone(),
         event.tool_name.clone(),
@@ -1216,7 +1232,7 @@ async fn handle_permission_request(
     )
     .await
     {
-        Some(rx) => rx,
+        Some(parked) => parked,
         None => {
             // Couldn't park (no device, or another alert live) — let
             // Claude show its own prompt.
@@ -1230,11 +1246,14 @@ async fn handle_permission_request(
     // back, short enough that abandoned requests don't pin a tokio task
     // forever. On timeout we drop back to "no decision" → Claude's
     // terminal prompt.
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), rx).await;
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(300), parked.rx).await;
 
-    // Make sure the device clears whatever it was showing, even if the
-    // sender was dropped (timeout / cancellation).
-    alerts::clear_alert(state).await;
+    // Clear the device only if OUR alert is still showing. On the normal
+    // resolve path `consume_input_for_decision` already cleared it and
+    // may have promoted a queued sibling into the slot — an unconditional
+    // clear here would tear that sibling down and bounce it to the
+    // terminal. `clear_alert_if` is the timeout/drop safety net only.
+    alerts::clear_alert_if(state, parked.id).await;
 
     // Clean up the pending_permissions entry — we won't be needing the
     // notification path now.
@@ -1321,26 +1340,39 @@ fn deny_response() -> PermissionResponse {
 /// chain — first-prompt snippets like "fix the bug" produced device
 /// labels noisier than the cwd they replaced.
 async fn compute_session_label(state: &DaemonState, session_id: &str) -> String {
-    let claude = state.claude_state.read().await;
-    if let Some(s) = claude.sessions.get(session_id) {
-        if let Some(name) = s.session_name.as_ref() {
-            return name.clone();
-        }
-    }
-    drop(claude);
+    let session_name = {
+        let claude = state.claude_state.read().await;
+        claude
+            .sessions
+            .get(session_id)
+            .and_then(|s| s.session_name.clone())
+    };
 
-    let wrappers = state.wrappers.read().await;
-    if let Some(w) = wrappers
-        .values()
-        .find(|w| w.session_id.as_deref() == Some(session_id))
-    {
-        let label = crate::wrapper::short_cwd_label_pub(&w.cwd);
-        if !label.is_empty() {
-            return label;
-        }
-    }
+    // Use the same priority + `↦` remote marker as the tray and device
+    // surfaces (session_name → terminal_title → cwd). Previously this
+    // path dropped terminal_title and the remote prefix, so alert lines
+    // disagreed with the tab list for the same session.
+    let (terminal_title, cwd, is_remote) = {
+        let wrappers = state.wrappers.read().await;
+        wrappers
+            .values()
+            .find(|w| w.session_id.as_deref() == Some(session_id))
+            .map(|w| (w.terminal_title.clone(), w.cwd.clone(), w.is_remote))
+            .unwrap_or((None, String::new(), false))
+    };
 
-    "Claude".to_string()
+    let cwd_fallback = crate::wrapper::short_cwd_label_pub(&cwd);
+    let label = crate::wrapper::session_label(
+        session_name.as_deref(),
+        terminal_title.as_deref(),
+        &cwd_fallback,
+        is_remote,
+    );
+    if label.is_empty() {
+        "Claude".to_string()
+    } else {
+        label
+    }
 }
 
 /// Notification: handle idle_prompt (Claude is waiting for user input)
@@ -1462,8 +1494,8 @@ async fn handle_session_start(state: &DaemonState, event: &HookEvent) {
     // entry) also lands here and gets seeded with "Thinking…" so we
     // don't paint a blank task line until the next hook arrives.
     if source == "compact" {
-        let needs_reset = s.current_task.is_none()
-            || matches!(s.current_task.as_deref(), Some("Compacting…"));
+        let needs_reset =
+            s.current_task.is_none() || matches!(s.current_task.as_deref(), Some("Compacting…"));
         if needs_reset {
             let restored = s
                 .active_task_id
@@ -1861,7 +1893,12 @@ pub fn apply_hook_entries(
         .and_then(|v| v.as_object_mut())
         .expect("hooks just ensured to be an object");
 
-    let shim_command = |event: &str| format!("{} {}", hook_shim_path, event);
+    // Shell-quote the script paths: these strings are run by Claude Code
+    // as shell commands, and a `$HOME` containing spaces (legal on macOS)
+    // would otherwise split the path into two arguments.
+    let shim_q = shell_single_quote(hook_shim_path);
+    let register_q = shell_single_quote(register_script_path);
+    let shim_command = |event: &str| format!("{} {}", shim_q, event);
 
     for event_name in &tool_hook_events {
         merge_managed_hook(
@@ -1890,7 +1927,7 @@ pub fn apply_hook_entries(
             "matcher": "*",
             "hooks": [{
                 "type": "command",
-                "command": format!("{} PermissionRequest 1800", hook_shim_path),
+                "command": format!("{} PermissionRequest 1800", shim_q),
                 "timeout": 1800,
             }]
         }),
@@ -1917,7 +1954,7 @@ pub fn apply_hook_entries(
         "SessionStart",
         serde_json::json!({
             "hooks": [
-                { "type": "command", "command": register_script_path },
+                { "type": "command", "command": register_q },
                 { "type": "command", "command": shim_command("SessionStart") },
             ]
         }),
@@ -1953,21 +1990,35 @@ pub fn apply_hook_entries(
     settings["subagentStatusLine"] = new_subagent_statusline;
 }
 
+/// POSIX single-quote a string for safe embedding in a shell command.
+/// Wraps in `'…'` and escapes any embedded single quote as `'\''`.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// True if a serialized hook command references something CoreDeck
+/// wrote: one of our embedded scripts or our daemon's `/hooks/` endpoint
+/// path. Host/port-agnostic — matching the `/hooks/<event>` path rather
+/// than a literal `127.0.0.1:19384` means a daemon started with a custom
+/// `--listen` still recognises (and uninstalls) its own entries. The
+/// `/hooks/` path is specific enough to CoreDeck that user hooks are
+/// very unlikely to collide.
+fn references_coredeck(serialized: &str) -> bool {
+    serialized.contains("coredeck-hook.sh")
+        || serialized.contains("coredeck-register.sh")
+        || serialized.contains("/hooks/")
+}
+
 /// True if a hook block (a single matcher entry inside an event's array)
-/// is one we'd write — i.e. references our embedded scripts or our
-/// daemon's HTTP endpoint. Used to dedupe re-installs without
-/// disturbing user-defined hooks for the same event.
+/// is one we'd write. Used to dedupe re-installs without disturbing
+/// user-defined hooks for the same event.
 fn is_managed_hook_block(block: &serde_json::Value) -> bool {
     let Some(hooks) = block.get("hooks").and_then(|h| h.as_array()) else {
         return false;
     };
-    hooks.iter().any(|entry| {
-        let s = entry.to_string();
-        s.contains("coredeck-hook.sh")
-            || s.contains("coredeck-register.sh")
-            || s.contains("127.0.0.1:19384/hooks/")
-            || s.contains("localhost:19384/hooks/")
-    })
+    hooks
+        .iter()
+        .any(|entry| references_coredeck(&entry.to_string()))
 }
 
 /// Merge a fresh hook block for `event_name` into `hooks_map`, replacing
@@ -2007,11 +2058,7 @@ fn warn_if_clobbering(
         return;
     }
     let serialized = existing.to_string();
-    if serialized.contains("coredeck-hook.sh")
-        || serialized.contains("coredeck-register.sh")
-        || serialized.contains("127.0.0.1:19384/hooks/")
-        || serialized.contains("localhost:19384/hooks/")
-    {
+    if references_coredeck(&serialized) {
         return;
     }
     eprintln!(
@@ -2072,23 +2119,23 @@ pub fn uninstall_hooks_result() -> Result<(), String> {
         }
     }
 
-    if let Some(sl) = settings.get("statusLine") {
-        let s = sl.to_string();
-        if s.contains("127.0.0.1:19384") || s.contains("localhost:19384") {
-            settings.as_object_mut().unwrap().remove("statusLine");
-            changed = true;
-        }
+    if settings
+        .get("statusLine")
+        .is_some_and(|sl| references_coredeck(&sl.to_string()))
+    {
+        settings.as_object_mut().unwrap().remove("statusLine");
+        changed = true;
     }
 
-    if let Some(sl) = settings.get("subagentStatusLine") {
-        let s = sl.to_string();
-        if s.contains("127.0.0.1:19384") || s.contains("localhost:19384") {
-            settings
-                .as_object_mut()
-                .unwrap()
-                .remove("subagentStatusLine");
-            changed = true;
-        }
+    if settings
+        .get("subagentStatusLine")
+        .is_some_and(|sl| references_coredeck(&sl.to_string()))
+    {
+        settings
+            .as_object_mut()
+            .unwrap()
+            .remove("subagentStatusLine");
+        changed = true;
     }
 
     if changed {
@@ -2139,41 +2186,47 @@ pub fn are_hooks_installed() -> bool {
         Err(_) => return false,
     };
     if let Some(hooks) = settings.get("hooks") {
-        let s = hooks.to_string();
-        if s.contains("coredeck-hook.sh")
-            || s.contains("127.0.0.1:19384/hooks/")
-            || s.contains("localhost:19384/hooks/")
-        {
+        if references_coredeck(&hooks.to_string()) {
             return true;
         }
     }
     false
 }
 
+/// User home directory, without panicking when `HOME` is unset.
+///
+/// Reachable at daemon startup (the tray seeds itself via
+/// `are_hooks_installed`), so a missing `HOME` must degrade rather than
+/// abort: falls back to the platform home via `directories`, then to
+/// `.` as a last resort (where a settings read simply misses and hooks
+/// read as "not installed").
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()))
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Path to the `~/.claude` config directory.
+fn claude_dir() -> std::path::PathBuf {
+    home_dir().join(".claude")
+}
+
 /// Path to ~/.claude/settings.json (user-global settings).
 /// Note: ~/.claude/settings.local.json is NOT a valid Claude Code settings location.
 /// Only ~/.claude/settings.json, .claude/settings.json, and .claude/settings.local.json are recognized.
 fn claude_settings_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").expect("HOME not set");
-    std::path::PathBuf::from(home)
-        .join(".claude")
-        .join("settings.json")
+    claude_dir().join("settings.json")
 }
 
 /// Path to the SessionStart correlation script.
 fn coredeck_register_script_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").expect("HOME not set");
-    std::path::PathBuf::from(home)
-        .join(".claude")
-        .join("coredeck-register.sh")
+    claude_dir().join("coredeck-register.sh")
 }
 
 /// Path to the generic hook shim script.
 fn coredeck_hook_shim_script_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").expect("HOME not set");
-    std::path::PathBuf::from(home)
-        .join(".claude")
-        .join("coredeck-hook.sh")
+    claude_dir().join("coredeck-hook.sh")
 }
 
 /// Write the embedded register script to disk and make it executable.
@@ -2201,4 +2254,60 @@ fn write_script(path: std::path::PathBuf, contents: &str) -> Result<std::path::P
             .map_err(|e| format!("Failed to chmod {}: {}", path.display(), e))?;
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod hook_tests {
+    use super::*;
+
+    #[test]
+    fn shell_single_quote_escapes() {
+        assert_eq!(shell_single_quote("/a/b.sh"), "'/a/b.sh'");
+        assert_eq!(
+            shell_single_quote("/Users/My Name/.claude/coredeck-hook.sh"),
+            "'/Users/My Name/.claude/coredeck-hook.sh'"
+        );
+        // Embedded single quote.
+        assert_eq!(shell_single_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn quoted_paths_still_match_as_managed() {
+        // The references_coredeck matcher must still recognise our
+        // shell-quoted script paths so uninstall/dedup work.
+        let cmd = format!(
+            "{} PermissionRequest 1800",
+            shell_single_quote("/Users/My Name/.claude/coredeck-hook.sh")
+        );
+        assert!(references_coredeck(&cmd));
+    }
+
+    #[test]
+    fn references_coredeck_is_port_agnostic() {
+        // statusLine command on a non-default --listen port must still
+        // be recognised for uninstall.
+        let custom =
+            "curl -s -m 5 -X POST http://127.0.0.1:5000/hooks/statusline --data-binary @- || true";
+        assert!(references_coredeck(custom));
+        let default = "curl -s -X POST http://127.0.0.1:19384/hooks/subagent-statusline @-";
+        assert!(references_coredeck(default));
+        // Unrelated user hook must not match.
+        assert!(!references_coredeck("curl https://example.com/api/status"));
+    }
+
+    #[test]
+    fn coerce_start_time_handles_ms_and_secs() {
+        assert_eq!(
+            coerce_start_time_unix(serde_json::json!(1_700_000_000_000_u64)),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            coerce_start_time_unix(serde_json::json!(1_700_000_000_u64)),
+            Some(1_700_000_000)
+        );
+        assert_eq!(
+            coerce_start_time_unix(serde_json::json!("2024-01-01")),
+            None
+        );
+    }
 }

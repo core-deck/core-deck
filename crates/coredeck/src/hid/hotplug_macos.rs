@@ -185,8 +185,14 @@ fn run_watcher(
             ));
         }
 
-        // Drain the iterator to arm the notification (and check if device is already connected)
-        drain_iterator(arrival_iterator, HotplugEvent::DeviceArrived, true);
+        // Drain the iterator to arm the notification. Emit DeviceArrived
+        // for anything already present: a device plugged in between
+        // `HidManager::new`'s initial enumeration and this point would
+        // otherwise fall in the gap and never produce a notification. The
+        // consumer re-checks presence and is idempotent, so a duplicate
+        // arrival for a device the initial enumeration already saw is
+        // harmless.
+        drain_iterator(arrival_iterator, Some(&arrival_ctx.event_tx));
 
         // Register for device removal notifications
         let mut removal_iterator: io_iterator_t = 0;
@@ -207,8 +213,9 @@ fn run_watcher(
             ));
         }
 
-        // Drain the iterator to arm the notification
-        drain_iterator(removal_iterator, HotplugEvent::DeviceRemoved, false);
+        // Drain the iterator to arm the notification. No event here — a
+        // device present at startup is an "arrival", not a "removal".
+        drain_iterator(removal_iterator, None);
 
         info!(
             "IOKit hotplug watcher started for VID:0x{:04X} PID:0x{:04X}",
@@ -234,15 +241,21 @@ fn run_watcher(
     Ok(())
 }
 
-/// Drain an iterator to arm notifications
-unsafe fn drain_iterator(iterator: io_iterator_t, event: HotplugEvent, log_existing: bool) {
+/// Drain an iterator to arm notifications. When `emit_arrival` is
+/// `Some`, send a `DeviceArrived` for each device already present so a
+/// device plugged in during the watcher-startup gap isn't missed.
+unsafe fn drain_iterator(
+    iterator: io_iterator_t,
+    emit_arrival: Option<&mpsc::UnboundedSender<HotplugEvent>>,
+) {
     loop {
         let service = IOIteratorNext(iterator);
         if service == 0 {
             break;
         }
-        if log_existing {
-            debug!("Existing device found during init: {:?}", event);
+        if let Some(tx) = emit_arrival {
+            debug!("Existing device found during init; emitting DeviceArrived");
+            let _ = tx.send(HotplugEvent::DeviceArrived);
         }
         IOObjectRelease(service);
     }

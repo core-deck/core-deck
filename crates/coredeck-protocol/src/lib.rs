@@ -188,13 +188,17 @@ pub enum WsEventTag {
     StateChanged = 0x82,
     KeyEvent = 0x83,
     TypeString = 0x84,
-    /// Claude Code hook event forwarded from daemon (JSON payload)
-    ClaudeHookEvent = 0x85,
     AppControl = 0x89,
     /// Snapshot of all live `coredeck-claude` wrappers and their per-session
     /// state. JSON payload is `WrapperTabList`. Re-emitted on every change
     /// (wrapper register/unregister, hook update, active-tab change).
     WrapperTabList = 0x8A,
+    /// Claude Code hook event forwarded from daemon (JSON payload).
+    ///
+    /// Was `0x85` before 0.2 — that value collides with
+    /// `WsResponseTag::SoftKeyResponse` and relied on the (then
+    /// unenforced) "commands use seq > 0" convention to disambiguate.
+    ClaudeHookEvent = 0x8B,
 }
 
 impl WsEventTag {
@@ -205,9 +209,9 @@ impl WsEventTag {
             0x82 => Some(Self::StateChanged),
             0x83 => Some(Self::KeyEvent),
             0x84 => Some(Self::TypeString),
-            0x85 => Some(Self::ClaudeHookEvent),
             0x89 => Some(Self::AppControl),
             0x8A => Some(Self::WrapperTabList),
+            0x8B => Some(Self::ClaudeHookEvent),
             _ => None,
         }
     }
@@ -559,20 +563,25 @@ pub enum WrapperToDaemon {
         /// tell remote tabs apart at a glance.
         #[serde(default, skip_serializing_if = "is_false")]
         is_remote: bool,
-    },
-    /// Best-effort signal that the child claude exited (wrapper is about to close).
-    /// The daemon also treats WS close as unregister.
-    Goodbye {
-        wrapper_id: String,
-        exit_code: Option<i32>,
+        /// Wrapper binary version (`CARGO_PKG_VERSION`), for daemon-side
+        /// mismatch logging. Absent from wrappers older than the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        wrapper_version: Option<String>,
     },
     /// Host terminal focus changed (parsed from OSC 1004 reports on the
     /// wrapper's stdin). Daemon uses focus-in to set the wrapper as
     /// active and clear any alert tied to its session.
+    ///
+    /// `wrapper_id` is informational only — the daemon routes by the
+    /// connection the frame arrived on, not by this field.
     FocusChanged { wrapper_id: String, focused: bool },
-    /// Title hint sniffed from claude's PTY output (OSC 9). The wrapper
-    /// passes the bytes through to the host terminal as well — this is
-    /// purely a side channel for the daemon's session-label fallback.
+    /// Title hint sniffed from claude's PTY output (OSC 0/1/2). The
+    /// wrapper passes the bytes through to the host terminal as well —
+    /// this is purely a side channel for the daemon's session-label
+    /// fallback.
+    ///
+    /// `wrapper_id` is informational only — the daemon routes by the
+    /// connection the frame arrived on, not by this field.
     TitleHint { wrapper_id: String, title: String },
 }
 
@@ -581,7 +590,12 @@ pub enum WrapperToDaemon {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonToWrapper {
     /// Ack the Register frame.
-    Registered { wrapper_id: String },
+    Registered {
+        wrapper_id: String,
+        /// Daemon binary version, for wrapper-side mismatch logging.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        daemon_version: Option<String>,
+    },
     /// Write raw bytes to the child's PTY stdin (e.g. keystroke escapes,
     /// soft-key text, mode-cycle key).
     Write { bytes: Vec<u8> },
@@ -616,8 +630,8 @@ pub struct WrapperTab {
     /// Custom session name (`--name` flag or `/rename`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_name: Option<String>,
-    /// Most recent OSC 9 title sniffed from claude's PTY output. Used as
-    /// a label fallback between `session_name` and the cwd.
+    /// Most recent OSC 0/1/2 title sniffed from claude's PTY output. Used
+    /// as a label fallback between `session_name` and the cwd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_title: Option<String>,
     /// Short summary of the user's most recent prompt — was used as a

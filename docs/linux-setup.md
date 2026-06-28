@@ -149,13 +149,18 @@ window. The daemon picks a path automatically:
 | Session                    | Mechanism                                |
 |----------------------------|------------------------------------------|
 | X11 (any DE)               | `wmctrl -ia $WINDOWID` / `wmctrl -x -a`  |
-| KDE Plasma Wayland or X11  | KWin Scripting via `gdbus` (always works)|
+| KDE Plasma Wayland or X11  | KWin Scripting via `gdbus` — only for terminals the wrapper recognizes (GNOME Terminal, Konsole, Alacritty) |
 | GNOME Wayland              | **No built-in support.** See below       |
 | Sway / Hyprland / Wayfire  | **No built-in support yet.** See below   |
 
 **KDE Plasma** is the friendly Wayland case — KWin exposes a Scripting
 DBus interface that we drive via `gdbus` (which ships with glib2,
-already pulled in by the tray). No extra packages needed.
+already pulled in by the tray). No extra packages needed. The caveat:
+the KWin path is keyed off the detected terminal kind, because it
+activates windows by `resourceClass` — it's only attempted for GNOME
+Terminal, Konsole, and Alacritty. A terminal the wrapper can't
+classify falls back to `$WINDOWID` + `wmctrl`, which no-ops on pure
+Wayland (so an unrecognized terminal on KDE Wayland gets no raise).
 
 **GNOME Wayland** deliberately doesn't expose window management to
 clients (Mutter's security stance). Options if you're on GNOME

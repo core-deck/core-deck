@@ -2,7 +2,7 @@
 # Sign and notarize Core Deck for macOS distribution
 # Run this after bundle.sh
 
-set -e
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"

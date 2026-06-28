@@ -21,12 +21,27 @@ fi
 if command -v jq >/dev/null 2>&1; then
     SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty')
 else
-    SESSION_ID=$(printf '%s' "$INPUT" | grep -o '"session_id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    # Tolerate optional whitespace around the colon (some emitters
+    # pretty-print): "session_id" : "abc".
+    SESSION_ID=$(printf '%s' "$INPUT" \
+        | grep -oE '"session_id"[[:space:]]*:[[:space:]]*"[^"]*"' \
+        | head -1 \
+        | sed -E 's/.*"([^"]*)"$/\1/')
 fi
 
 if [ -z "${SESSION_ID:-}" ]; then
     exit 0
 fi
+
+# Both ids are UUIDs (session from Claude Code, wrapper from the daemon).
+# Guard the charset before interpolating into the JSON body so a value
+# with a quote/backslash can't break or inject into the request. If
+# either looks unexpected, skip registration rather than send garbage.
+case "$WRAPPER_ID$SESSION_ID" in
+    *[!A-Za-z0-9._-]*)
+        exit 0
+        ;;
+esac
 
 DAEMON_URL="${COREDECK_DAEMON_URL:-http://127.0.0.1:19384}"
 curl -s -m 2 -X POST "$DAEMON_URL/wrapper/register" \

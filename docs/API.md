@@ -6,17 +6,22 @@ For build instructions and project setup, see the [README](../README.md) and [Bu
 
 ## Access Modes
 
-The daemon provides three ways to communicate:
+The daemon provides four ways to communicate:
 
 | Mode | Endpoint | Exclusivity | Use Case |
 |------|----------|-------------|----------|
 | **HTTP REST** | `http://127.0.0.1:19384/api/*` | Shared (with caveat) | Simple one-shot commands, status checks |
 | **WebSocket** | `ws://127.0.0.1:19384/ws` | Exclusive (one client) | Real-time bidirectional control |
 | **Hook endpoints** | `http://127.0.0.1:19384/hooks/*` | Not locked | Claude Code hook events and statusline |
+| **Wrapper channel** | `ws://127.0.0.1:19384/wrapper-ws` + `POST /wrapper/register` | Not locked (many wrappers) | `coredeck-claude` registration, byte injection, session binding |
 
-When a WebSocket client is connected, it holds an exclusive lock on the device. Mutating HTTP `/api/*` endpoints return `409 Conflict` while the lock is held. The `GET /api/status` endpoint and all `/hooks/*` endpoints always work regardless of lock state.
+The daemon also serves its browser settings page at `/` and `/settings` (single-file HTML embedded in the binary, opened from the tray menu).
 
-When no WebSocket client is connected, mutating HTTP endpoints transiently open the HID device for the duration of the request.
+Browser cross-site access is rejected: requests with a non-loopback `Origin` get `403 Forbidden`, and the `Host` header is validated when the daemon is bound to loopback — see the [REST API Reference](REST-API.md) intro for details.
+
+When a WebSocket client is connected, it holds an exclusive lock on the device. Mutating HTTP `/api/*` endpoints return `409 Conflict` while the lock is held, as do the GET endpoints that query the device (`GET /api/version`, `GET /api/soft-keys`, `GET /api/theme`). `GET /api/status`, `GET /api/wrappers`, `GET /api/hooks/status`, `GET /api/soft-keys/presets`, and all `/hooks/*` endpoints always work regardless of lock state.
+
+The daemon keeps the HID device handle open for its whole lifetime — handlers use that persistent handle directly (reopening it on demand only if hotplug ordering or a recent disconnect left it closed).
 
 ### Claude Code Hooks
 

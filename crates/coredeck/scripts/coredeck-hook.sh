@@ -29,8 +29,21 @@ if [ -z "$EVENT" ]; then
     exit 0
 fi
 
+# Guard against a malformed hook entry passing a non-numeric max-time:
+# curl would error instantly and the event would be silently dropped.
+case "$MAX_TIME" in
+    '' | *[!0-9]*) MAX_TIME=5 ;;
+esac
+
 DAEMON_URL="${COREDECK_DAEMON_URL:-http://127.0.0.1:19384}"
-curl -s -m "$MAX_TIME" -X POST "$DAEMON_URL/hooks/$EVENT" \
+# -f: on an HTTP 4xx/5xx, fail and emit nothing rather than passing the
+# daemon's error body to Claude Code as if it were the hook response.
+# This matters for PermissionRequest, whose stdout is parsed as the
+# allow/deny envelope — a stray error page could read as a bogus
+# decision. The unconditional `exit 0` still turns a daemon error (or an
+# offline daemon) into a clean "no response" passthrough. The allow/deny
+# path is unaffected: those are HTTP 200 and pass through normally.
+curl -sf -m "$MAX_TIME" -X POST "$DAEMON_URL/hooks/$EVENT" \
     -H 'Content-Type: application/json' \
     --data-binary @- 2>/dev/null
 

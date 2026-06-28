@@ -1,5 +1,0 @@
-Using Claude 3.5 Sonnet
-Working on auth.rs
-[32mProgress: 50%[0m
-Used 1,234 tokens so far
-Cost: $0.05

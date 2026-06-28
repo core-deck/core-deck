@@ -1,0 +1,4 @@
+# Core Deck QMK Raw HID device — VID 0xFEED, PID 0x0803.
+# Drop into /etc/udev/rules.d/ then `sudo udevadm control --reload-rules && sudo udevadm trigger`.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="feed", ATTRS{idProduct}=="0803", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="feed", ATTRS{idProduct}=="0803", MODE="0666"

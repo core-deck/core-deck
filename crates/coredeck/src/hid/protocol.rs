@@ -260,7 +260,6 @@ pub struct ResponsePacket {
 }
 
 /// Protocol error codes from firmware
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ProtoError {
@@ -272,7 +271,6 @@ pub enum ProtoError {
     UnknownCommand = 0x03,
 }
 
-#[allow(dead_code)]
 impl ProtoError {
     pub fn from_byte(byte: u8) -> Option<Self> {
         match byte {

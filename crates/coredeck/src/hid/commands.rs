@@ -3,8 +3,6 @@
 //! Convenience functions for building common HID commands.
 //! All builders return `Vec<HidPacket>` using the chunked protocol.
 
-#![allow(dead_code)]
-
 use super::protocol::{
     build_chunked_packets, DeviceMode, HidCommand, HidPacket, ProtocolMode, SoftKeyType,
 };

@@ -5,7 +5,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ICONS_DIR="$SCRIPT_DIR/../assets/icons"
+# Icons live in the daemon crate; the old repo-root assets/icons path
+# was stranded when the crate moved.
+ICONS_DIR="$SCRIPT_DIR/../crates/coredeck/assets/icons"
 SOURCE="$ICONS_DIR/CoreDeckTray.png"
 
 if [ ! -f "$SOURCE" ]; then

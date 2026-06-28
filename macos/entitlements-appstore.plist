@@ -17,17 +17,21 @@
     <key>com.apple.security.device.usb</key>
     <true/>
 
-    <!-- Network access -->
+    <!-- Network access. The daemon binds an HTTP/WS server on
+         127.0.0.1:19384, so network.server is required (it was missing —
+         under the sandbox the daemon couldn't listen). network.client is
+         for the GitHub update checker. -->
+    <key>com.apple.security.network.server</key>
+    <true/>
     <key>com.apple.security.network.client</key>
     <true/>
 
     <!-- File access - User selected files -->
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
-
-    <!-- Temporary exception for hardened runtime requirements -->
-    <!-- Note: App Store review may require justification for these -->
-    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
-    <true/>
+    <!-- A pure-Rust daemon doesn't run unsigned/JIT code, so the
+         cs.allow-unsigned-executable-memory relaxation (which weakens the
+         hardened runtime) was removed to match the distribution
+         entitlements. -->
 </dict>
 </plist>

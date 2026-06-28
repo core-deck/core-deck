@@ -4,7 +4,7 @@
 
 ### Rust Toolchain
 
-Rust 1.75 or later (stable). Install via [rustup](https://rustup.rs/):
+Rust 1.86 or later (stable). Install via [rustup](https://rustup.rs/):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -46,7 +46,7 @@ default install; headless servers will need them at runtime too
 (`libgtk-3-0 libxdo3 libayatana-appindicator3-1` /
 `gtk3 libxdo libayatana-appindicator3-gtk3`).
 
-The daemon also draws the tray icon via `tray-icon`/`winit`, which on Linux needs an X11 or Wayland session at runtime but no extra build packages beyond what is listed above.
+The daemon also draws the tray icon via `tray-icon` — driven by a GTK main loop (`gtk::init()`/`gtk::main()`) on Linux and `winit` on macOS. On Linux this needs an X11 or Wayland session at runtime but no extra build packages beyond what is listed above.
 
 After building, see [linux-setup.md](linux-setup.md) for the runtime
 setup — udev rules, `coredeck setup` (systemd user unit + Claude
@@ -126,9 +126,19 @@ cargo test --workspace
 
 ### Logging
 
-Both binaries use `tracing` with `RUST_LOG` env filter:
+Both binaries use `tracing`, but they read different filter variables. The daemon honors the standard `RUST_LOG` (default `info`); the wrapper reads `COREDECK_LOG` instead (default `warn`, written to stderr so log noise doesn't corrupt the PTY view):
 
 ```bash
 RUST_LOG=debug cargo run -p coredeck
-RUST_LOG=debug cargo run -p coredeck-claude
+COREDECK_LOG=debug cargo run -p coredeck-claude
 ```
+
+### Environment Variables
+
+| Variable | Read by | Effect |
+|----------|---------|--------|
+| `RUST_LOG` | `coredeck` (daemon) | `tracing` log filter (default `info`) |
+| `COREDECK_LOG` | `coredeck-claude` (wrapper) | `tracing` log filter (default `warn`, stderr) |
+| `COREDECK_CLAUDE_BIN` | wrapper | Path/name of the `claude` binary to run (default `claude`) |
+| `COREDECK_DAEMON_ADDR` | wrapper | Daemon address override (default `127.0.0.1:19384`) |
+| `COREDECK_SSH_HOST` | wrapper | Default `--ssh` host when the flag isn't passed; the CLI flag wins |

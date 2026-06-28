@@ -14,8 +14,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # On a tag push, assert the tag matches the workspace crate version.
+  # create-dmg.sh derives the DMG name from Cargo.toml while artifact
+  # names come from the tag — a mismatch ships a DMG the cask URL can't
+  # find and an update checker that loops on "update available". Fail
+  # fast before building anything.
+  verify-version:
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compare tag to crate version
+        run: |
+          tag_version="${GITHUB_REF#refs/tags/v}"
+          crate_version="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')"
+          echo "tag=$tag_version crate=$crate_version"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "::error::Tag v$tag_version does not match workspace version $crate_version (Cargo.toml [workspace.package]). Bump the version before tagging."
+            exit 1
+          fi
+
   # Build daemon + wrapper for each architecture on native runners
   build-macos-arm64:
+    needs: verify-version
+    # needs: is skipped automatically when verify-version is skipped
+    # (non-tag dispatch), so workflow_dispatch builds still run.
+    if: ${{ always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped') }}
     runs-on: macos-14  # ARM64 runner
     steps:
       - name: Checkout
@@ -67,12 +93,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build for ${{ matrix.arch }} Linux
+        # `strip = true` in [profile.release] already strips symbols, so
+        # no separate strip step is needed.
         run: cargo build --release --workspace --target ${{ matrix.rust_target }}
-
-      - name: Strip binaries
-        run: |
-          strip target/${{ matrix.rust_target }}/release/coredeck
-          strip target/${{ matrix.rust_target }}/release/coredeck-claude
 
       - name: Upload Linux ${{ matrix.arch }} binaries
         uses: actions/upload-artifact@v4
@@ -162,7 +185,12 @@ jobs:
             --password "$APP_PASSWORD"
 
       - name: Ad-hoc sign (unsigned build)
+        # The env block is required: without it env.MACOS_CERTIFICATE is empty
+        # here even when the secret is set, and this step would clobber the
+        # Developer ID signature created above.
         if: ${{ env.MACOS_CERTIFICATE == '' }}
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
         run: |
           echo "No signing certificate provided, creating ad-hoc signed build"
           codesign --force --deep --sign - "dist/Core Deck.app"
@@ -175,10 +203,11 @@ jobs:
           APP_PASSWORD: ${{ secrets.APP_PASSWORD }}
         run: |
           if [ -n "$SIGNING_IDENTITY" ]; then
+            # APPLE_ID/APP_PASSWORD are read from the environment by the
+            # script; it has no --apple-id flag.
             ./macos/scripts/create-dmg.sh \
               --identity "$SIGNING_IDENTITY" \
-              --team-id "$TEAM_ID" \
-              --apple-id "$APPLE_ID"
+              --team-id "$TEAM_ID"
           else
             ./macos/scripts/create-dmg.sh --skip-notarize
           fi
@@ -191,7 +220,7 @@ jobs:
           elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           else
-            echo "version=$(grep '^version' crates/coredeck/Cargo.toml | head -1 | sed 's/.*\"\(.*\)\"/\1/')" >> $GITHUB_OUTPUT
+            echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*\"\(.*\)\"/\1/')" >> $GITHUB_OUTPUT
           fi
 
       - name: Upload DMG artifact
@@ -225,7 +254,7 @@ jobs:
           elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           else
-            echo "version=$(grep '^version' crates/coredeck/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
+            echo "version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')" >> $GITHUB_OUTPUT
           fi
 
       - name: Stage tarball contents
@@ -246,39 +275,10 @@ jobs:
           install -m 0755 dist/linux/coredeck "$STAGE/bin/coredeck"
           install -m 0755 dist/linux/coredeck-claude "$STAGE/bin/coredeck-claude"
 
-          cat > "$STAGE/udev/99-coredeck.rules" <<'EOF'
-          # Core Deck QMK Raw HID device — VID 0xFEED, PID 0x0803.
-          # Drop into /etc/udev/rules.d/ then `sudo udevadm control --reload-rules && sudo udevadm trigger`.
-          SUBSYSTEM=="hidraw", ATTRS{idVendor}=="feed", ATTRS{idProduct}=="0803", MODE="0666"
-          SUBSYSTEM=="usb", ATTRS{idVendor}=="feed", ATTRS{idProduct}=="0803", MODE="0666"
-          EOF
-
-          cat > "$STAGE/install.sh" <<'EOF'
-          #!/usr/bin/env bash
-          # Install Core Deck binaries to ~/.local/bin, drop the udev
-          # rules into /etc/udev/rules.d/ (asks for sudo), and run
-          # `coredeck setup` to register hooks + the systemd user unit.
-          set -euo pipefail
-          here="$(cd "$(dirname "$0")" && pwd)"
-          mkdir -p "$HOME/.local/bin"
-          install -m 0755 "$here/bin/coredeck" "$HOME/.local/bin/coredeck"
-          install -m 0755 "$here/bin/coredeck-claude" "$HOME/.local/bin/coredeck-claude"
-          if [ ! -f /etc/udev/rules.d/99-coredeck.rules ]; then
-              echo "Installing udev rules (sudo)…"
-              sudo install -m 0644 "$here/udev/99-coredeck.rules" /etc/udev/rules.d/99-coredeck.rules
-              sudo udevadm control --reload-rules
-              sudo udevadm trigger
-          fi
-          case ":$PATH:" in
-              *":$HOME/.local/bin:"*) ;;
-              *) echo "warning: ~/.local/bin is not on \$PATH; add it to your shell rc." ;;
-          esac
-          "$HOME/.local/bin/coredeck" setup
-          echo
-          echo "Done. Add this to your shell rc to wrap claude:"
-          echo "    alias claude=\"coredeck-claude\""
-          EOF
-          chmod +x "$STAGE/install.sh"
+          # install.sh and the udev rules are committed under linux/ so
+          # they're reviewable and shellcheck'd in CI; just copy them in.
+          install -m 0644 linux/99-coredeck.rules "$STAGE/udev/99-coredeck.rules"
+          install -m 0755 linux/install.sh "$STAGE/install.sh"
 
           # Lift the README from docs/linux-setup.md so the tarball is
           # self-contained — saves users a trip to the repo.
