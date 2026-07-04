@@ -225,7 +225,7 @@ Set the device operating mode (changes the LED indicator color).
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mode` | string | yes | One of `"Default"`, `"Accept"`, `"Plan"` |
+| `mode` | string | yes | One of `"Default"`, `"Accept"`, `"Plan"`, `"Auto"` |
 
 **Response codes:**
 

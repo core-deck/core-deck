@@ -37,13 +37,24 @@ Per-tab alerts also use tab indices 0–15.
 
 ## Device Modes
 
-| Value | Name | Description |
-|-------|------|-------------|
-| 0 | Default | Normal operating mode |
-| 1 | Accept | Accept/approve mode (green LED) |
-| 2 | Plan | Planning mode (blue LED) |
+Mirror Claude Code's cyclable terminal permission modes. The value is the
+low 2 bits of the state byte, so all four fit without a wire change.
 
-Cycle order on the physical mode button: Default → Accept → Plan → Default.
+| Value | Name | Claude Code mode | Mode-button LED |
+|-------|------|------------------|-----------------|
+| 0 | Default | `default` | none (reactive glow) |
+| 1 | Accept | `acceptEdits` | purple |
+| 2 | Plan | `plan` | cyan |
+| 3 | Auto | `auto` | golden/amber |
+
+`bypassPermissions` (and any unknown mode) maps to Default. Auto's LED is
+a steady solid gold — distinct from Default, whose LED has no override
+and shows the normal reactive effect.
+
+Cycle order on the physical mode button: Default → Accept → Plan → Auto →
+Default. (The button tap is optimistic; the authoritative mode is whatever
+Claude Code reports back through the hooks, which corrects the LED within a
+tick.)
 
 ## Soft Keys
 

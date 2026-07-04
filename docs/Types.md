@@ -145,13 +145,17 @@ Request body for `POST /api/mode`.
 
 ## DeviceMode
 
-String enum for the device operating mode.
+String enum for the device operating mode. Mirrors Claude Code's cyclable
+terminal permission modes.
 
-| Value | Byte | Description |
-|-------|------|-------------|
-| `"Default"` | 0 | Normal operating mode |
-| `"Accept"` | 1 | Accept/approve mode |
-| `"Plan"` | 2 | Planning mode |
+| Value | Byte | Claude Code mode | Description |
+|-------|------|------------------|-------------|
+| `"Default"` | 0 | `default` | Normal operating mode |
+| `"Accept"` | 1 | `acceptEdits` | Accept-edits mode |
+| `"Plan"` | 2 | `plan` | Planning mode |
+| `"Auto"` | 3 | `auto` | Auto mode (golden LED) |
+
+`bypassPermissions` and any unknown mode collapse to `"Default"`.
 
 ## DeviceState
 
@@ -161,7 +165,7 @@ Single byte with bit fields:
 
 | Bits | Field | Values |
 |------|-------|--------|
-| 1:0 | mode | 0=Default, 1=Accept, 2=Plan |
+| 1:0 | mode | 0=Default, 1=Accept, 2=Plan, 3=Auto |
 | 2 | yolo | 0=off, 1=on (hardware switch, read-only) |
 | 7:3 | reserved | 0 |
 

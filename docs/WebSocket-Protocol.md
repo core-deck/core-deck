@@ -134,7 +134,7 @@ For each key (repeated 3 times):
 
 Set the device operating mode (LED indicator).
 
-**Payload:** 1 byte — mode value: 0=Default, 1=Accept, 2=Plan
+**Payload:** 1 byte — mode value: 0=Default, 1=Accept, 2=Plan, 3=Auto
 
 **Response:** `CommandAck` (0x87)
 
@@ -225,7 +225,7 @@ The device mode or YOLO switch changed (user pressed the mode button or toggled 
 
 | Bit | Description |
 |-----|-------------|
-| 1:0 | Mode (0=Default, 1=Accept, 2=Plan) |
+| 1:0 | Mode (0=Default, 1=Accept, 2=Plan, 3=Auto) |
 | 2 | YOLO (0=off, 1=on) |
 | 7:3 | Reserved (0) |
 

@@ -12,7 +12,11 @@ use serde::{Deserialize, Serialize};
 
 /// Device operating mode (LED indicator)
 ///
-/// Cycle order on the device: Default -> Accept -> Plan -> Default
+/// Cycle order on the device: Default -> Accept -> Plan -> Auto -> Default.
+/// Values are the low 2 bits of the state byte, so all four fit without a
+/// wire-format change. `Auto` mirrors Claude Code's "auto" permission mode
+/// (added after Default/Accept/Plan) — see `map_permission_mode` in the
+/// daemon for the string mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum DeviceMode {
@@ -20,6 +24,7 @@ pub enum DeviceMode {
     Default = 0,
     Accept = 1,
     Plan = 2,
+    Auto = 3,
 }
 
 impl DeviceMode {
@@ -27,6 +32,7 @@ impl DeviceMode {
         match byte {
             1 => DeviceMode::Accept,
             2 => DeviceMode::Plan,
+            3 => DeviceMode::Auto,
             _ => DeviceMode::Default,
         }
     }
@@ -38,6 +44,7 @@ impl std::fmt::Display for DeviceMode {
             DeviceMode::Default => write!(f, "default"),
             DeviceMode::Accept => write!(f, "accept"),
             DeviceMode::Plan => write!(f, "plan"),
+            DeviceMode::Auto => write!(f, "auto"),
         }
     }
 }
@@ -728,20 +735,29 @@ mod tests {
 
     #[test]
     fn test_device_mode_roundtrip() {
-        for mode in [DeviceMode::Default, DeviceMode::Accept, DeviceMode::Plan] {
+        for mode in [
+            DeviceMode::Default,
+            DeviceMode::Accept,
+            DeviceMode::Plan,
+            DeviceMode::Auto,
+        ] {
             assert_eq!(DeviceMode::from_byte(mode as u8), mode);
+            // Mode must fit in the low 2 bits of the state byte.
+            assert_eq!(mode as u8 & 0x03, mode as u8);
         }
     }
 
     #[test]
     fn test_device_state_byte_roundtrip() {
+        // Auto (3) shares the state byte with the yolo bit (0x04);
+        // verify they don't collide.
         let state = DeviceState {
-            mode: DeviceMode::Plan,
+            mode: DeviceMode::Auto,
             yolo: true,
         };
         let byte = state.to_byte();
         let parsed = DeviceState::from_byte(byte);
-        assert_eq!(parsed.mode, DeviceMode::Plan);
+        assert_eq!(parsed.mode, DeviceMode::Auto);
         assert!(parsed.yolo);
     }
 

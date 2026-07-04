@@ -886,15 +886,20 @@ pub async fn sync_active_mode_to_device(state: &DaemonState) {
     }
 }
 
-/// Map Claude Code's `permission_mode` string to the firmware's three
-/// `DeviceMode` slots. `bypassPermissions` collapses to `Default` —
-/// the device has no fourth color and "default" is the closest in
-/// behaviour ("permissions are off but unlike acceptEdits we're not
-/// committing to a specific posture").
+/// Map Claude Code's `permission_mode` string (captured verbatim from the
+/// hook payload) to a firmware `DeviceMode` slot.
+///
+/// The four slots mirror Claude Code's cyclable terminal modes:
+/// `default`, `acceptEdits` ("accept edits"), `plan`, and `auto` (the
+/// newer golden mode). `bypassPermissions` has no slot of its own and
+/// collapses to `Default` — it's the closest in behaviour ("permissions
+/// are off, but unlike acceptEdits we're not committing to a posture").
+/// Any other/unknown value also falls back to `Default`.
 fn map_permission_mode(pm: &str) -> DeviceMode {
     match pm {
         "plan" => DeviceMode::Plan,
         "acceptEdits" => DeviceMode::Accept,
+        "auto" => DeviceMode::Auto,
         _ => DeviceMode::Default,
     }
 }
@@ -1205,7 +1210,24 @@ pub async fn route_hid_type_string(state: &Arc<DaemonState>, text: &str, send_en
 
 #[cfg(test)]
 mod tests {
-    use super::session_label;
+    use super::{map_permission_mode, session_label};
+    use coredeck_protocol::DeviceMode;
+
+    #[test]
+    fn permission_mode_maps_all_claude_modes() {
+        assert_eq!(map_permission_mode("default"), DeviceMode::Default);
+        assert_eq!(map_permission_mode("acceptEdits"), DeviceMode::Accept);
+        assert_eq!(map_permission_mode("plan"), DeviceMode::Plan);
+        // The newer "auto" mode must land on its own slot, not collapse
+        // to Default.
+        assert_eq!(map_permission_mode("auto"), DeviceMode::Auto);
+        // bypassPermissions + anything unknown fall back to Default.
+        assert_eq!(
+            map_permission_mode("bypassPermissions"),
+            DeviceMode::Default
+        );
+        assert_eq!(map_permission_mode("something-new"), DeviceMode::Default);
+    }
 
     #[test]
     fn label_priority() {

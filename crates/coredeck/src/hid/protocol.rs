@@ -486,6 +486,15 @@ mod tests {
         assert_eq!(state.mode, DeviceMode::Plan);
         assert!(!state.yolo);
 
+        let state = DeviceState::from_byte(0x03);
+        assert_eq!(state.mode, DeviceMode::Auto);
+        assert!(!state.yolo);
+
+        // Auto (0x03) + yolo bit (0x04) = 0x07 — must decode both.
+        let state = DeviceState::from_byte(0x07);
+        assert_eq!(state.mode, DeviceMode::Auto);
+        assert!(state.yolo);
+
         let state = DeviceState::from_byte(0x06);
         assert_eq!(state.mode, DeviceMode::Plan);
         assert!(state.yolo);
