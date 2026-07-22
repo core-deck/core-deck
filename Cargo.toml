@@ -14,7 +14,7 @@ default-members = ["crates/coredeck"]
 # and the cask — see macos/BUILD.md). Each crate opts in with
 # `version.workspace = true` etc.
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.86"
 license = "GPL-3.0-or-later"

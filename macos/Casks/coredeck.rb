@@ -1,5 +1,5 @@
 cask "coredeck" do
-  version "0.1.0"
+  version "0.2.0"
   sha256 :no_check # replace with the released DMG sha256 once 0.1.0 ships
 
   url "https://github.com/core-deck/core-deck/releases/download/v#{version}/CoreDeck-#{version}.dmg"
