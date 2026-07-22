@@ -305,7 +305,11 @@ The daemon hosts every user-facing surface:
   release page in the user's default browser. No autoupdate, no
   signature verification — Homebrew handles macOS upgrades, the
   user reflashes the device by hand. Firmware row only appears
-  once the device has reported a parseable version. No opt-out
+  once the device has reported a parseable version. The fetched
+  release tags are cached on `DaemonState` and the rows are
+  re-evaluated (no network) on every HID connect/disconnect, so a
+  reflash clears a stale "firmware update available" row the moment
+  the device reconnects instead of at the next 24h tick. No opt-out
   toggle yet (add when someone asks).
 
 ---

@@ -100,6 +100,11 @@ pub struct DaemonState {
     /// sensible value for sessions the daemon hasn't yet seen any
     /// hooks for after a restart.
     pub wrapper_state: wrapper_state::WrapperStateStore,
+    /// Latest GitHub releases seen by the update checker. Kept so the
+    /// HID connect path can re-evaluate the "Update available" tray
+    /// rows against the firmware version the device just reported,
+    /// without waiting for the next 24h poll (or re-hitting GitHub).
+    pub update_cache: Mutex<updates::UpdateCache>,
 }
 
 impl DaemonState {
@@ -262,6 +267,7 @@ fn main() {
         yolo_opt_out: Mutex::new(std::collections::HashSet::new()),
         listen_addr: cli.listen.clone(),
         wrapper_state: wrapper_state::WrapperStateStore::load(),
+        update_cache: Mutex::new(updates::UpdateCache::default()),
     });
 
     // Emit initial DeviceAvailable event if device was found during enumeration.
@@ -614,16 +620,25 @@ async fn run_async(
                     device_name,
                     firmware_version,
                 } => {
-                    let mut status = state_for_events.device_status.write().await;
-                    status.available = true;
-                    status.connected = true;
-                    status.device_name = Some(device_name.clone());
-                    status.firmware_version = Some(firmware_version.clone());
+                    {
+                        let mut status = state_for_events.device_status.write().await;
+                        status.available = true;
+                        status.connected = true;
+                        status.device_name = Some(device_name.clone());
+                        status.firmware_version = Some(firmware_version.clone());
+                    }
 
                     state_for_events.send_tray_update(TrayUpdate::DeviceConnected {
                         name: device_name.clone(),
                         firmware: firmware_version.clone(),
                     });
+
+                    // Re-evaluate the "Update available" tray rows against
+                    // the version the device just reported — clears a
+                    // stale firmware row right after a reflash instead of
+                    // leaving it until the next 24h poll. (Must run after
+                    // the status write guard above is dropped.)
+                    updates::reevaluate(&state_for_events).await;
                 }
                 DaemonEvent::HidDisconnected => {
                     {
@@ -644,6 +659,12 @@ async fn run_async(
                     wrapper::clear_yolo_enrollment(&state_for_events).await;
 
                     state_for_events.send_tray_update(TrayUpdate::DeviceDisconnected);
+
+                    // firmware_version is now None → the firmware update
+                    // row clears too ("row only appears once the device
+                    // has reported a parseable version"). It comes back
+                    // on reconnect if the device is still outdated.
+                    updates::reevaluate(&state_for_events).await;
                 }
                 DaemonEvent::DeviceAvailable { device_name } => {
                     {
