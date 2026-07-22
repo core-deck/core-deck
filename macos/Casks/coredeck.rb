@@ -1,6 +1,6 @@
 cask "coredeck" do
   version "0.2.0"
-  sha256 :no_check # replace with the released DMG sha256 once 0.1.0 ships
+  sha256 "510f494587930a2650c39171adea715499258d57e0f07d13cdab14635bf91710"
 
   url "https://github.com/core-deck/core-deck/releases/download/v#{version}/CoreDeck-#{version}.dmg"
   name "Core Deck"
@@ -16,10 +16,9 @@ cask "coredeck" do
   # Prebuilt DMG is Apple Silicon only (Intel was dropped from CI).
   # Intel users build from source — see docs/Building.md.
   depends_on arch: :arm64
-  depends_on macos: ">= :big_sur"
+  depends_on macos: :big_sur
 
   app "Core Deck.app"
-
   # Expose both binaries on PATH. The wrapper is what users alias `claude`
   # to; the daemon binary is also exposed so `coredeck setup`,
   # `coredeck hooks install`, etc. work from any shell.
@@ -40,11 +39,11 @@ cask "coredeck" do
   # scripts). Run `coredeck hooks uninstall` before `brew uninstall` for
   # a fully clean removal.
   zap trash: [
-    "~/Library/LaunchAgents/com.coredeck.daemon.plist",
-    "~/Library/Logs/coredeck.log",
-    "~/Library/Application Support/com.coredeck.CoreDeck",
     "~/.claude/coredeck-hook.sh",
     "~/.claude/coredeck-register.sh",
+    "~/Library/Application Support/com.coredeck.CoreDeck",
+    "~/Library/LaunchAgents/com.coredeck.daemon.plist",
+    "~/Library/Logs/coredeck.log",
   ]
 
   caveats <<~EOS
