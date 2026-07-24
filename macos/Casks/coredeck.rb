@@ -1,6 +1,6 @@
 cask "coredeck" do
   version "0.2.1"
-  sha256 "6396ba3881928f157ae013f719b81d5958b6954d6a85074374b1811e8fd6cf83"
+  sha256 "2fdcdc61261b797bfd3da97b5bd0f2e3cbca064b3b142f5aafe789a75e501427"
 
   url "https://github.com/core-deck/core-deck/releases/download/v#{version}/CoreDeck-#{version}.dmg"
   name "Core Deck"
