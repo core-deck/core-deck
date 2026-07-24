@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "coredeck"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "coredeck-claude"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "coredeck-protocol",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "coredeck-protocol"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
