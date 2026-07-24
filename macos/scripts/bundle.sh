@@ -62,12 +62,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Determine output directory
+# Determine output directory. BUILD_FLAGS is an array so the debug case
+# is a zero-element expansion (`"${BUILD_FLAGS[@]}"` → no argument) rather
+# than an empty-string arg — and it keeps shellcheck happy across versions
+# (an unquoted `$BUILD_FLAGS` trips SC2086 on older shellcheck).
 if [ "$BUILD_TYPE" = "release" ]; then
-    BUILD_FLAGS="--release"
+    BUILD_FLAGS=(--release)
     TARGET_DIR="$PROJECT_ROOT/target/release"
 else
-    BUILD_FLAGS=""
+    BUILD_FLAGS=()
     TARGET_DIR="$PROJECT_ROOT/target/debug"
 fi
 
@@ -118,8 +121,8 @@ elif [ "$LIPO_ONLY" = true ]; then
 elif [ "$UNIVERSAL" = true ]; then
     echo "Building universal binaries..."
 
-    cargo build $BUILD_FLAGS --workspace --target aarch64-apple-darwin
-    cargo build $BUILD_FLAGS --workspace --target x86_64-apple-darwin
+    cargo build "${BUILD_FLAGS[@]}" --workspace --target aarch64-apple-darwin
+    cargo build "${BUILD_FLAGS[@]}" --workspace --target x86_64-apple-darwin
 
     lipo_binary "$EXECUTABLE_NAME"
     lipo_binary "$WRAPPER_NAME"
@@ -127,11 +130,11 @@ elif [ "$UNIVERSAL" = true ]; then
     echo "Universal binaries created"
 elif [ -n "$ARCH" ]; then
     echo "Building for architecture: $ARCH"
-    cargo build $BUILD_FLAGS --workspace --target "${ARCH}-apple-darwin"
+    cargo build "${BUILD_FLAGS[@]}" --workspace --target "${ARCH}-apple-darwin"
     TARGET_DIR="$PROJECT_ROOT/target/${ARCH}-apple-darwin/$BUILD_TYPE"
 else
     echo "Building for native architecture..."
-    cargo build $BUILD_FLAGS --workspace
+    cargo build "${BUILD_FLAGS[@]}" --workspace
 fi
 
 # Verify both binaries exist
