@@ -208,6 +208,10 @@ fn main() {
     #[cfg(target_os = "macos")]
     extend_path_for_helpers();
 
+    // Claim the port before touching the tray or the device — see
+    // claim_listen_addr.
+    let std_listener = claim_listen_addr(&cli.listen);
+
     // macOS: set activation policy to Accessory (no dock icon, just tray)
     #[cfg(target_os = "macos")]
     setup_macos_accessory();
@@ -305,7 +309,7 @@ fn main() {
             .expect("Failed to create tokio runtime");
 
         rt.block_on(async move {
-            run_async(state_clone, event_rx, listen_addr).await;
+            run_async(state_clone, event_rx, listen_addr, std_listener).await;
         });
 
         // run_async returns when Ctrl-C is received. The main thread is blocked
@@ -498,6 +502,7 @@ async fn run_async(
     state: Arc<DaemonState>,
     mut event_rx: mpsc::UnboundedReceiver<DaemonEvent>,
     listen_addr: String,
+    std_listener: std::net::TcpListener,
 ) {
     // Build axum router
     let app = axum::Router::new()
@@ -579,14 +584,17 @@ async fn run_async(
         ))
         .with_state(Arc::clone(&state));
 
-    // Start HTTP/WS server
-    let listener = match tokio::net::TcpListener::bind(&listen_addr).await {
+    // Start HTTP/WS server on the socket claimed at startup.
+    let listener = match std_listener
+        .set_nonblocking(true)
+        .and_then(|()| tokio::net::TcpListener::from_std(std_listener))
+    {
         Ok(l) => {
             info!("Listening on {}", listen_addr);
             l
         }
         Err(e) => {
-            error!("Failed to bind to {}: {}", listen_addr, e);
+            error!("Failed to listen on {}: {}", listen_addr, e);
             std::process::exit(1);
         }
     };
@@ -1245,6 +1253,49 @@ fn run_remote_setup(host: &str, listen: &str) {
     println!("From the remote shell, run `claude` (or `tmux new -s w` then claude");
     println!("to survive transient disconnects). Hooks will fire back through the");
     println!("reverse tunnel to the daemon on this Mac.");
+}
+
+/// Bind the listen address before the tray or the HID device is touched.
+///
+/// A second daemon — e.g. Core Deck.app opened while the launchd agent is
+/// running — used to open the device and resync (clear) its alerts, then
+/// fail to bind and exit(1), which launchd's crash-only KeepAlive restarted
+/// every 10 s. When a CoreDeck daemon already owns the address, exit 0:
+/// the running one is doing the job, and launchd leaves a clean exit alone.
+fn claim_listen_addr(addr: &str) -> std::net::TcpListener {
+    match std::net::TcpListener::bind(addr) {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse && coredeck_daemon_answers(addr) => {
+            info!("Another CoreDeck daemon is already running on {addr}; exiting");
+            std::process::exit(0);
+        }
+        Err(e) => {
+            error!("Failed to bind to {}: {}", addr, e);
+            std::process::exit(1);
+        }
+    }
+}
+
+/// True if a CoreDeck daemon answers `GET /api/status` on `addr`.
+fn coredeck_daemon_answers(addr: &str) -> bool {
+    use std::io::{Read, Write};
+    use std::net::ToSocketAddrs;
+    let timeout = std::time::Duration::from_secs(1);
+    let Some(sock) = addr.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
+        return false;
+    };
+    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&sock, timeout) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(timeout));
+    let request = format!("GET /api/status HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    if stream.write_all(request.as_bytes()).is_err() {
+        return false;
+    }
+    let mut response = String::new();
+    let _ = stream.take(64 * 1024).read_to_string(&mut response);
+    response.contains("\"daemon_version\"")
 }
 
 /// launchd and Finder start the daemon with a minimal PATH
