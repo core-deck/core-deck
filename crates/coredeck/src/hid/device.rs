@@ -1086,16 +1086,40 @@ fn check_device_presence(api: &HidApi, config: &HidConfig) -> (bool, Option<Stri
     }
 }
 
+/// Probe rounds before giving up on the device answering GetVersion. The
+/// firmware only services raw HID once its init has finished (display
+/// bring-up alone takes a few hundred ms), so a device that has just
+/// enumerated — e.g. straight after flashing — can miss the first round.
+/// Each round is bounded by its two read timeouts (~0.5 s).
+const DETECT_ROUNDS: u32 = 4;
+
 /// Detect protocol mode and firmware version from an already-opened device.
 ///
 /// Tries VIAL-prefixed GetVersion first. If the response starts with `0x80` and
 /// parses as a valid version, the device uses VIAL mode. Otherwise falls back to
-/// standalone GetVersion.
+/// standalone GetVersion. Rounds where neither answers are retried; settling
+/// on standalone for a VIAL device would make it ignore everything we send.
 fn detect_protocol_mode(
     device: &HidDevice,
     event_tx: &DaemonEventSender,
     type_string_buf: &Mutex<Vec<u8>>,
 ) -> (ProtocolMode, String) {
+    for round in 1..=DETECT_ROUNDS {
+        if let Some(detected) = probe_protocol_mode(device, event_tx, type_string_buf) {
+            return detected;
+        }
+        debug!(round, "GetVersion probe got no answer");
+    }
+    warn!("Device never answered GetVersion; assuming standalone protocol");
+    (ProtocolMode::Standalone, "unknown".to_string())
+}
+
+/// One VIAL-then-standalone GetVersion round. `None` when neither answered.
+fn probe_protocol_mode(
+    device: &HidDevice,
+    event_tx: &DaemonEventSender,
+    type_string_buf: &Mutex<Vec<u8>>,
+) -> Option<(ProtocolMode, String)> {
     // --- Phase 1: try VIAL mode ---
     let vial_packets = commands::build_get_version(ProtocolMode::Vial);
     if send_packets_to_device(device, &vial_packets, ProtocolMode::Vial).is_ok() {
@@ -1110,7 +1134,7 @@ fn detect_protocol_mode(
                 let version = String::from_utf8_lossy(&response.data).trim().to_string();
                 if !version.is_empty() {
                     info!("Detected VIAL protocol mode, firmware {}", version);
-                    return (ProtocolMode::Vial, version);
+                    return Some((ProtocolMode::Vial, version));
                 }
             }
             Ok(_) => {}
@@ -1132,7 +1156,7 @@ fn detect_protocol_mode(
     let standalone_packets = commands::build_get_version(ProtocolMode::Standalone);
     if let Err(e) = send_packets_to_device(device, &standalone_packets, ProtocolMode::Standalone) {
         debug!("Failed to send standalone GetVersion: {}", e);
-        return (ProtocolMode::Standalone, "unknown".to_string());
+        return None;
     }
 
     match read_response(
@@ -1150,15 +1174,15 @@ fn detect_protocol_mode(
                 version
             };
             info!("Detected standalone protocol mode, firmware {}", version);
-            (ProtocolMode::Standalone, version)
+            Some((ProtocolMode::Standalone, version))
         }
         Ok(response) => {
             debug!("GetVersion returned status 0x{:02X}", response.status);
-            (ProtocolMode::Standalone, "unknown".to_string())
+            Some((ProtocolMode::Standalone, "unknown".to_string()))
         }
         Err(e) => {
             debug!("GetVersion not supported or failed: {}", e);
-            (ProtocolMode::Standalone, "unknown".to_string())
+            None
         }
     }
 }
