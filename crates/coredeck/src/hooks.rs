@@ -1055,8 +1055,15 @@ async fn handle_pre_tool_use(state: &DaemonState, event: &HookEvent) -> axum::re
                 let session_label = compute_session_label(state, sid).await;
                 // Hold the Claude button to see the answer options.
                 let options = extract_first_question_options(event.tool_input.as_ref());
-                alerts::show_idle_alert(state, sid, &session_label, &question, options.as_deref())
-                    .await;
+                alerts::show_idle_alert(
+                    state,
+                    sid,
+                    &session_label,
+                    &question,
+                    options.as_deref(),
+                    alerts::IdleNotice::Question,
+                )
+                .await;
             }
         }
     }
@@ -1444,7 +1451,15 @@ async fn handle_notification(state: &DaemonState, event: &HookEvent) {
             // Waiting for input means the turn is over, even if Stop never
             // fired (interrupted turn).
             handle_stop(state, event).await;
-            alerts::show_idle_alert(state, session_id, &session_label, text, None).await;
+            alerts::show_idle_alert(
+                state,
+                session_id,
+                &session_label,
+                text,
+                None,
+                alerts::IdleNotice::Waiting,
+            )
+            .await;
         }
         "permission_prompt" => {
             // Look up stored PermissionRequest details for this session.

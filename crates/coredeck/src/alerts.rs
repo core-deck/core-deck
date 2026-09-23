@@ -135,6 +135,20 @@ pub struct QueuedIdle {
     pub label: String,
     pub text: String,
     pub details: Option<String>,
+    pub notice: IdleNotice,
+}
+
+/// What an idle notice is about — decides whether terminal focus may
+/// suppress it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdleNotice {
+    /// "Claude is waiting for your input": skipped while the user is at
+    /// the session's terminal, where focus-in would clear it anyway.
+    Waiting,
+    /// A question (AskUserQuestion): always shown. The focus flag can be
+    /// stale — e.g. replying to the session from another device never
+    /// focuses its terminal — and answering clears it (PostToolUse).
+    Question,
 }
 
 /// Idle notices kept at most — one per session, and the device has 16 tabs.
@@ -225,8 +239,9 @@ pub async fn show_idle_alert(
     session_label: &str,
     text: &str,
     details: Option<&str>,
+    notice: IdleNotice,
 ) {
-    {
+    if notice == IdleNotice::Waiting {
         let wrappers = state.wrappers.read().await;
         let alerting_wrapper = wrappers
             .values()
@@ -279,7 +294,7 @@ pub async fn show_idle_alert(
         _ => {
             drop(guard);
             info!(session = %session_id, "Idle alert queued; another alert is live");
-            queue_idle(state, session_id, session_label, text, details).await;
+            queue_idle(state, session_id, session_label, text, details, notice).await;
             return;
         }
     }
@@ -596,12 +611,14 @@ async fn queue_idle(
     label: &str,
     text: &str,
     details: Option<&str>,
+    notice: IdleNotice,
 ) {
     let mut queue = state.idle_queue.lock().await;
     if let Some(q) = queue.iter_mut().find(|q| q.session_id == session_id) {
         q.label = label.to_string();
         q.text = text.to_string();
         q.details = details.map(str::to_string);
+        q.notice = notice;
         return;
     }
     if queue.len() >= IDLE_QUEUE_CAP {
@@ -612,6 +629,7 @@ async fn queue_idle(
         label: label.to_string(),
         text: text.to_string(),
         details: details.map(str::to_string),
+        notice,
     });
 }
 
@@ -649,6 +667,7 @@ async fn promote_queued_idle(state: &DaemonState) {
             &q.label,
             &q.text,
             q.details.as_deref(),
+            q.notice,
         )
         .await;
     }

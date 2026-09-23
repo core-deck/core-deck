@@ -41,6 +41,13 @@ The daemon hosts every user-facing surface:
 
 ## Done (recent highlights)
 
+- **0.4.1 polish.** The daemon claims its port before touching the tray
+  or the device and exits 0 when another CoreDeck daemon owns it (an
+  app-bundle launch next to the launchd agent looped every 10 s, each
+  instance resyncing — clearing — the device's alerts). An "Update
+  available" row now badges the tray icon and itself with an orange dot.
+  AskUserQuestion alerts ignore terminal focus (a stale focus flag, e.g.
+  replying from another device, hid them).
 - **Second full review (2026-09, after v0.3.0).** Five parallel passes
   over code changed since `COMPLETE_REVIEW.md`, each finding re-verified
   before fixing. Fixed: hook install treating any `/hooks/` path (the
