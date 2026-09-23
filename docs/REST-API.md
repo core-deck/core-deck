@@ -411,6 +411,44 @@ Remove the daemon's hook entries from `~/.claude/settings.json`. Symmetric with 
 
 ---
 
+### GET /api/setup
+
+Setup status for the settings page's Setup section.
+
+**Response: 200 OK**
+
+```json
+{
+  "hooks": true,
+  "cli": { "state": "missing", "path": null, "link_dir": "~/.local/bin" },
+  "alias": { "line": "alias claude=\"$HOME/.local/bin/coredeck-claude\"", "rc_file": "~/.zshrc", "found": false },
+  "autostart": { "installed": false, "path": "~/Library/LaunchAgents/com.coredeck.daemon.plist" },
+  "complete": false
+}
+```
+
+- `cli.state` — `"linked"` (symlinks made by `POST /api/setup/cli`), `"installed"` (provided by Homebrew or the Linux `install.sh`), or `"missing"`.
+- `alias` — the line to add to the shell rc and whether `rc_file` already mentions `coredeck-claude` (a heuristic; it doesn't count toward `complete`).
+- `complete` — hooks, command-line tools and start-at-login are all in place; the tray shows "⚠ Finish setup…" (opening `/settings#setup`) while it's false.
+
+---
+
+### POST /api/setup/cli · DELETE /api/setup/cli
+
+Link `coredeck` and `coredeck-claude` into `~/.local/bin` (pointing at the binaries next to the running daemon — inside `Core Deck.app` on macOS), or remove those links. Stale links are replaced; real files (e.g. from `install.sh`) are never overwritten or removed.
+
+**Response: 200 OK** `{"message": "…"}`, or **500** with an [ApiError](Types.md#apierror).
+
+---
+
+### POST /api/setup/autostart · DELETE /api/setup/autostart
+
+Install or remove the start-at-login agent (launchd plist on macOS, systemd user unit on Linux). Unlike `coredeck install` / `uninstall`, these never stop or restart the running daemon — it may be that very job — so disabling takes effect at the next login.
+
+**Response: 200 OK** `{"message": "…"}`, or **500** with an [ApiError](Types.md#apierror).
+
+---
+
 ### POST /wrapper/register
 
 Bind a Claude `session_id` to a connected wrapper. Posted by the

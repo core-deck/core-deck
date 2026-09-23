@@ -16,6 +16,7 @@ mod keymap;
 mod presets;
 mod raise;
 mod rpc;
+mod setup;
 mod spawn;
 mod state;
 mod tray;
@@ -296,7 +297,7 @@ fn main() {
     }
 
     // Seed the tray with the initial hooks-installed state.
-    state.send_tray_update(TrayUpdate::HooksInstalled(hooks::are_hooks_installed()));
+    state.send_tray_update(TrayUpdate::SetupComplete(setup::status().complete));
 
     // Run the tokio runtime + axum server on a spawned thread.
     // The winit event loop must run on the main thread (required for tray on macOS).
@@ -348,8 +349,8 @@ fn apply_tray_update(tray: &mut tray::DaemonTrayManager, update: TrayUpdate) {
         TrayUpdate::Tabs(list) => {
             tray.set_tabs(&list);
         }
-        TrayUpdate::HooksInstalled(installed) => {
-            tray.set_hooks_installed(installed);
+        TrayUpdate::SetupComplete(complete) => {
+            tray.set_setup_complete(complete);
         }
         TrayUpdate::UpdatesAvailable { daemon, firmware } => {
             tray.set_updates(daemon, firmware);
@@ -389,19 +390,10 @@ fn handle_tray_action(state: &Arc<DaemonState>, action: tray::DaemonTrayAction) 
             open_url_in_browser(&url);
             false
         }
-        tray::DaemonTrayAction::InstallHooks => {
-            let listen = state.listen_addr.clone();
-            let st = Arc::clone(state);
-            std::thread::spawn(move || {
-                // Not `install_claude_hooks`: that's the CLI entry point
-                // and exits the process on error — here it would take the
-                // whole daemon down over e.g. a read-only settings.json.
-                if let Err(e) = hooks::install_hooks_result(&listen) {
-                    warn!(error = %e, "tray: installing hooks failed");
-                }
-                let installed = hooks::are_hooks_installed();
-                st.send_tray_update(TrayUpdate::HooksInstalled(installed));
-            });
+        tray::DaemonTrayAction::FinishSetup => {
+            let url = format!("http://{}/settings#setup", state.listen_addr);
+            info!(url = %url, "opening settings page (setup)");
+            open_url_in_browser(&url);
             false
         }
         tray::DaemonTrayAction::OpenUrl(url) => {
@@ -517,6 +509,15 @@ async fn run_async(
         .route("/api/brightness", axum::routing::post(rpc::post_brightness))
         .route("/api/mode", axum::routing::post(rpc::post_mode))
         .route("/api/version", axum::routing::get(rpc::get_version))
+        .route("/api/setup", axum::routing::get(rpc::get_setup_status))
+        .route(
+            "/api/setup/cli",
+            axum::routing::post(rpc::post_setup_cli).delete(rpc::delete_setup_cli),
+        )
+        .route(
+            "/api/setup/autostart",
+            axum::routing::post(rpc::post_setup_autostart).delete(rpc::delete_setup_autostart),
+        )
         .route(
             "/api/hooks/status",
             axum::routing::get(rpc::get_hooks_status),
@@ -1085,155 +1086,13 @@ fn install_signal_handler() {
 
 // ── launchd / systemd install + uninstall ──────────────────────────
 
-/// Install the platform-native auto-start agent for the daemon.
-/// macOS uses launchd via a LaunchAgents plist; Linux uses a systemd
-/// user unit. Other platforms get a stderr warning. Idempotent —
-/// re-running re-writes the unit and reloads.
+/// Install the platform-native auto-start agent for the daemon (launchd
+/// plist on macOS, systemd user unit on Linux). Idempotent — re-running
+/// re-writes the agent and reloads it.
 fn install_launchd(listen: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        install_launchd_macos(listen);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        install_systemd_linux(listen);
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = listen;
-        eprintln!(
-            "auto-start is only supported on macOS (launchd) and Linux (systemd) at the moment"
-        );
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn install_launchd_macos(listen: &str) {
-    let home = std::env::var("HOME").expect("HOME not set");
-    let plist_dir = format!("{}/Library/LaunchAgents", home);
-    let plist_path = format!("{}/com.coredeck.daemon.plist", plist_dir);
-
-    let exe = std::env::current_exe()
-        .expect("Failed to get current exe path")
-        .to_string_lossy()
-        .to_string();
-
-    let plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.coredeck.daemon</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{exe}</string>
-        <string>--listen</string>
-        <string>{listen}</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
-    <key>StandardOutPath</key>
-    <string>{home}/Library/Logs/coredeck.log</string>
-    <key>StandardErrorPath</key>
-    <string>{home}/Library/Logs/coredeck.log</string>
-</dict>
-</plist>"#
-    );
-
-    std::fs::create_dir_all(&plist_dir).expect("Failed to create LaunchAgents dir");
-    std::fs::write(&plist_path, plist).expect("Failed to write plist");
-
-    // Idempotent reload: unload silently first (no-op if not loaded), then
-    // load the (possibly updated) plist. Using `bootout`+`bootstrap` would
-    // be cleaner on modern macOS but requires the per-uid domain spelled
-    // out, and `load`/`unload` still works.
-    let _ = std::process::Command::new("launchctl")
-        .args(["unload", &plist_path])
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    let status = std::process::Command::new("launchctl")
-        .args(["load", &plist_path])
-        .status()
-        .expect("Failed to run launchctl");
-
-    if status.success() {
-        println!("Installed and loaded: {}", plist_path);
-    } else {
-        eprintln!(
-            "launchctl load failed (exit {})",
-            status.code().unwrap_or(-1)
-        );
-    }
-}
-
-/// systemd user unit lives under `~/.config/systemd/user/coredeck.service`
-/// — no root needed. journald handles logs (so no redirect stanza is
-/// required). The unit `Restart=on-failure` mirrors launchd's
-/// `KeepAlive={SuccessfulExit: false}` — crash recovery only; a clean exit (tray "Quit Daemon",
-/// exit code 0) doesn't trip the restart so it won't loop.
-/// `WantedBy=default.target` ties
-/// activation to the user's graphical/login session so the daemon
-/// comes up when the user logs in (no need for a display manager
-/// integration).
-#[cfg(target_os = "linux")]
-fn install_systemd_linux(listen: &str) {
-    let home = std::env::var("HOME").expect("HOME not set");
-    let unit_dir = format!("{}/.config/systemd/user", home);
-    let unit_path = format!("{}/coredeck.service", unit_dir);
-
-    let exe = std::env::current_exe()
-        .expect("Failed to get current exe path")
-        .to_string_lossy()
-        .to_string();
-
-    let unit = format!(
-        r#"[Unit]
-Description=CoreDeck daemon
-After=graphical-session.target
-PartOf=graphical-session.target
-
-[Service]
-Type=simple
-ExecStart={exe} --listen {listen}
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=default.target
-"#
-    );
-
-    std::fs::create_dir_all(&unit_dir).expect("Failed to create systemd user dir");
-    std::fs::write(&unit_path, unit).expect("Failed to write systemd unit");
-
-    // daemon-reload picks up the new/changed unit; enable --now starts
-    // it immediately *and* enables auto-start at next login. If the
-    // unit was already running, restart it to pick up the new ExecStart.
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .status();
-    let status = std::process::Command::new("systemctl")
-        .args(["--user", "enable", "--now", "coredeck.service"])
-        .status();
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "restart", "coredeck.service"])
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match status {
-        Ok(s) if s.success() => println!("Installed and started: {}", unit_path),
-        Ok(s) => eprintln!(
-            "systemctl --user enable --now failed (exit {})",
-            s.code().unwrap_or(-1)
-        ),
-        Err(e) => eprintln!("systemctl invocation failed: {e}"),
+    match setup::install_autostart(listen, true) {
+        Ok(msg) => println!("{msg}"),
+        Err(e) => eprintln!("{e}"),
     }
 }
 
@@ -1331,59 +1190,30 @@ fn run_setup(listen: &str) {
     println!("\n2/2 Registering {auto_start_label}…");
     install_launchd(listen);
 
+    // Homebrew and install.sh put the tools on PATH; a DMG drag-install
+    // doesn't.
+    if setup::status().cli.state == "missing" {
+        println!("\nLinking command-line tools…");
+        match setup::install_cli() {
+            Ok(msg) => println!("{msg}"),
+            Err(e) => eprintln!("{e}"),
+        }
+    }
+
+    let alias = setup::status().alias;
     println!();
     println!("Done. To finish, alias `claude` to the wrapper in your shell rc:");
     println!();
-    println!("  # ~/.zshrc (or ~/.bashrc)");
-    println!("  alias claude=\"coredeck-claude\"");
+    println!("  # {}", alias.rc_file);
+    println!("  {}", alias.line);
     println!();
     println!("Then `claude` in any terminal will run under CoreDeck.");
 }
 
 fn uninstall_launchd() {
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").expect("HOME not set");
-        let plist_path = format!("{}/Library/LaunchAgents/com.coredeck.daemon.plist", home);
-
-        if std::path::Path::new(&plist_path).exists() {
-            let _ = std::process::Command::new("launchctl")
-                .args(["unload", &plist_path])
-                .status();
-            std::fs::remove_file(&plist_path).expect("Failed to remove plist");
-            println!("Uninstalled: {}", plist_path);
-        } else {
-            println!("Plist not found: {}", plist_path);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let home = std::env::var("HOME").expect("HOME not set");
-        let unit_path = format!("{}/.config/systemd/user/coredeck.service", home);
-
-        // disable --now stops + un-symlinks; no-op on a non-existent
-        // unit so we don't have to special-case the not-installed
-        // path.
-        let _ = std::process::Command::new("systemctl")
-            .args(["--user", "disable", "--now", "coredeck.service"])
-            .stderr(std::process::Stdio::null())
-            .status();
-
-        if std::path::Path::new(&unit_path).exists() {
-            std::fs::remove_file(&unit_path).expect("Failed to remove unit file");
-            let _ = std::process::Command::new("systemctl")
-                .args(["--user", "daemon-reload"])
-                .status();
-            println!("Uninstalled: {}", unit_path);
-        } else {
-            println!("Unit not found: {}", unit_path);
-        }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        eprintln!("auto-start uninstall is only supported on macOS and Linux at the moment");
+    match setup::uninstall_autostart(true) {
+        Ok(msg) => println!("{msg}"),
+        Err(e) => eprintln!("{e}"),
     }
 }
 

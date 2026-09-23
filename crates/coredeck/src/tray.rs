@@ -33,8 +33,9 @@ pub enum DaemonTrayAction {
     FocusWrapper(String),
     /// Open the settings page in the user's default browser.
     OpenSettings,
-    /// Install Claude Code hooks (only shown when not already installed).
-    InstallHooks,
+    /// Open the settings page at its Setup section (row shown only while
+    /// hooks, command-line tools or start-at-login are missing).
+    FinishSetup,
     /// Open a URL in the user's default browser. Used by the daemon /
     /// firmware "Update available" rows.
     OpenUrl(String),
@@ -65,10 +66,10 @@ pub struct DaemonTrayManager {
     tab_dispatch: Arc<Mutex<HashMap<MenuId, String>>>,
     /// "Install Claude Code hooks…" menu item, present only when hooks
     /// aren't installed in ~/.claude/settings.json.
-    install_hooks_item: Option<MenuItem>,
+    setup_item: Option<MenuItem>,
     /// MenuId of the install-hooks item when present, so the event
     /// thread can recognise its click.
-    install_hooks_id: Arc<Mutex<Option<MenuId>>>,
+    setup_item_id: Arc<Mutex<Option<MenuId>>>,
     /// "Update available: daemon vX.Y.Z" menu item — shown when the
     /// poll task in `updates.rs` finds a newer release tag than the
     /// running binary's `CARGO_PKG_VERSION`.
@@ -130,7 +131,7 @@ impl DaemonTrayManager {
         let (action_tx, action_rx) = std::sync::mpsc::channel();
         let tab_dispatch: Arc<Mutex<HashMap<MenuId, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
-        let install_hooks_id: Arc<Mutex<Option<MenuId>>> = Arc::new(Mutex::new(None));
+        let setup_item_id: Arc<Mutex<Option<MenuId>>> = Arc::new(Mutex::new(None));
         let update_dispatch: Arc<Mutex<HashMap<MenuId, String>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
@@ -138,14 +139,14 @@ impl DaemonTrayManager {
         let quit_id_clone = quit_id.clone();
         let settings_id_clone = settings_id.clone();
         let tab_dispatch_clone = Arc::clone(&tab_dispatch);
-        let install_hooks_id_clone = Arc::clone(&install_hooks_id);
+        let setup_item_id_clone = Arc::clone(&setup_item_id);
         let update_dispatch_clone = Arc::clone(&update_dispatch);
         std::thread::spawn(move || {
             let receiver = MenuEvent::receiver();
             loop {
                 if let Ok(event) = receiver.recv() {
                     debug!("Daemon menu event: {:?}", event);
-                    let install_hooks_match = install_hooks_id_clone
+                    let setup_item_match = setup_item_id_clone
                         .lock()
                         .ok()
                         .and_then(|g| g.clone())
@@ -159,8 +160,8 @@ impl DaemonTrayManager {
                         Some(DaemonTrayAction::Quit)
                     } else if event.id == settings_id_clone {
                         Some(DaemonTrayAction::OpenSettings)
-                    } else if install_hooks_match {
-                        Some(DaemonTrayAction::InstallHooks)
+                    } else if setup_item_match {
+                        Some(DaemonTrayAction::FinishSetup)
                     } else if let Some(url) = update_url {
                         Some(DaemonTrayAction::OpenUrl(url))
                     } else {
@@ -190,8 +191,8 @@ impl DaemonTrayManager {
             tab_items: Vec::new(),
             empty_placeholder: Some(empty),
             tab_dispatch,
-            install_hooks_item: None,
-            install_hooks_id,
+            setup_item: None,
+            setup_item_id,
             daemon_update_item: None,
             firmware_update_item: None,
             update_dispatch,
@@ -306,33 +307,33 @@ impl DaemonTrayManager {
         self.device_firmware_item.set_text(firmware_label);
     }
 
-    /// Show or hide the "Install Claude Code hooks…" menu row depending
-    /// on whether hooks are present in `~/.claude/settings.json`. Sits
+    /// Show or hide the "Finish setup…" menu row depending on whether
+    /// setup (hooks, command-line tools, start-at-login) is complete. Sits
     /// just above the Settings/Quit pair so the user discovers it the
     /// first time they open the menu after a fresh install.
-    pub fn set_hooks_installed(&mut self, installed: bool) {
-        if installed {
-            if let Some(item) = self.install_hooks_item.take() {
+    pub fn set_setup_complete(&mut self, complete: bool) {
+        if complete {
+            if let Some(item) = self.setup_item.take() {
                 let _ = self.menu.remove(&item as &dyn IsMenuItem);
-                if let Ok(mut g) = self.install_hooks_id.lock() {
+                if let Ok(mut g) = self.setup_item_id.lock() {
                     *g = None;
                 }
             }
             return;
         }
-        if self.install_hooks_item.is_some() {
+        if self.setup_item.is_some() {
             return;
         }
-        let item = MenuItem::new("⚠ Install Claude Code hooks…", true, None);
-        if let Ok(mut g) = self.install_hooks_id.lock() {
+        let item = MenuItem::new("⚠ Finish setup…", true, None);
+        if let Ok(mut g) = self.setup_item_id.lock() {
             *g = Some(item.id().clone());
         }
-        let position = self.install_hooks_insert_position();
+        let position = self.setup_item_insert_position();
         if let Err(e) = self.menu.insert(&item, position) {
-            error!("Failed to insert install-hooks item: {}", e);
+            error!("Failed to insert finish-setup item: {}", e);
             return;
         }
-        self.install_hooks_item = Some(item);
+        self.setup_item = Some(item);
     }
 
     /// Replace the "Update available" rows for the daemon and firmware.
@@ -408,7 +409,7 @@ impl DaemonTrayManager {
 
     /// Insertion point for the "Install hooks" row — sits below any
     /// active update rows.
-    fn install_hooks_insert_position(&self) -> usize {
+    fn setup_item_insert_position(&self) -> usize {
         self.extras_base_position()
             + (self.daemon_update_item.is_some() as usize)
             + (self.firmware_update_item.is_some() as usize)

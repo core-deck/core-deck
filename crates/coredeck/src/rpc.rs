@@ -277,6 +277,70 @@ pub async fn get_version(State(state): State<Arc<DaemonState>>) -> impl IntoResp
     Json(serde_json::json!({ "version": version })).into_response()
 }
 
+/// Re-evaluate setup and update the tray's "Finish setup…" row.
+async fn refresh_setup_row(state: &Arc<DaemonState>) {
+    let complete = tokio::task::spawn_blocking(|| crate::setup::status().complete)
+        .await
+        .unwrap_or(false);
+    state.send_tray_update(crate::state::TrayUpdate::SetupComplete(complete));
+}
+
+/// Run one setup step off the async runtime (file writes, `launchctl`),
+/// refresh the tray row, and answer `{ "message" }` or an error.
+async fn run_setup_step<F>(state: &Arc<DaemonState>, step: F) -> axum::response::Response
+where
+    F: FnOnce() -> Result<String, String> + Send + 'static,
+{
+    let result = tokio::task::spawn_blocking(step)
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+    refresh_setup_row(state).await;
+    match result {
+        Ok(message) => Json(serde_json::json!({ "message": message })).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiError { error })).into_response(),
+    }
+}
+
+/// GET /api/setup — hooks, command-line tools, shell alias and
+/// start-at-login status for the settings page's Setup section.
+pub async fn get_setup_status() -> impl IntoResponse {
+    match tokio::task::spawn_blocking(crate::setup::status).await {
+        Ok(status) => Json(status).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: e.to_string(),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/setup/cli — link `coredeck` / `coredeck-claude` into ~/.local/bin
+pub async fn post_setup_cli(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    run_setup_step(&state, crate::setup::install_cli).await
+}
+
+/// DELETE /api/setup/cli — remove those links
+pub async fn delete_setup_cli(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    run_setup_step(&state, crate::setup::uninstall_cli).await
+}
+
+/// POST /api/setup/autostart — install the start-at-login agent (without
+/// restarting the running daemon)
+pub async fn post_setup_autostart(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    let listen = state.listen_addr.clone();
+    run_setup_step(&state, move || {
+        crate::setup::install_autostart(&listen, false)
+    })
+    .await
+}
+
+/// DELETE /api/setup/autostart — remove it (takes effect at next login)
+pub async fn delete_setup_autostart(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
+    run_setup_step(&state, || crate::setup::uninstall_autostart(false)).await
+}
+
 /// GET /api/hooks/status — check if CoreDeck hooks are installed
 pub async fn get_hooks_status() -> impl IntoResponse {
     Json(serde_json::json!({ "installed": hooks::are_hooks_installed() }))
@@ -287,9 +351,7 @@ pub async fn post_hooks_install(State(state): State<Arc<DaemonState>>) -> impl I
     // Use the daemon's listen address from state
     let listen_addr = &state.listen_addr;
     let result = hooks::install_hooks_result(listen_addr);
-    state.send_tray_update(crate::state::TrayUpdate::HooksInstalled(
-        hooks::are_hooks_installed(),
-    ));
+    refresh_setup_row(&state).await;
     match result {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (
@@ -303,9 +365,7 @@ pub async fn post_hooks_install(State(state): State<Arc<DaemonState>>) -> impl I
 /// POST /api/hooks/uninstall — remove CoreDeck hooks from ~/.claude/settings.json
 pub async fn post_hooks_uninstall(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     let result = hooks::uninstall_hooks_result();
-    state.send_tray_update(crate::state::TrayUpdate::HooksInstalled(
-        hooks::are_hooks_installed(),
-    ));
+    refresh_setup_row(&state).await;
     match result {
         Ok(()) => StatusCode::OK.into_response(),
         Err(e) => (

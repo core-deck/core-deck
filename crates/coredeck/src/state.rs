@@ -274,9 +274,9 @@ pub enum TrayUpdate {
     DeviceUnavailable,
     /// Wrapper tab list snapshot for the tray menu to render.
     Tabs(WrapperTabList),
-    /// Whether Claude Code hooks are installed in ~/.claude/settings.json.
-    /// Drives the "Install Claude Code hooks…" tray menu item.
-    HooksInstalled(bool),
+    /// Whether setup is complete (hooks, command-line tools, start-at-
+    /// login — see `setup::status`). Drives the "Finish setup…" tray row.
+    SetupComplete(bool),
     /// Latest known update status (daemon + firmware). The poll task
     /// in `updates.rs` emits this once on startup and whenever the
     /// 24h tick refreshes the cache.

@@ -55,6 +55,15 @@ agent. After that, alias `claude` to the wrapper in your shell rc:
 alias claude="coredeck-claude"
 ```
 
+**Without Homebrew.** Download `CoreDeck-<version>.dmg` from the
+[releases page](https://github.com/core-deck/core-deck/releases), drag
+`Core Deck.app` into `/Applications`, and open it. The tray shows
+**⚠ Finish setup…**: it opens the settings page's Setup section, where
+one click each installs the Claude Code hooks, links `coredeck` and
+`coredeck-claude` into `~/.local/bin`, and enables start at login. Copy
+the alias line it shows into your shell rc. (The alias matters: the
+deck's keys reach only sessions running under `coredeck-claude`.)
+
 ### Linux
 
 Two paths: the prebuilt tarball (recommended) or build from source.

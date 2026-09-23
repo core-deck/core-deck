@@ -2308,7 +2308,7 @@ pub fn are_hooks_installed() -> bool {
 /// abort: falls back to the platform home via `directories`, then to
 /// `.` as a last resort (where a settings read simply misses and hooks
 /// read as "not installed").
-fn home_dir() -> std::path::PathBuf {
+pub(crate) fn home_dir() -> std::path::PathBuf {
     std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| directories::BaseDirs::new().map(|b| b.home_dir().to_path_buf()))

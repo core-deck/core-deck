@@ -149,6 +149,7 @@
   .toast.ok { border-color: var(--green); }
   .toast.err { border-color: var(--red); }
   .data-input { flex: 1; min-width: 0; }
+  .setup-state { flex: 1; min-width: 0; overflow-wrap: anywhere; }
   .checkbox-row { display: flex; align-items: center; gap: 6px; }
 
   /* Display theme section. Flex (not grid) so the preview column
@@ -307,21 +308,43 @@
     </div>
   </section>
 
-  <section>
-    <h2>Hooks</h2>
+  <section id="setup">
+    <h2>Setup</h2>
     <div class="row">
-      <label>Status</label>
-      <span class="value" id="hooks-status"><span class="pill warn">checking…</span></span>
-    </div>
-    <div class="row">
-      <label>Actions</label>
+      <label>Claude Code hooks</label>
+      <span class="value setup-state" id="hooks-status"><span class="pill warn">checking…</span></span>
       <button id="hooks-install" class="primary">Install</button>
       <button id="hooks-uninstall" class="danger">Uninstall</button>
     </div>
     <div class="row">
+      <label>Command-line tools</label>
+      <span class="value setup-state" id="cli-status"></span>
+      <button id="cli-install" class="primary">Install</button>
+      <button id="cli-uninstall" class="danger">Uninstall</button>
+    </div>
+    <div class="row">
+      <label>Shell alias</label>
+      <code class="value setup-state" id="alias-line"></code>
+      <button id="alias-copy">Copy</button>
+    </div>
+    <div class="row" style="padding-top:0">
+      <label></label>
+      <span class="value" id="alias-status" style="color:var(--muted);font-size:12px"></span>
+    </div>
+    <div class="row">
+      <label>Start at login</label>
+      <span class="value setup-state" id="autostart-status"></span>
+      <button id="autostart-install" class="primary">Enable</button>
+      <button id="autostart-uninstall" class="danger">Disable</button>
+    </div>
+    <div class="row">
       <span style="color:var(--muted);font-size:12px">
-        Writes <code>~/.claude/settings.json</code> with the hook entries the daemon needs
-        for ARM auto-approve, session tracking, and display updates.
+        <b>Hooks</b> add CoreDeck's entries to <code>~/.claude/settings.json</code> (session
+        tracking, device display, alerts). <b>Command-line tools</b> put <code>coredeck</code> and
+        <code>coredeck-claude</code> in <code>~/.local/bin</code> — Homebrew installs already have them.
+        The <b>alias</b> runs <code>claude</code> under CoreDeck, which the deck's keys need to reach
+        your sessions. <b>Start at login</b> keeps the daemon running and restarts it after a crash;
+        disabling takes effect at the next login.
       </span>
     </div>
   </section>
@@ -506,34 +529,70 @@ document.querySelectorAll('.mode-group button').forEach(b => {
   });
 });
 
-// ── Hooks ──────────────────────────────────────────────────────────
-async function refreshHooks() {
+// ── Setup ──────────────────────────────────────────────────────────
+function setupPill(kind, text) {
+  return `<span class="pill ${kind}">${escapeHtml(text)}</span>`;
+}
+async function refreshSetup() {
   try {
-    const h = await api('GET', '/api/hooks/status');
-    $('#hooks-status').innerHTML = h.installed
-      ? '<span class="pill ok">installed</span>'
-      : '<span class="pill warn">not installed</span>';
+    const s = await api('GET', '/api/setup');
+    $('#hooks-status').innerHTML = s.hooks
+      ? setupPill('ok', 'installed')
+      : setupPill('warn', 'not installed');
+    $('#hooks-uninstall').disabled = !s.hooks;
+
+    const cli = s.cli;
+    $('#cli-status').innerHTML =
+      cli.state === 'linked' ? setupPill('ok', `linked in ${cli.link_dir}`)
+      : cli.state === 'installed' ? setupPill('ok', `installed · ${cli.path}`)
+      : setupPill('warn', 'not installed');
+    $('#cli-install').disabled = cli.state !== 'missing';
+    $('#cli-uninstall').disabled = cli.state !== 'linked';
+
+    $('#alias-line').textContent = s.alias.line;
+    $('#alias-status').textContent = s.alias.found
+      ? `found in ${s.alias.rc_file}`
+      : `add this line to ${s.alias.rc_file}, then open a new terminal`;
+
+    $('#autostart-status').innerHTML = s.autostart.installed
+      ? setupPill('ok', 'enabled')
+      : setupPill('warn', 'off');
+    $('#autostart-install').disabled = s.autostart.installed;
+    $('#autostart-uninstall').disabled = !s.autostart.installed;
   } catch (e) {
-    $('#hooks-status').innerHTML = `<span class="pill bad">${escapeHtml(e.message)}</span>`;
+    $('#hooks-status').innerHTML = setupPill('bad', e.message);
   }
 }
-$('#hooks-install').addEventListener('click', async () => {
+async function setupAction(method, path, done, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
   try {
-    await api('POST', '/api/hooks/install');
-    toast('hooks installed');
-    refreshHooks();
+    const r = await api(method, path);
+    toast((r && r.message) || done);
   } catch (e) {
     toast(e.message, 'err');
   }
-});
-$('#hooks-uninstall').addEventListener('click', async () => {
-  if (!confirm('Remove CoreDeck entries from ~/.claude/settings.json?')) return;
+  refreshSetup();
+}
+$('#hooks-install').addEventListener('click', () =>
+  setupAction('POST', '/api/hooks/install', 'hooks installed'));
+$('#hooks-uninstall').addEventListener('click', () =>
+  setupAction('POST', '/api/hooks/uninstall', 'hooks removed',
+    'Remove CoreDeck entries from ~/.claude/settings.json?'));
+$('#cli-install').addEventListener('click', () =>
+  setupAction('POST', '/api/setup/cli', 'command-line tools linked'));
+$('#cli-uninstall').addEventListener('click', () =>
+  setupAction('DELETE', '/api/setup/cli', 'links removed'));
+$('#autostart-install').addEventListener('click', () =>
+  setupAction('POST', '/api/setup/autostart', 'start at login enabled'));
+$('#autostart-uninstall').addEventListener('click', () =>
+  setupAction('DELETE', '/api/setup/autostart', 'start at login disabled',
+    'Stop starting CoreDeck at login? (The running daemon keeps running.)'));
+$('#alias-copy').addEventListener('click', async () => {
   try {
-    await api('POST', '/api/hooks/uninstall');
-    toast('hooks removed');
-    refreshHooks();
+    await navigator.clipboard.writeText($('#alias-line').textContent);
+    toast('alias copied');
   } catch (e) {
-    toast(e.message, 'err');
+    toast(`copy failed: ${e.message}`, 'err');
   }
 });
 
@@ -1482,7 +1541,7 @@ document.addEventListener('keydown', e => {
 async function loadAll() {
   await Promise.all([
     refreshStatus(),
-    refreshHooks(),
+    refreshSetup(),
     refreshSoftkeys(),
     refreshWrappers(),
     refreshTheme(),

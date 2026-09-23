@@ -41,6 +41,14 @@ The daemon hosts every user-facing surface:
 
 ## Done (recent highlights)
 
+- **Setup from the settings page (0.4.2).** The Hooks section became
+  Setup: hooks, command-line tools (links into `~/.local/bin` when
+  Homebrew/install.sh didn't provide them), the shell alias line with a
+  Copy button, and start at login — each with status and one-click
+  install/remove (`/api/setup*`). The tray's "Finish setup…" row opens it
+  while anything is missing, so a DMG drag-install gets fully set up
+  without a terminal. The launchd plist is XML-escaped and the systemd
+  `ExecStart` path quoted now.
 - **0.4.1 polish.** The daemon claims its port before touching the tray
   or the device and exits 0 when another CoreDeck daemon owns it (an
   app-bundle launch next to the launchd agent looped every 10 s, each
@@ -383,8 +391,7 @@ The daemon hosts every user-facing surface:
     rebinds the wrapper.
   - *Smaller:* presets file not written atomically (corrupt → presets
     lost); single-client WS lock race; Origin check vs non-loopback
-    `--listen`; iro.js loaded without SRI; systemd `ExecStart` / plist
-    paths not quoted/escaped; keycode labels that don't round-trip
+    `--listen`; iro.js loaded without SRI; keycode labels that don't round-trip
     (`-`, `,`, right-hand mods); `--ssh` with `--` or a non-POSIX remote
     shell; macOS hotplug init failure unnoticed; keymap drops Alt/Ctrl
     on Enter/Esc/Tab and misreads keycodes ≥ 0x2000; kitty/tmux raise
