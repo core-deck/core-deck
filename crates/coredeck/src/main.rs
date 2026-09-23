@@ -79,6 +79,10 @@ pub struct DaemonState {
     /// already showing. Popped when the active alert resolves so the
     /// user doesn't miss prompts from parallel Claude sessions.
     pub pending_queue: Mutex<std::collections::VecDeque<alerts::QueuedPending>>,
+    /// Idle notices (waiting for input, AskUserQuestion) that arrived while
+    /// another alert was showing — one per session, newest text. Shown when
+    /// the slot frees, after queued permission prompts.
+    pub idle_queue: Mutex<std::collections::VecDeque<alerts::QueuedIdle>>,
     /// Wrapper IDs that have explicitly opted in to Auto-approve
     /// under the current global Auto-approve session. Populated on
     /// Auto-approve ON (active wrapper auto-opts in) and on Allow of
@@ -200,6 +204,10 @@ fn main() {
     // which intercept SIGINT before tokio can see it.
     install_signal_handler();
 
+    // Before any thread or child process starts: see extend_path_for_helpers.
+    #[cfg(target_os = "macos")]
+    extend_path_for_helpers();
+
     // macOS: set activation policy to Accessory (no dock icon, just tray)
     #[cfg(target_os = "macos")]
     setup_macos_accessory();
@@ -263,6 +271,7 @@ fn main() {
         wrappers: RwLock::new(HashMap::new()),
         alert_state: Mutex::new(alerts::AlertState::default()),
         pending_queue: Mutex::new(std::collections::VecDeque::new()),
+        idle_queue: Mutex::new(std::collections::VecDeque::new()),
         yolo_opt_in: Mutex::new(std::collections::HashSet::new()),
         yolo_opt_out: Mutex::new(std::collections::HashSet::new()),
         listen_addr: cli.listen.clone(),
@@ -380,7 +389,12 @@ fn handle_tray_action(state: &Arc<DaemonState>, action: tray::DaemonTrayAction) 
             let listen = state.listen_addr.clone();
             let st = Arc::clone(state);
             std::thread::spawn(move || {
-                hooks::install_claude_hooks(&listen);
+                // Not `install_claude_hooks`: that's the CLI entry point
+                // and exits the process on error — here it would take the
+                // whole daemon down over e.g. a read-only settings.json.
+                if let Err(e) = hooks::install_hooks_result(&listen) {
+                    warn!(error = %e, "tray: installing hooks failed");
+                }
                 let installed = hooks::are_hooks_installed();
                 st.send_tray_update(TrayUpdate::HooksInstalled(installed));
             });
@@ -639,6 +653,9 @@ async fn run_async(
                     // leaving it until the next 24h poll. (Must run after
                     // the status write guard above is dropped.)
                     updates::reevaluate(&state_for_events).await;
+
+                    // Bring the device's alert store in line with ours.
+                    alerts::resync_device(&state_for_events).await;
                 }
                 DaemonEvent::HidDisconnected => {
                     {
@@ -657,6 +674,8 @@ async fn run_async(
                     }
                     // YOLO is gone, so the per-wrapper opt-in set is too.
                     wrapper::clear_yolo_enrollment(&state_for_events).await;
+                    // …and the device no longer shows our alerts.
+                    alerts::reset_for_disconnect(&state_for_events).await;
 
                     state_for_events.send_tray_update(TrayUpdate::DeviceDisconnected);
 
@@ -1107,7 +1126,10 @@ fn install_launchd_macos(listen: &str) {
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>StandardOutPath</key>
     <string>{home}/Library/Logs/coredeck.log</string>
     <key>StandardErrorPath</key>
@@ -1146,7 +1168,7 @@ fn install_launchd_macos(listen: &str) {
 /// systemd user unit lives under `~/.config/systemd/user/coredeck.service`
 /// — no root needed. journald handles logs (so no redirect stanza is
 /// required). The unit `Restart=on-failure` mirrors launchd's
-/// `KeepAlive=true` for crash recovery; a clean exit (tray "Quit Daemon",
+/// `KeepAlive={SuccessfulExit: false}` — crash recovery only; a clean exit (tray "Quit Daemon",
 /// exit code 0) doesn't trip the restart so it won't loop.
 /// `WantedBy=default.target` ties
 /// activation to the user's graphical/login session so the daemon
@@ -1223,6 +1245,22 @@ fn run_remote_setup(host: &str, listen: &str) {
     println!("From the remote shell, run `claude` (or `tmux new -s w` then claude");
     println!("to survive transient disconnects). Hooks will fire back through the");
     println!("reverse tunnel to the daemon on this Mac.");
+}
+
+/// launchd and Finder start the daemon with a minimal PATH
+/// (`/usr/bin:/bin:/usr/sbin:/sbin`), so the terminal helpers raise/spawn
+/// shell out to by name — `wezterm`, `kitty`, `tmux`, usually installed
+/// by Homebrew — weren't found. Append the usual install locations.
+#[cfg(target_os = "macos")]
+fn extend_path_for_helpers() {
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut dirs: Vec<&str> = current.split(':').filter(|d| !d.is_empty()).collect();
+    for extra in ["/opt/homebrew/bin", "/usr/local/bin"] {
+        if !dirs.contains(&extra) && std::path::Path::new(extra).is_dir() {
+            dirs.push(extra);
+        }
+    }
+    std::env::set_var("PATH", dirs.join(":"));
 }
 
 /// One-shot setup: install Claude Code hooks, register launchd, and tell

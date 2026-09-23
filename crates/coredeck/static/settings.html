@@ -466,7 +466,7 @@ async function refreshStatus() {
       ? '<span class="pill ok">enabled</span>'
       : '<span class="pill warn">disabled</span>';
   } catch (e) {
-    $('#device-status').innerHTML = `<span class="pill bad">${e.message}</span>`;
+    $('#device-status').innerHTML = `<span class="pill bad">${escapeHtml(e.message)}</span>`;
   }
 }
 
@@ -514,7 +514,7 @@ async function refreshHooks() {
       ? '<span class="pill ok">installed</span>'
       : '<span class="pill warn">not installed</span>';
   } catch (e) {
-    $('#hooks-status').innerHTML = `<span class="pill bad">${e.message}</span>`;
+    $('#hooks-status').innerHTML = `<span class="pill bad">${escapeHtml(e.message)}</span>`;
   }
 }
 $('#hooks-install').addEventListener('click', async () => {
@@ -563,7 +563,7 @@ function renderSoftkeyCard(cfg) {
     </div>
     <div class="row sk-data-row">
       <label>Data</label>
-      <input type="text" class="data-input sk-data" value="${formatData(cfg.key_type, cfg.data)}">
+      <input type="text" class="data-input sk-data">
       <span class="sk-enter-wrap" style="display:none;align-items:center;gap:6px">
         <input type="checkbox" class="sk-enter" id="sk-enter-${idx}">
         <label for="sk-enter-${idx}" style="min-width:0;cursor:pointer;color:var(--muted);font-size:12px">send Enter</label>
@@ -577,6 +577,9 @@ function renderSoftkeyCard(cfg) {
 
   const typeSel = card.querySelector('.sk-type');
   const dataIn = card.querySelector('.sk-data');
+  // Set via the property, never interpolated into the template: soft-key
+  // text comes from the device and may contain quotes or markup.
+  dataIn.value = formatData(cfg.key_type, cfg.data);
   const enterWrap = card.querySelector('.sk-enter-wrap');
   const enterChk = card.querySelector('.sk-enter');
   const hint = card.querySelector('[data-hint]');
@@ -832,7 +835,7 @@ async function refreshSoftkeys() {
     area.innerHTML = '';
     cfgs.forEach(cfg => area.appendChild(renderSoftkeyCard(cfg)));
   } catch (e) {
-    area.innerHTML = `<div class="empty">${e.message}</div>`;
+    area.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
   }
 }
 $('#softkeys-reset').addEventListener('click', async () => {
@@ -1050,7 +1053,7 @@ async function refreshWrappers() {
     `;
     area.innerHTML = html;
   } catch (e) {
-    area.innerHTML = `<div class="empty">${e.message}</div>`;
+    area.innerHTML = `<div class="empty">${escapeHtml(e.message)}</div>`;
   }
 }
 function escapeHtml(s) {

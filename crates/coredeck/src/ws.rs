@@ -243,6 +243,9 @@ async fn handle_ws_command(
         WsCommandTag::SetMode => {
             if !payload.is_empty() {
                 let mode = DeviceMode::from_byte(payload[0]);
+                // Pre-record so the echoed state report isn't taken for a
+                // mode-button tap (see rpc::post_mode).
+                state.device_status.write().await.mode = mode;
                 hid.set_mode(mode).map(|_| None).map_err(|e| e.to_string())
             } else {
                 Err("missing mode".to_string())

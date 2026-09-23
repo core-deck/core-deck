@@ -125,7 +125,9 @@ async fn raise_iterm2(host: &HostTerminal) -> Result<(), String> {
     let Some(raw) = host.pane_id.as_deref() else {
         return activate_macos_app("iTerm").await;
     };
-    let uuid = raw.rsplit(':').next().unwrap_or(raw);
+    // Wrapper-reported, so it must be quoted: a crafted pane id would
+    // otherwise inject AppleScript (`do shell script`) into this raise.
+    let uuid = crate::spawn::applescript_quote(raw.rsplit(':').next().unwrap_or(raw));
     let script = format!(
         r#"tell application "iTerm"
             activate
@@ -173,6 +175,7 @@ async fn raise_jetbrains(host: &HostTerminal) -> Result<(), String> {
         debug!("raise: JetBrains terminal but no bundle id captured; skipping");
         return Ok(());
     };
+    let bundle = crate::spawn::applescript_quote(bundle);
     let script = format!(r#"tell application id "{bundle}" to activate"#);
     run("osascript", &["-e", &script]).await
 }
@@ -409,6 +412,7 @@ async fn activate_outer(_host: &HostTerminal) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 async fn activate_macos_app(app: &str) -> Result<(), String> {
+    let app = crate::spawn::applescript_quote(app);
     let script = format!(r#"tell application "{app}" to activate"#);
     run("osascript", &["-e", &script]).await
 }

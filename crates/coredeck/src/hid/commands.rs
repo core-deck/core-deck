@@ -16,7 +16,7 @@ pub fn build_display_update(
 ) -> Vec<HidPacket> {
     let json = serde_json::to_string(update).expect("DisplayUpdate serialization");
 
-    tracing::info!("HID display payload: {}", json);
+    tracing::debug!("HID display payload: {}", json);
 
     build_chunked_packets(HidCommand::UpdateDisplay, json.as_bytes(), mode)
 }
@@ -81,7 +81,7 @@ pub fn build_alert(
     if let Some(d) = details {
         json["details"] = serde_json::Value::String(d.to_string());
     }
-    tracing::info!("HID alert payload: {}", json);
+    tracing::debug!("HID alert payload: {}", json);
     build_chunked_packets(HidCommand::Alert, json.to_string().as_bytes(), mode)
 }
 

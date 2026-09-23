@@ -18,7 +18,7 @@ use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::alerts::{self, DecisionOutcome};
-use crate::state::SubagentRow;
+use crate::state::{SessionState, SubagentRow};
 use crate::DaemonState;
 
 /// Common fields present in all Claude Code hook events.
@@ -78,6 +78,17 @@ struct HookEvent {
     /// (e.g. `clear`, `logout`, `prompt_input_exit`, `other`).
     #[serde(default)]
     reason: Option<String>,
+    /// Stop / SubagentStop: in-flight background work. `None` when the
+    /// hook doesn't carry the field (StopFailure, idle_prompt).
+    #[serde(default)]
+    background_tasks: Option<Vec<BackgroundTask>>,
+}
+
+/// One `background_tasks` entry; only the kind matters to the device.
+#[derive(Debug, Deserialize)]
+struct BackgroundTask {
+    #[serde(rename = "type", default)]
+    kind: String,
 }
 
 /// Statusline data from Claude Code (snake_case fields).
@@ -193,10 +204,11 @@ pub async fn handle_hook(
     State(state): State<Arc<DaemonState>>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    // Log every hook payload at info level for observability
+    // Statusline ticks arrive every few seconds per session — their
+    // payloads go to debug so they don't swamp the (unrotated) log.
     if event_type == "statusline" {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
-            info!(
+            debug!(
                 "HOOK statusline: {}",
                 serde_json::to_string(&v).unwrap_or_default()
             );
@@ -208,7 +220,7 @@ pub async fn handle_hook(
 
     if event_type == "subagent-statusline" {
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
-            info!(
+            debug!(
                 "HOOK subagent-statusline: {}",
                 serde_json::to_string(&v).unwrap_or_default()
             );
@@ -223,7 +235,14 @@ pub async fn handle_hook(
         // truncate_chars, not a byte slice — `&json[..200]` panics when a
         // multi-byte code point straddles the cut, and hook bodies carry
         // user-written prompt text.
-        info!("HOOK {}: {}", event_type, truncate_chars(&json, 200));
+        // One info line per hook; the body (prompt text, tool inputs) only
+        // at debug.
+        info!(
+            "HOOK {} (session {})",
+            event_type,
+            v.get("session_id").and_then(|s| s.as_str()).unwrap_or("?")
+        );
+        debug!("HOOK {}: {}", event_type, truncate_chars(&json, 200));
     }
 
     forward_hook_to_app(&state, &event_type, &body).await;
@@ -476,7 +495,7 @@ async fn handle_claude_hook(
             StatusCode::OK.into_response()
         }
         "PermissionRequest" => handle_permission_request(state, &event).await,
-        "Stop" => {
+        "Stop" | "StopFailure" => {
             handle_stop(state, &event).await;
             StatusCode::OK.into_response()
         }
@@ -526,22 +545,10 @@ async fn handle_user_prompt_submit(state: &DaemonState, event: &HookEvent) {
         let s = claude.touch_session(sid);
         s.active = true;
         s.current_tool = None;
-        // If compaction landed mid-task there's no hook between PreCompact
-        // and the user's next prompt, so the "Compacting…" placeholder is
-        // still pinned by `active_task_id`. Restore the task subject from
-        // the registry now that the user is driving again.
-        if matches!(s.current_task.as_deref(), Some("Compacting…")) {
-            let restored = s
-                .active_task_id
-                .as_ref()
-                .and_then(|id| s.task_registry.get(id).cloned());
-            s.current_task = restored.or_else(|| Some("Thinking…".to_string()));
-        }
-        // Preserve the active task's subject — a mid-task user prompt
-        // is still part of the same task, not a blank "Thinking…".
-        if s.active_task_id.is_none() {
-            s.current_task = Some("Thinking…".to_string());
-        }
+        // A mid-task user prompt is still part of the same task, not a
+        // blank "Thinking…"; this also replaces a "Compacting…"
+        // placeholder left by compaction landing mid-task.
+        s.current_task = Some(turn_headline(s));
         s.phase_started_at_unix = Some(now_unix());
         s.last_tool_summary = None;
         s.tool_count_this_turn = 0;
@@ -679,6 +686,26 @@ fn strip_url_scheme(s: &str) -> &str {
         .unwrap_or(s)
 }
 
+/// Task id from a TaskUpdate tool input. The tool's field is `taskId`;
+/// `task_id` is accepted too for older/alternate payloads.
+fn task_update_id(input: &serde_json::Value) -> Option<&str> {
+    input
+        .get("taskId")
+        .or_else(|| input.get("task_id"))
+        .and_then(|v| v.as_str())
+}
+
+/// Line-1 headline while a turn runs: the pinned TaskCreate task's
+/// subject, else "Thinking…". Derived from the registry each time rather
+/// than trusting `current_task`, which Stop clears — a turn that ended
+/// mid-task would otherwise come back with an empty line 1.
+fn turn_headline(s: &SessionState) -> String {
+    s.active_task_id
+        .as_ref()
+        .and_then(|id| s.task_registry.get(id).cloned())
+        .unwrap_or_else(|| "Thinking…".to_string())
+}
+
 /// Build a richer `TaskUpdate` summary by joining the cached task
 /// subject (populated on `TaskCreated`) with a status-specific glyph.
 /// `None` when the event has no resolvable task_id or the registry
@@ -687,7 +714,7 @@ fn strip_url_scheme(s: &str) -> &str {
 async fn enrich_task_update(state: &DaemonState, event: &HookEvent) -> Option<String> {
     let sid = event.session_id.as_deref()?;
     let input = event.tool_input.as_ref()?;
-    let task_id = input.get("task_id").and_then(|v| v.as_str())?;
+    let task_id = task_update_id(input)?;
     let status = input.get("status").and_then(|v| v.as_str()).unwrap_or("");
 
     let subject = {
@@ -783,7 +810,8 @@ fn pick_detail(tool: &str, input: &serde_json::Value) -> Option<String> {
         // ("Audit ship-readiness"); `subagent_type` ("general-purpose")
         // adds nothing on the device. Fall back through the generic
         // chain if description is missing.
-        "Task" => non_empty_str(input, "description")
+        // (Claude Code renamed the tool from `Task` to `Agent`.)
+        "Agent" | "Task" => non_empty_str(input, "description")
             .map(str::to_string)
             .or_else(|| generic_pick(input)),
         // Reads as a real slash command on the display: `/review` not
@@ -893,6 +921,26 @@ fn extract_first_question(input: Option<&serde_json::Value>) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// The first question's option labels as one line — "1 Yes · 2 No" — for
+/// the alert's hold-to-peek details view. `None` without options.
+fn extract_first_question_options(input: Option<&serde_json::Value>) -> Option<String> {
+    let options = input?
+        .get("questions")?
+        .as_array()?
+        .first()?
+        .get("options")?
+        .as_array()?;
+    let labels: Vec<String> = options
+        .iter()
+        .filter_map(|o| o.get("label").and_then(|l| l.as_str()))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .enumerate()
+        .map(|(i, l)| format!("{} {l}", i + 1))
+        .collect();
+    (!labels.is_empty()).then(|| labels.join(" · "))
+}
+
 /// PreToolUse: mark the session as active and record current tool/task.
 /// TodoWrite is special-cased: instead of noisy "TodoWrite: ..." text,
 /// we extract the in-progress todo (if any) and keep the previous
@@ -926,11 +974,7 @@ async fn handle_pre_tool_use(state: &DaemonState, event: &HookEvent) -> axum::re
             .and_then(|v| v.as_str())
             == Some("in_progress");
     if is_task_update_in_progress {
-        let task_id = event
-            .tool_input
-            .as_ref()
-            .and_then(|v| v.get("task_id"))
-            .and_then(|v| v.as_str());
+        let task_id = event.tool_input.as_ref().and_then(task_update_id);
         if let (Some(sid), Some(id)) = (event.session_id.as_ref(), task_id) {
             let mut claude = state.claude_state.write().await;
             let s = claude.touch_session(sid);
@@ -984,9 +1028,7 @@ async fn handle_pre_tool_use(state: &DaemonState, event: &HookEvent) -> axum::re
         // tool detail belongs on line 2 via `last_tool_summary`. When
         // a TaskCreate task owns the headline, keep its subject pinned
         // instead.
-        if s.active_task_id.is_none() {
-            s.current_task = Some("Thinking…".to_string());
-        }
+        s.current_task = Some(turn_headline(s));
         // AskUserQuestion's surface is the question itself (raised as
         // an Idle alert below) — duplicating it on line 2 as
         // "AskUserQuestion: …" would just steal characters from the
@@ -1011,7 +1053,10 @@ async fn handle_pre_tool_use(state: &DaemonState, event: &HookEvent) -> axum::re
         if let Some(ref sid) = event.session_id {
             if let Some(question) = extract_first_question(event.tool_input.as_ref()) {
                 let session_label = compute_session_label(state, sid).await;
-                alerts::show_idle_alert(state, sid, &session_label, &question).await;
+                // Hold the Claude button to see the answer options.
+                let options = extract_first_question_options(event.tool_input.as_ref());
+                alerts::show_idle_alert(state, sid, &session_label, &question, options.as_deref())
+                    .await;
             }
         }
     }
@@ -1024,7 +1069,8 @@ async fn handle_pre_tool_use(state: &DaemonState, event: &HookEvent) -> axum::re
 /// text back to "Thinking…" until the next PreToolUse or Stop, and reset
 /// the phase timer so the device shows seconds-since-this-phase.
 async fn handle_post_tool_use(state: &DaemonState, event: &HookEvent) {
-    let is_task = event.tool_name.as_deref() == Some("Task");
+    // Subagent tool: `Agent` in current Claude Code, `Task` before.
+    let is_task = matches!(event.tool_name.as_deref(), Some("Agent" | "Task"));
 
     if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
@@ -1032,9 +1078,7 @@ async fn handle_post_tool_use(state: &DaemonState, event: &HookEvent) {
         s.current_tool = None;
         // Keep the active task's subject pinned across tool calls;
         // only fall back to "Thinking…" when no task owns the line.
-        if s.active_task_id.is_none() {
-            s.current_task = Some("Thinking…".to_string());
-        }
+        s.current_task = Some(turn_headline(s));
         s.phase_started_at_unix = Some(now_unix());
 
         // The Task tool returning to the parent means a subagent just
@@ -1092,9 +1136,7 @@ async fn handle_permission_request(
         // guard, PermissionRequest would clobber line 1 with the
         // prefixed "Bash: …" string and leave it duplicated on
         // line 2 once last_tool_summary updates.
-        if s.active_task_id.is_none() {
-            s.current_task = Some("Thinking…".to_string());
-        }
+        s.current_task = Some(turn_headline(s));
         // AskUserQuestion's surface is the question itself (raised
         // via PreToolUse's Idle alert path) — duplicating it as
         // "AskUserQuestion: …" on line 2 of the device just steals
@@ -1399,7 +1441,10 @@ async fn handle_notification(state: &DaemonState, event: &HookEvent) {
                 message
             };
             info!(session = %session_id, "idle prompt: {}", text);
-            alerts::show_idle_alert(state, session_id, &session_label, text).await;
+            // Waiting for input means the turn is over, even if Stop never
+            // fired (interrupted turn).
+            handle_stop(state, event).await;
+            alerts::show_idle_alert(state, session_id, &session_label, text, None).await;
         }
         "permission_prompt" => {
             // Look up stored PermissionRequest details for this session.
@@ -1440,20 +1485,31 @@ async fn handle_notification(state: &DaemonState, event: &HookEvent) {
 }
 
 /// Stop: Claude Code has finished. Clear active state for this session.
+/// Also used for StopFailure (turn ended on an API error) and
+/// `idle_prompt` (Claude is waiting for input) — Stop doesn't fire on an
+/// interrupt or an error, which left the tab "working" until the next prompt.
 async fn handle_stop(state: &DaemonState, event: &HookEvent) {
     if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
         let s = claude.touch_session(sid);
-        s.current_tool = None;
-        s.current_task = None;
-        s.active = false;
-        s.phase_started_at_unix = None;
-        s.last_tool_summary = None;
-        s.tool_count_this_turn = 0;
-        s.current_todo = None;
-        s.subagents.clear();
+        settle_idle(s);
+        if let Some(tasks) = &event.background_tasks {
+            s.background_tasks = tasks.iter().map(|t| t.kind.clone()).collect();
+        }
         claude.pending_permissions.remove(sid);
     }
+}
+
+/// Put a session in its between-turns state.
+fn settle_idle(s: &mut SessionState) {
+    s.current_tool = None;
+    s.current_task = None;
+    s.active = false;
+    s.phase_started_at_unix = None;
+    s.last_tool_summary = None;
+    s.tool_count_this_turn = 0;
+    s.current_todo = None;
+    s.subagents.clear();
 }
 
 /// SessionStart: Claude has begun a new session (or resumed/cleared/compacted
@@ -1494,14 +1550,17 @@ async fn handle_session_start(state: &DaemonState, event: &HookEvent) {
     // entry) also lands here and gets seeded with "Thinking…" so we
     // don't paint a blank task line until the next hook arrives.
     if source == "compact" {
+        if !s.active_before_compact {
+            // Nothing will follow until the user types (manual /compact,
+            // or auto-compact after Stop): settle idle instead of leaving
+            // "Thinking… · Ns" climbing.
+            settle_idle(s);
+            return;
+        }
         let needs_reset =
             s.current_task.is_none() || matches!(s.current_task.as_deref(), Some("Compacting…"));
         if needs_reset {
-            let restored = s
-                .active_task_id
-                .as_ref()
-                .and_then(|id| s.task_registry.get(id).cloned());
-            s.current_task = restored.or_else(|| Some("Thinking…".to_string()));
+            s.current_task = Some(turn_headline(s));
             s.phase_started_at_unix = Some(now_unix());
         }
         s.active = true;
@@ -1548,6 +1607,9 @@ async fn handle_pre_compact(state: &DaemonState, event: &HookEvent) {
     if let Some(ref sid) = event.session_id {
         let mut claude = state.claude_state.write().await;
         let s = claude.touch_session(sid);
+        // Manual `/compact` is the whole turn; auto-compact continues the
+        // turn only if one was running.
+        s.active_before_compact = s.active && trigger != "manual";
         s.current_task = Some("Compacting…".to_string());
         s.current_tool = None;
         s.active = true;
@@ -1660,7 +1722,15 @@ pub fn install_hooks_result(listen_addr: &str) -> Result<(), String> {
     let mut settings: serde_json::Value = if settings_path.exists() {
         let content = std::fs::read_to_string(&settings_path)
             .map_err(|e| format!("Failed to read {}: {}", settings_path.display(), e))?;
-        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+        // Refuse rather than start from `{}`: writing back would wipe
+        // every other setting over a stray trailing comma.
+        serde_json::from_str(&content).map_err(|e| {
+            format!(
+                "Failed to parse {} ({}); fix it and re-run — not overwriting",
+                settings_path.display(),
+                e
+            )
+        })?
     } else {
         serde_json::json!({})
     };
@@ -1718,17 +1788,22 @@ pub fn install_hooks_remote_result(host: &str, daemon_addr: &str) -> Result<(), 
         ),
     )?;
 
-    // Read remote settings.json, default to {} if absent or unparseable.
+    // Read remote settings.json; only a *missing* file starts from {}.
+    // An ssh failure or unparseable content is an error — pushing a
+    // rebuilt file would wipe the user's other settings.
     let raw = ssh_capture(
         host,
         &format!(
-            "cat {} 2>/dev/null || echo '{{}}'",
-            sh_quote(&settings_path)
+            "if [ -e {p} ]; then cat {p}; else echo '{{}}'; fi",
+            p = sh_quote(&settings_path)
         ),
-    )
-    .unwrap_or_else(|_| "{}".to_string());
-    let mut settings: serde_json::Value =
-        serde_json::from_str(raw.trim()).unwrap_or_else(|_| serde_json::json!({}));
+    )?;
+    let mut settings: serde_json::Value = serde_json::from_str(raw.trim()).map_err(|e| {
+        format!(
+            "Failed to parse {}:{} ({}); fix it and re-run — not overwriting",
+            host, settings_path, e
+        )
+    })?;
 
     let base_url = format!("http://{}", daemon_addr);
     apply_hook_entries(&mut settings, &register_path, &shim_path, &base_url);
@@ -1872,6 +1947,8 @@ pub fn apply_hook_entries(
     let tool_hook_events = ["PreToolUse", "PostToolUse"];
     let plain_hook_events = [
         "Stop",
+        // Turn ended on an API error — Stop doesn't fire for it.
+        "StopFailure",
         "Notification",
         "UserPromptSubmit",
         "SessionEnd",
@@ -1998,16 +2075,31 @@ fn shell_single_quote(s: &str) -> String {
 }
 
 /// True if a serialized hook command references something CoreDeck
-/// wrote: one of our embedded scripts or our daemon's `/hooks/` endpoint
-/// path. Host/port-agnostic — matching the `/hooks/<event>` path rather
-/// than a literal `127.0.0.1:19384` means a daemon started with a custom
-/// `--listen` still recognises (and uninstalls) its own entries. The
-/// `/hooks/` path is specific enough to CoreDeck that user hooks are
-/// very unlikely to collide.
+/// wrote: one of our embedded scripts or a URL to our daemon's `/hooks/`
+/// endpoint. Host/port-agnostic — matching `<scheme>://<authority>/hooks/`
+/// rather than a literal `127.0.0.1:19384` means a daemon started with a
+/// custom `--listen` still recognises (and uninstalls) its own entries.
 fn references_coredeck(serialized: &str) -> bool {
     serialized.contains("coredeck-hook.sh")
         || serialized.contains("coredeck-register.sh")
-        || serialized.contains("/hooks/")
+        || references_daemon_hook_url(serialized)
+}
+
+/// True if `s` contains a `<scheme>://<authority>/hooks/…` URL (the
+/// statusLine command and the legacy direct-curl hook form). Requiring the
+/// URL shape matters: a bare `/hooks/` substring also matches user scripts
+/// in the conventional `~/.claude/hooks/` directory, which install and
+/// uninstall would then delete as ours.
+fn references_daemon_hook_url(s: &str) -> bool {
+    s.match_indices("://").any(|(i, _)| {
+        let rest = &s[i + 3..];
+        let end = rest
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '\\'))
+            .unwrap_or(rest.len());
+        let url = &rest[..end];
+        url.find('/')
+            .is_some_and(|path| url[path..].starts_with("/hooks/"))
+    })
 }
 
 /// True if a hook block (a single matcher entry inside an event's array)
@@ -2294,6 +2386,43 @@ mod hook_tests {
         assert!(references_coredeck(default));
         // Unrelated user hook must not match.
         assert!(!references_coredeck("curl https://example.com/api/status"));
+    }
+
+    #[test]
+    fn question_options_become_numbered_details() {
+        let input = serde_json::json!({"questions": [{
+            "question": "Next?",
+            "options": [{"label": "Commit"}, {"label": " Test more "}, {"label": ""}]
+        }]});
+        assert_eq!(
+            extract_first_question_options(Some(&input)).as_deref(),
+            Some("1 Commit · 2 Test more")
+        );
+        assert_eq!(extract_first_question_options(None), None);
+    }
+
+    #[test]
+    fn user_scripts_in_a_hooks_dir_are_not_ours() {
+        // `~/.claude/hooks/` is the conventional home for user hook
+        // scripts; install/uninstall must leave these alone.
+        for cmd in [
+            "~/.claude/hooks/validate-bash.sh",
+            "node $HOME/.claude/hooks/gsd-check-update.js",
+            "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/fmt.sh",
+            "curl https://example.com/api/hooks/notify",
+        ] {
+            assert!(!references_coredeck(cmd), "{cmd}");
+        }
+        let user_block = serde_json::json!({
+            "hooks": [{"type": "command", "command": "~/.claude/hooks/fmt.sh"}]
+        });
+        assert!(!is_managed_hook_block(&user_block));
+        // Serialized statusLine (quotes escaped) is still recognised.
+        let ours = serde_json::json!({
+            "type": "command",
+            "command": "curl -s -X POST \"http://127.0.0.1:19384/hooks/statusline\""
+        });
+        assert!(references_coredeck(&ours.to_string()));
     }
 
     #[test]

@@ -66,6 +66,8 @@ pub enum AlertState {
         tab_index: usize,
         label: String,
         text: String,
+        /// Shown while the Claude button is held (e.g. a question's options).
+        details: Option<String>,
     },
     /// Interactive permission prompt. Holds the oneshot the hook handler
     /// is awaiting; the next HID input resolves it.
@@ -123,6 +125,20 @@ impl AlertState {
         }
     }
 }
+
+/// An idle notice that couldn't show because another alert was live.
+/// Idle notices used to be dropped outright in that case, so e.g. an
+/// AskUserQuestion behind another session's "waiting for input" never
+/// reached the device.
+pub struct QueuedIdle {
+    pub session_id: String,
+    pub label: String,
+    pub text: String,
+    pub details: Option<String>,
+}
+
+/// Idle notices kept at most — one per session, and the device has 16 tabs.
+const IDLE_QUEUE_CAP: usize = 16;
 
 /// A Pending permission alert waiting in the queue because another
 /// alert was already showing when its hook fired. Holds everything we
@@ -208,6 +224,7 @@ pub async fn show_idle_alert(
     session_id: &str,
     session_label: &str,
     text: &str,
+    details: Option<&str>,
 ) {
     {
         let wrappers = state.wrappers.read().await;
@@ -216,7 +233,7 @@ pub async fn show_idle_alert(
             .find(|w| w.session_id.as_deref() == Some(session_id));
         if let Some(w) = alerting_wrapper {
             if w.is_focused {
-                debug!(
+                info!(
                     session = %session_id,
                     "Idle alert suppressed; user is already focused on this session's terminal",
                 );
@@ -232,7 +249,7 @@ pub async fn show_idle_alert(
                 .map(|h| h.kind.supports_focus_reporting())
                 .unwrap_or(true);
             if !kind_supports_focus {
-                debug!(
+                info!(
                     session = %session_id,
                     kind = ?w.host_terminal.as_ref().map(|h| &h.kind),
                     "Idle alert suppressed; host terminal doesn't emit OSC 1004 focus reports",
@@ -241,14 +258,6 @@ pub async fn show_idle_alert(
             }
         }
     }
-    {
-        let guard = state.alert_state.lock().await;
-        if guard.is_some() {
-            debug!("Idle alert suppressed; another alert is already live");
-            return;
-        }
-    }
-
     let tab_index = crate::wrapper::tab_index_for_session(state, session_id)
         .await
         .unwrap_or(0);
@@ -260,17 +269,27 @@ pub async fn show_idle_alert(
     // dropped). HID-lock-after-alert-lock is the ordering used by every
     // install path, so there's no deadlock risk.
     let mut guard = state.alert_state.lock().await;
-    if guard.is_some() {
-        debug!("Idle alert suppressed; another alert raced in");
-        return;
+    match &*guard {
+        AlertState::None => {}
+        // A newer notice for the session already on screen replaces it
+        // (e.g. its AskUserQuestion after "waiting for input").
+        AlertState::Idle {
+            session_id: sid, ..
+        } if sid == session_id => {}
+        _ => {
+            drop(guard);
+            info!(session = %session_id, "Idle alert queued; another alert is live");
+            queue_idle(state, session_id, session_label, text, details).await;
+            return;
+        }
     }
     {
         let hid = state.hid.lock().await;
         if !hid.is_connected() {
-            debug!("Idle alert suppressed; device not connected");
+            info!(session = %session_id, "Idle alert suppressed; device not connected");
             return;
         }
-        if let Err(e) = hid.send_alert(tab_index, session_label, text, None) {
+        if let Err(e) = hid.send_alert(tab_index, session_label, text, details) {
             warn!(error = %e, "send_alert failed for idle prompt");
             return;
         }
@@ -281,6 +300,7 @@ pub async fn show_idle_alert(
         tab_index,
         label: session_label.to_string(),
         text: text.to_string(),
+        details: details.map(str::to_string),
     };
 }
 
@@ -402,6 +422,9 @@ pub async fn try_install_next_pending(state: &DaemonState) {
             queue.pop_front()
         };
         let Some(q) = q else {
+            // Permission prompts first; then any idle notice that had to
+            // wait for the slot.
+            promote_queued_idle(state).await;
             return;
         };
 
@@ -455,6 +478,20 @@ pub async fn try_install_next_pending(state: &DaemonState) {
             .await
             .unwrap_or(0);
 
+        // Claim the slot *before* touching the device, and hold it through
+        // the send (alert-outer / hid-inner, as in install_pending_alert).
+        // Sending first let a concurrent install land in between: the
+        // device then showed this prompt while the daemon held the other,
+        // so Accept approved a command the user never saw.
+        let mut guard = state.alert_state.lock().await;
+        if guard.is_some() {
+            // Another alert went live while we worked. Put ours back at
+            // the head; it's promoted when that one clears.
+            debug!("queued install raced with a fresh install; re-queued");
+            state.pending_queue.lock().await.push_front(q);
+            return;
+        }
+
         let installed = {
             let hid = state.hid.lock().await;
             if !hid.is_connected() {
@@ -475,14 +512,6 @@ pub async fn try_install_next_pending(state: &DaemonState) {
             continue;
         }
 
-        let mut guard = state.alert_state.lock().await;
-        if guard.is_some() {
-            // Race: a fresh install landed while we worked. Drop ours;
-            // the hook handler falls back. Don't keep popping in case
-            // we'd evict the live one.
-            debug!("queued install raced with a fresh install; dropped");
-            return;
-        }
         *guard = AlertState::Pending {
             // Preserve the id allocated at queue time so the parked
             // handler's `clear_alert_if(id)` still matches.
@@ -498,6 +527,130 @@ pub async fn try_install_next_pending(state: &DaemonState) {
         };
         debug!("queued permission alert promoted to active");
         return;
+    }
+}
+
+/// Tabs the firmware keeps alerts for (`DISPLAY_MAX_TABS`).
+const DEVICE_ALERT_TABS: usize = 16;
+
+/// The device went away, so its alert store no longer mirrors ours (a
+/// replug wipes firmware RAM). Drop the live alert and the queue — their
+/// hook handlers fall back to Claude's terminal prompt — rather than keep
+/// an invisible Pending prompt that would capture the next Accept after
+/// reconnect as an Allow.
+pub async fn reset_for_disconnect(state: &DaemonState) {
+    let mut guard = state.alert_state.lock().await;
+    let had_alert = guard.is_some();
+    *guard = AlertState::None;
+    let mut queue = state.pending_queue.lock().await;
+    let queued = queue.len();
+    queue.clear();
+    state.idle_queue.lock().await.clear();
+    if had_alert || queued > 0 {
+        debug!(had_alert, queued, "device disconnected; alerts dropped");
+    }
+}
+
+/// A device (re)connected: clear whatever alerts it still shows — a daemon
+/// that exited without sending Disconnect leaves them up, and Accept/Reject
+/// on such a phantom would be typed into the active session — then re-send
+/// the live one, so the device and `alert_state` agree.
+pub async fn resync_device(state: &DaemonState) {
+    let guard = state.alert_state.lock().await;
+    let hid = state.hid.lock().await;
+    if !hid.is_connected() {
+        return;
+    }
+    for tab in 0..DEVICE_ALERT_TABS {
+        if let Err(e) = hid.clear_alert(tab) {
+            debug!(tab, error = %e, "resync: clear_alert failed");
+        }
+    }
+    let resend = match &*guard {
+        AlertState::None => Ok(()),
+        AlertState::Idle {
+            tab_index,
+            label,
+            text,
+            details,
+            ..
+        } => hid.send_alert(*tab_index, label, text, details.as_deref()),
+        AlertState::Pending {
+            tab_index,
+            label,
+            text,
+            details,
+            ..
+        } => hid.send_alert(*tab_index, label, text, details.as_deref()),
+    };
+    if let Err(e) = resend {
+        warn!(error = %e, "resync: re-sending the live alert failed");
+    }
+}
+
+/// Remember an idle notice to show once the alert slot frees. One entry
+/// per session: a newer notice replaces the older one in place.
+async fn queue_idle(
+    state: &DaemonState,
+    session_id: &str,
+    label: &str,
+    text: &str,
+    details: Option<&str>,
+) {
+    let mut queue = state.idle_queue.lock().await;
+    if let Some(q) = queue.iter_mut().find(|q| q.session_id == session_id) {
+        q.label = label.to_string();
+        q.text = text.to_string();
+        q.details = details.map(str::to_string);
+        return;
+    }
+    if queue.len() >= IDLE_QUEUE_CAP {
+        queue.pop_front();
+    }
+    queue.push_back(QueuedIdle {
+        session_id: session_id.to_string(),
+        label: label.to_string(),
+        text: text.to_string(),
+        details: details.map(str::to_string),
+    });
+}
+
+/// Forget a queued idle notice for `session_id` — the session moved on,
+/// was focused, or its question was answered.
+async fn drop_queued_idle(state: &DaemonState, session_id: &str) {
+    state
+        .idle_queue
+        .lock()
+        .await
+        .retain(|q| q.session_id != session_id);
+}
+
+/// Show queued idle notices while the slot is free. `show_idle_alert`
+/// re-applies its checks (focus, device, busy), so an entry may be
+/// dropped or re-queued; keep going until one is live or none remain.
+async fn promote_queued_idle(state: &DaemonState) {
+    loop {
+        if state.alert_state.lock().await.is_some() {
+            return;
+        }
+        let Some(q) = state.idle_queue.lock().await.pop_front() else {
+            return;
+        };
+        // A session whose wrapper is gone has no tab to alert on.
+        if crate::wrapper::tab_index_for_session(state, &q.session_id)
+            .await
+            .is_none()
+        {
+            continue;
+        }
+        show_idle_alert(
+            state,
+            &q.session_id,
+            &q.label,
+            &q.text,
+            q.details.as_deref(),
+        )
+        .await;
     }
 }
 
@@ -577,8 +730,9 @@ pub async fn cancel_for_session_progress(state: &DaemonState, session_id: &str) 
     }
 
     // The session has moved past its permission point; any queued
-    // Pending requests for the same session are stale too.
+    // Pending requests — and idle notices — for it are stale too.
     drop_queued_for_session(state, session_id).await;
+    drop_queued_idle(state, session_id).await;
 
     if was_active.is_some() {
         // Slot opened up — show whatever is queued for *other* sessions.
@@ -592,6 +746,7 @@ pub async fn cancel_for_session_progress(state: &DaemonState, session_id: &str) 
 /// permission alert must persist until the user actually answers,
 /// since looking at the window isn't a decision.
 pub async fn cancel_idle_for_session(state: &DaemonState, session_id: &str) {
+    drop_queued_idle(state, session_id).await;
     let cleared = {
         let mut guard = state.alert_state.lock().await;
         let should_clear = matches!(
@@ -714,7 +869,8 @@ async fn cancel_pending_inner(
 /// - F20 + alert → `FocusSession(session_id)`. For Idle alerts the
 ///   alert is cleared inline (the user has attended); for Pending it
 ///   stays up — focus switch isn't a permission decision.
-/// - Idle alert + Esc → clear alert, return `Passthrough`.
+/// - Idle alert + Esc → clear alert; `Passthrough` if its session is the
+///   active one, else `Consumed` (so it can't interrupt another session).
 /// - Idle alert + anything else → leave the alert up, return
 ///   `Passthrough`. Notification dismissal is reserved for F20 / Esc;
 ///   stray knob rotation, soft-key strings, or random keys mustn't
@@ -817,15 +973,29 @@ pub async fn consume_input_for_decision(state: &DaemonState, event: &DaemonEvent
     // the user answer the now-current alert with a fresh keypress.
     let mut guard = state.alert_state.lock().await;
     if guard.id() != alert_id {
-        debug!("alert changed between classify and resolve; passing input through");
-        return AlertOutcome::Passthrough;
+        // Swallow it: this was a decision key (Enter / Esc / Ctrl-C / y /
+        // n) aimed at the prompt that just changed — typing it into the
+        // active session instead would submit, interrupt or answer there.
+        debug!("alert changed between classify and resolve; input dropped");
+        return AlertOutcome::Consumed;
     }
     let prev = std::mem::take(&mut *guard);
     drop(guard);
 
     let (consumed, tab_index) = match prev {
         AlertState::None => return AlertOutcome::Passthrough,
-        AlertState::Idle { tab_index, .. } => (false, tab_index),
+        AlertState::Idle {
+            tab_index,
+            session_id,
+            ..
+        } => {
+            // Esc dismissed the notice. Let it reach Claude only if the
+            // alerting session is the active one; otherwise it would land
+            // in (and interrupt) whatever other session is mid-turn.
+            let is_active = state.claude_state.read().await.active_session_id.as_deref()
+                == Some(session_id.as_str());
+            (!is_active, tab_index)
+        }
         AlertState::Pending {
             session_id: alert_sid,
             tool_name,
@@ -1035,10 +1205,11 @@ pub async fn refresh_for_tabs(state: &DaemonState, snapshot: &coredeck_protocol:
                     tab_index,
                     label,
                     text,
+                    details,
                     ..
                 } => {
                     *tab_index = new_idx;
-                    (label.clone(), text.clone(), None)
+                    (label.clone(), text.clone(), details.clone())
                 }
                 AlertState::Pending {
                     tab_index,

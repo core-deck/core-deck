@@ -431,27 +431,34 @@ impl HidManager {
 
                 // --- Poll for incoming device-initiated packets ---
                 // Use try_lock to avoid blocking command sends (send_display_update, etc.)
+                let mut waited = false;
                 if let Some(device_guard) = device.try_lock() {
                     if let Some(ref dev) = *device_guard {
                         let poll_mode =
                             ProtocolMode::from_byte(protocol_mode.load(Ordering::Relaxed));
                         match read_raw_packet(dev, 20, poll_mode) {
                             Ok(Some(pkt)) => {
+                                waited = true;
                                 dispatch_incoming_packet(
                                     &pkt,
                                     &event_tx,
                                     &mut type_string_buf.lock(),
                                 );
                             }
-                            Ok(None) => {} // Timeout, no data
+                            Ok(None) => waited = true, // the 20ms read timed out
                             Err(e) => {
                                 debug!("Poll read error: {}", e);
                             }
                         }
                     }
                 }
-                // Brief yield if nothing happened to avoid busy-wait
-                // (the 20ms read timeout above provides the main throttle)
+                // The 20ms read is the throttle; when it didn't run (a
+                // command holds the device — up to 1.5s during an EEPROM
+                // save — or the read failed instantly on a vanished device)
+                // back off instead of spinning a core.
+                if !waited {
+                    thread::sleep(Duration::from_millis(5));
+                }
             }
             info!("HID reader thread stopped");
         });
@@ -592,12 +599,8 @@ impl HidManager {
     pub fn send_display_update(&self, update: &coredeck_protocol::DisplayUpdate) -> Result<()> {
         // Build a dedup key from serialized JSON
         let payload_key = serde_json::to_string(update).unwrap_or_default();
-        {
-            let mut last = self.last_display_payload.lock();
-            if *last == payload_key {
-                return Ok(());
-            }
-            *last = payload_key;
+        if *self.last_display_payload.lock() == payload_key {
+            return Ok(());
         }
 
         let device_guard = self.device.lock();
@@ -610,6 +613,11 @@ impl HidManager {
         send_packets_to_device(device, &packets, mode)?;
 
         self.drain_response(device);
+
+        // Remember only what actually reached the device: recording a
+        // failed send (e.g. while unplugged) would suppress the identical
+        // update after reconnect, leaving the display blank.
+        *self.last_display_payload.lock() = payload_key;
 
         Ok(())
     }
@@ -686,12 +694,14 @@ impl HidManager {
             .as_ref()
             .ok_or_else(|| anyhow!("Device not connected"))?;
 
+        validate_soft_key(key_type, data)?;
+
         let mode = self.mode();
         let packets = commands::build_set_soft_key(index, key_type, data, save, mode);
         send_packets_to_device(device, &packets, mode)?;
 
         let first_timeout_ms = if save { 1500 } else { 200 };
-        let _ = read_response_with_timeout(
+        let response = read_response_with_timeout(
             device,
             HidCommand::SetSoftKey,
             &self.event_tx,
@@ -699,6 +709,16 @@ impl HidManager {
             first_timeout_ms,
             &self.type_string_buf,
         )?;
+        // SetSoftKey inverts the usual convention: status 0x01 = accepted,
+        // 0x00 = rejected (bad index, or a sequence whose count doesn't
+        // match its length — the firmware then leaves the key at Default).
+        if response.status != 0x01 {
+            return Err(anyhow!(
+                "firmware rejected soft key {} assignment (status 0x{:02X})",
+                index,
+                response.status
+            ));
+        }
 
         info!("Soft key {} set", index);
         Ok(())
@@ -744,13 +764,27 @@ impl HidManager {
             });
         }
 
-        let _key_index = response.data[0];
+        // A reply for another key means we read a stale response (e.g.
+        // left queued by an earlier timed-out read) — don't pass it off
+        // as this key's assignment.
+        if response.data[0] != index {
+            return Err(anyhow!(
+                "get_soft_key: reply is for key {} (asked for {})",
+                response.data[0],
+                index
+            ));
+        }
         let raw_type = SoftKeyType::from_byte(response.data[1]).unwrap_or(SoftKeyType::Default);
-        let data = if response.data.len() > 2 {
+        let mut data = if response.data.len() > 2 {
             response.data[2..].to_vec()
         } else {
             vec![]
         };
+        // The transport trims trailing zeros, which eats a keycode's low
+        // byte when it is 0x00; keycodes are always 2 bytes.
+        if raw_type != SoftKeyType::String && raw_type != SoftKeyType::Sequence && data.len() < 2 {
+            data.resize(2, 0);
+        }
 
         // Older firmware reports `Default` (0) directly with the resolved
         // keymap keycode appended (`[type=0, kc_hi, kc_lo]`); newer firmware
@@ -916,12 +950,11 @@ impl HidManager {
             &self.type_string_buf,
         )?;
 
-        if response.data.len() < 4 {
-            return Err(anyhow!(
-                "set_theme response too short: {} bytes",
-                response.data.len()
-            ));
-        }
+        // Reply is [slot, h, s, v]. The transport trims trailing zeros, so
+        // a black colour (v=0, maybe s=h=0 too) arrives short even though
+        // the device applied it; the trimmed bytes were zeros by definition.
+        let mut response = response;
+        response.data.resize(4, 0);
         debug!(
             "Theme slot {} set to HSV({},{},{}) save={}",
             slot, hue, sat, val, save
@@ -1145,10 +1178,20 @@ fn probe_protocol_mode(
     }
 
     // --- Phase 2: drain leftover, try standalone ---
-    // Drain any leftover responses from the VIAL probe
+    // Drain any leftover responses from the VIAL probe. A VIAL device that
+    // was still busy (e.g. just enumerated) may answer it only now: accept
+    // that late reply rather than discarding it.
     for _ in 0..5 {
         match read_raw_packet(device, 50, ProtocolMode::Standalone) {
-            Ok(Some(_)) => continue,
+            Ok(Some(pkt)) => {
+                if let Some(version) = late_vial_version_reply(pkt.as_bytes()) {
+                    info!(
+                        "Detected VIAL protocol mode (late reply), firmware {}",
+                        version
+                    );
+                    return Some((ProtocolMode::Vial, version));
+                }
+            }
             _ => break,
         }
     }
@@ -1168,11 +1211,14 @@ fn probe_protocol_mode(
     ) {
         Ok(response) if response.status == 0 => {
             let version = String::from_utf8_lossy(&response.data).trim().to_string();
-            let version = if version.is_empty() {
-                "unknown".to_string()
-            } else {
-                version
-            };
+            if version.is_empty() {
+                // Real firmware always sends a version string. An empty
+                // one is VIA echoing our unprefixed probe back unchanged,
+                // i.e. a VIAL device that missed phase 1 — probe again
+                // rather than lock it into standalone mode.
+                debug!("Standalone GetVersion came back empty (VIA echo)");
+                return None;
+            }
             info!("Detected standalone protocol mode, firmware {}", version);
             Some((ProtocolMode::Standalone, version))
         }
@@ -1185,6 +1231,57 @@ fn probe_protocol_mode(
             None
         }
     }
+}
+
+/// Longest soft-key string the firmware stores (after the flags byte).
+const SOFTKEY_STRING_MAX: usize = 126;
+/// Most keycodes a firmware soft-key sequence holds.
+const SOFTKEY_SEQ_MAX_KEYS: usize = 63;
+
+/// Reject assignments the firmware can't store before sending them — it
+/// truncates long strings silently (possibly mid-UTF-8) and resets the key
+/// to Default when a sequence's count and length disagree.
+fn validate_soft_key(key_type: SoftKeyType, data: &[u8]) -> Result<()> {
+    match key_type {
+        SoftKeyType::Default => Ok(()),
+        SoftKeyType::Keycode if data.len() == 2 => Ok(()),
+        SoftKeyType::Keycode => Err(anyhow!("keycode must be 2 bytes, got {}", data.len())),
+        SoftKeyType::String => match data.len().checked_sub(1) {
+            None => Err(anyhow!("string soft key is missing its flags byte")),
+            Some(n) if n > SOFTKEY_STRING_MAX => Err(anyhow!(
+                "string is {n} bytes; the device stores at most {SOFTKEY_STRING_MAX}"
+            )),
+            Some(_) => Ok(()),
+        },
+        SoftKeyType::Sequence => {
+            let count = data.first().copied().unwrap_or(0) as usize;
+            if count == 0 || count > SOFTKEY_SEQ_MAX_KEYS {
+                Err(anyhow!(
+                    "sequence needs 1..={SOFTKEY_SEQ_MAX_KEYS} keys, got {count}"
+                ))
+            } else if data.len() != 1 + 2 * count {
+                Err(anyhow!(
+                    "sequence of {count} keys must be {} bytes, got {}",
+                    1 + 2 * count,
+                    data.len()
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Version string from a raw `[0x80, flags, 0x09 GetVersion, status 0,
+/// version…]` VIAL reply, or `None` for anything else.
+fn late_vial_version_reply(raw: &[u8; PACKET_SIZE]) -> Option<String> {
+    if raw[0] != VIAL_PREFIX || raw[2] != HidCommand::GetVersion.as_byte() || raw[3] != 0 {
+        return None;
+    }
+    let body = &raw[4..];
+    let end = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+    let version = String::from_utf8_lossy(&body[..end]).trim().to_string();
+    (!version.is_empty()).then_some(version)
 }
 
 /// Send multiple packets (chunks) to the HID device sequentially
@@ -1235,34 +1332,45 @@ fn send_single_packet(device: &HidDevice, packet: &HidPacket, mode: ProtocolMode
     Ok(())
 }
 
-/// Read a single raw HID packet with timeout.
+/// Read a single raw HID packet with timeout. `Ok(None)` means nothing
+/// arrived before the timeout.
 ///
-/// In VIAL mode: if `buffer[0] != 0x80` the packet is a VIA echo and is discarded
-/// (returns `Ok(None)`). Otherwise the prefix is stripped by shifting bytes left by 1.
+/// In VIAL mode, packets whose `buffer[0] != 0x80` are VIA echoes — VIA
+/// sends one (zeroed by the firmware) after *every* host packet, after our
+/// reply — and are skipped while the timeout runs; returning them as "no
+/// packet" made every caller read a queued echo as an instant timeout.
+/// Kept packets have the prefix stripped and their payload limited to the
+/// 29 VIAL bytes.
 fn read_raw_packet(
     device: &HidDevice,
     timeout_ms: i32,
     mode: ProtocolMode,
 ) -> Result<Option<HidPacket>> {
-    let mut buffer = [0u8; PACKET_SIZE];
-    match device.read_timeout(&mut buffer, timeout_ms) {
-        Ok(n) if n > 0 => {
-            if mode == ProtocolMode::Vial {
-                if buffer[0] != VIAL_PREFIX {
-                    // Not a VIAL-prefixed response — discard (VIA echo)
-                    debug!("Discarding non-VIAL packet (byte0=0x{:02X})", buffer[0]);
-                    return Ok(None);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(0) as u64);
+    loop {
+        let remaining = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis() as i32;
+        let mut buffer = [0u8; PACKET_SIZE];
+        match device.read_timeout(&mut buffer, remaining) {
+            Ok(n) if n > 0 => {
+                if mode == ProtocolMode::Vial {
+                    if buffer[0] != VIAL_PREFIX {
+                        debug!("Discarding non-VIAL packet (byte0=0x{:02X})", buffer[0]);
+                        continue;
+                    }
+                    // Strip prefix: shift left by 1
+                    let mut stripped = [0u8; PACKET_SIZE];
+                    stripped[..PACKET_SIZE - 1].copy_from_slice(&buffer[1..PACKET_SIZE]);
+                    let mut pkt = HidPacket::from_bytes(&stripped);
+                    pkt.limit_payload(mode.max_payload_size());
+                    return Ok(Some(pkt));
                 }
-                // Strip prefix: shift left by 1
-                let mut stripped = [0u8; PACKET_SIZE];
-                stripped[..PACKET_SIZE - 1].copy_from_slice(&buffer[1..PACKET_SIZE]);
-                Ok(Some(HidPacket::from_bytes(&stripped)))
-            } else {
-                Ok(Some(HidPacket::from_bytes(&buffer)))
+                return Ok(Some(HidPacket::from_bytes(&buffer)));
             }
+            Ok(_) => return Ok(None), // Timeout
+            Err(e) => return Err(anyhow!("HID read error: {}", e)),
         }
-        Ok(_) => Ok(None), // Timeout
-        Err(e) => Err(anyhow!("HID read error: {}", e)),
     }
 }
 
@@ -1500,6 +1608,36 @@ fn dispatch_incoming_packet(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soft_key_validation_matches_firmware_limits() {
+        assert!(validate_soft_key(SoftKeyType::Keycode, &[0x01, 0x12]).is_ok());
+        assert!(validate_soft_key(SoftKeyType::Keycode, &[0x12]).is_err());
+        let mut s = vec![0x01];
+        s.extend(std::iter::repeat_n(b'a', 126));
+        assert!(validate_soft_key(SoftKeyType::String, &s).is_ok());
+        s.push(b'a');
+        assert!(validate_soft_key(SoftKeyType::String, &s).is_err());
+        assert!(validate_soft_key(SoftKeyType::Sequence, &[2, 0, 0x29, 0, 0x29]).is_ok());
+        assert!(validate_soft_key(SoftKeyType::Sequence, &[2, 0, 0x29]).is_err());
+        assert!(validate_soft_key(SoftKeyType::Sequence, &[0]).is_err());
+        let mut seq = vec![64u8];
+        seq.extend(std::iter::repeat_n(0u8, 128));
+        assert!(validate_soft_key(SoftKeyType::Sequence, &seq).is_err());
+    }
+
+    #[test]
+    fn late_vial_version_reply_parses_only_get_version() {
+        let mut raw = [0u8; PACKET_SIZE];
+        raw[..4].copy_from_slice(&[VIAL_PREFIX, 0xC0, HidCommand::GetVersion.as_byte(), 0]);
+        raw[4..9].copy_from_slice(b"2.3.0");
+        assert_eq!(late_vial_version_reply(&raw).as_deref(), Some("2.3.0"));
+        // VIA's echo of our unprefixed probe, and the zeroed echo.
+        let mut echo = [0u8; PACKET_SIZE];
+        echo[..2].copy_from_slice(&[0xC0, HidCommand::GetVersion.as_byte()]);
+        assert_eq!(late_vial_version_reply(&echo), None);
+        assert_eq!(late_vial_version_reply(&[0u8; PACKET_SIZE]), None);
+    }
 
     #[test]
     fn test_hid_config_default() {

@@ -132,6 +132,10 @@ impl HidCommand {
 pub struct HidPacket {
     /// Raw packet data
     data: [u8; PACKET_SIZE],
+    /// Bytes of `data[HEADER_SIZE..]` that are payload. 30 on the wire in
+    /// standalone mode; 29 for a received VIAL packet, whose last byte is
+    /// padding left over from stripping the 0x80 prefix.
+    payload_len: usize,
 }
 
 impl Default for HidPacket {
@@ -145,6 +149,7 @@ impl HidPacket {
     pub fn new() -> Self {
         Self {
             data: [0u8; PACKET_SIZE],
+            payload_len: MAX_PAYLOAD_SIZE,
         }
     }
 
@@ -182,9 +187,16 @@ impl HidPacket {
         HidCommand::from_byte(self.data[1])
     }
 
-    /// Get the payload slice (bytes 2-31)
+    /// Get the payload slice (bytes 2-31, or 2-30 once limited for VIAL)
     pub fn payload(&self) -> &[u8] {
-        &self.data[HEADER_SIZE..]
+        &self.data[HEADER_SIZE..HEADER_SIZE + self.payload_len]
+    }
+
+    /// Limit `payload()` to the first `len` bytes. A received VIAL packet
+    /// carries only 29 payload bytes per chunk; counting the padding byte
+    /// would splice a 0x00 into every reassembled multi-chunk message.
+    pub fn limit_payload(&mut self, len: usize) {
+        self.payload_len = len.min(MAX_PAYLOAD_SIZE);
     }
 
     /// Set payload from bytes, truncating if necessary
@@ -293,6 +305,21 @@ impl ProtoError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limited_payload_excludes_vial_padding() {
+        let mut raw = [0u8; PACKET_SIZE];
+        raw[0] = FLAG_START;
+        raw[1] = HidCommand::GetVersion.as_byte();
+        for (i, b) in raw[HEADER_SIZE..].iter_mut().enumerate() {
+            *b = i as u8 + 1;
+        }
+        let mut pkt = HidPacket::from_bytes(&raw);
+        assert_eq!(pkt.payload().len(), 30);
+        pkt.limit_payload(ProtocolMode::Vial.max_payload_size());
+        assert_eq!(pkt.payload().len(), 29);
+        assert_eq!(*pkt.payload().last().unwrap(), 29);
+    }
 
     #[test]
     fn test_packet_creation() {

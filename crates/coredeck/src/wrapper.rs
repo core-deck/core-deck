@@ -28,8 +28,8 @@ use axum::{
 };
 use coredeck_protocol::{
     encode_ws_frame, DaemonToWrapper, DeviceMode, DisplayUpdate, WrapperRegisterSession,
-    WrapperTab, WrapperTabList, WrapperToDaemon, WsEventTag, TAB_STATE_INACTIVE, TAB_STATE_STARTED,
-    TAB_STATE_WORKING,
+    WrapperTab, WrapperTabList, WrapperToDaemon, WsEventTag, TAB_STATE_BACKGROUND,
+    TAB_STATE_INACTIVE, TAB_STATE_STARTED, TAB_STATE_WORKING,
 };
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::mpsc;
@@ -753,6 +753,38 @@ unsafe fn frontmost_bundle_id() -> Option<String> {
     )
 }
 
+/// "Waiting · 3 shells · 1 monitor" — what an idle session with background
+/// work is waiting on. Known kinds first in a fixed order, then any others
+/// as reported.
+fn background_summary(kinds: &[String]) -> String {
+    const KNOWN: [(&str, &str, &str); 4] = [
+        ("shell", "shell", "shells"),
+        ("monitor", "monitor", "monitors"),
+        ("subagent", "agent", "agents"),
+        ("workflow", "workflow", "workflows"),
+    ];
+    let count = |kind: &str| kinds.iter().filter(|k| k.as_str() == kind).count();
+    let mut parts: Vec<String> = KNOWN
+        .iter()
+        .filter_map(|&(kind, one, many)| match count(kind) {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            n => Some(format!("{n} {many}")),
+        })
+        .collect();
+    let mut others: Vec<&str> = kinds
+        .iter()
+        .map(String::as_str)
+        .filter(|k| !KNOWN.iter().any(|&(kind, _, _)| kind == *k))
+        .collect();
+    others.sort_unstable();
+    others.dedup();
+    for kind in others {
+        parts.push(format!("{} {kind}", count(kind)));
+    }
+    format!("Waiting · {}", parts.join(" · "))
+}
+
 async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
     let wrappers = state.wrappers.read().await;
     let claude = state.claude_state.read().await;
@@ -776,12 +808,21 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
                 current_todo: session.and_then(|s| s.current_todo.clone()),
                 model: session.and_then(|s| s.model.clone()),
                 current_tool: session.and_then(|s| s.current_tool.clone()),
-                current_task: session.and_then(decorate_task),
+                current_task: session.and_then(|s| {
+                    // Idle with work in flight: say so instead of the
+                    // "No active task" placeholder.
+                    if !s.active && !s.background_tasks.is_empty() {
+                        Some(background_summary(&s.background_tasks))
+                    } else {
+                        decorate_task(s)
+                    }
+                }),
                 last_tool_summary: session.and_then(|s| s.last_tool_summary.clone()),
                 permission_mode: session.and_then(|s| s.permission_mode.clone()),
                 tab_state: match session {
                     None => TAB_STATE_INACTIVE,
                     Some(s) if s.active => TAB_STATE_WORKING,
+                    Some(s) if !s.background_tasks.is_empty() => TAB_STATE_BACKGROUND,
                     Some(_) => TAB_STATE_STARTED,
                 },
                 context_percent: session.and_then(|s| s.context_window_percent),
@@ -1245,6 +1286,23 @@ pub async fn route_hid_type_string(state: &Arc<DaemonState>, text: &str, send_en
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn background_summary_counts_and_pluralizes() {
+        let kinds = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            super::background_summary(&kinds(&["shell", "monitor", "shell", "shell"])),
+            "Waiting · 3 shells · 1 monitor"
+        );
+        assert_eq!(
+            super::background_summary(&kinds(&["subagent", "workflow", "subagent"])),
+            "Waiting · 2 agents · 1 workflow"
+        );
+        assert_eq!(
+            super::background_summary(&kinds(&["mcp task"])),
+            "Waiting · 1 mcp task"
+        );
+    }
+
     use super::{map_permission_mode, session_label};
     use coredeck_protocol::DeviceMode;
 

@@ -283,6 +283,7 @@ Constants for the tab state values used in `tabs` arrays:
 | 0 | Inactive | Tab exists but no active process |
 | 1 | Started | Process started, waiting |
 | 2 | Working | Process actively running |
+| 3 | Background | Idle, but background work (shells, monitors, agents, workflows) is still in flight — from the Stop hook's `background_tasks`. The tab's `current_task` reads e.g. "Waiting · 3 shells · 1 monitor". Firmware before 2.4 draws it like Started. |
 
 ## WrapperTabList
 
@@ -342,7 +343,7 @@ One row in the wrapper-tab snapshot. Most optional fields are `null` until the c
 | `current_task` | string \| null | Headline activity ("Thinking…", or a TaskCreate subject) |
 | `last_tool_summary` | string \| null | Most recent tool's no-prefix summary, used for the device's task2 line |
 | `permission_mode` | string \| null | Latest hook-reported `permission_mode` |
-| `tab_state` | integer | Firmware tab-state value: 0=Inactive, 1=Started, 2=Working |
+| `tab_state` | integer | Firmware tab-state value: 0=Inactive, 1=Started, 2=Working, 3=Background (idle, background shells/monitors/agents still running) |
 | `context_percent` | float \| null | Context window usage percent |
 | `cost_usd` | float \| null | Session cost in USD |
 | `subagent_label` | string \| null | First in-flight subagent's label (with `(N)` prefix when more than one) |

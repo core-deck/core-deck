@@ -671,6 +671,27 @@ fn run() -> Result<i32> {
     // so a user can `export COREDECK_SSH_HOST=dev-box` and just type
     // `claude`. None = local mode (today's behaviour).
     let ssh_host = extract_ssh_host(&mut args).or_else(|| std::env::var(SSH_HOST_ENV).ok());
+
+    // Piped or redirected use (`git diff | claude -p "review" > r.md`,
+    // common with `alias claude=coredeck-claude`): under a PTY claude
+    // sees a terminal, ignores the piped stdin, and the output file gets
+    // echoed input and CRLF line endings. There's no interactive session
+    // for the deck to drive, so hand our stdio straight to claude.
+    if ssh_host.is_none() && !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        let status = std::process::Command::new(&claude_bin)
+            .args(&args)
+            .status()
+            .with_context(|| format!("spawning {}", claude_bin))?;
+        #[cfg(unix)]
+        let signal_code = {
+            use std::os::unix::process::ExitStatusExt;
+            status.signal().map(|s| 128 + s)
+        };
+        #[cfg(not(unix))]
+        let signal_code = None;
+        return Ok(status.code().or(signal_code).unwrap_or(1));
+    }
+
     // Local mode rolls a fresh UUID per invocation. Remote mode uses a
     // host-keyed persistent id so claude alive in remote tmux keeps
     // correlating to the same wrapper across reconnect cycles.
@@ -781,15 +802,22 @@ fn run() -> Result<i32> {
         let mut buf = [0u8; 8192];
         let mut sniffer = OscSniffer::new();
         let stdout = std::io::stdout();
-        let mut handle = stdout.lock();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
+                    // Lock per chunk, never across the blocking read:
+                    // restore_terminal() (signal task, panic hook) needs
+                    // this lock too, and would otherwise wait for the
+                    // child's next output — i.e. forever when claude is
+                    // idle, leaving SIGTERM/SIGHUP (closed window) unable
+                    // to exit the wrapper.
+                    let mut handle = stdout.lock();
                     if handle.write_all(&buf[..n]).is_err() {
                         break;
                     }
                     let _ = handle.flush();
+                    drop(handle);
                     let mut titles: Vec<String> = Vec::new();
                     sniffer.feed(&buf[..n], |param, body| {
                         // OSC 0/1/2 are the universal title channels

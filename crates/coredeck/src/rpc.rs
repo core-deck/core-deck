@@ -226,6 +226,12 @@ pub async fn post_mode(
             .into_response();
     }
 
+    // Record the target mode *before* the device echoes it back in a state
+    // report, as sync_active_mode_to_device does — otherwise the event loop
+    // reads the echo as a mode-button tap and injects Shift+Tab into the
+    // active Claude session, cycling its permission mode.
+    state.device_status.write().await.mode = req.mode;
+
     let hid = state.hid.lock().await;
     if let Err(e) = ensure_device_open(&hid) {
         return (StatusCode::SERVICE_UNAVAILABLE, Json(ApiError { error: e })).into_response();

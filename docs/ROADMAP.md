@@ -41,6 +41,35 @@ The daemon hosts every user-facing surface:
 
 ## Done (recent highlights)
 
+- **Second full review (2026-09, after v0.3.0).** Five parallel passes
+  over code changed since `COMPLETE_REVIEW.md`, each finding re-verified
+  before fixing. Fixed: hook install treating any `/hooks/` path (the
+  conventional `~/.claude/hooks/`) as ours and deleting user hooks, and
+  rewriting an unparseable `settings.json` from `{}`; tray install
+  exiting the daemon; unescaped soft-key text in the settings page;
+  unquoted wrapper-reported ids in raise AppleScript; the wrapper
+  hanging on SIGTERM/SIGHUP (stdout lock held across the PTY read) and
+  mangling piped `claude -p` use; VIAL transport reading VIA's zeroed
+  echo as a timeout and splicing a 0x00 into every 29-byte chunk
+  boundary (theme slot 9 and long soft-key strings were corrupted);
+  protocol detection locking a slow VIAL device into standalone; black
+  theme colours and 0x00-low keycodes lost to zero-trimming; the
+  SetSoftKey status byte ignored; REST/WS mode changes injecting
+  Shift+Tab; the reader thread busy-spinning; queued-prompt promotion
+  racing a fresh install (Accept could approve an unseen prompt);
+  alert state not resynced across unplug/daemon restart; Esc on an idle
+  notice interrupting another session; idle notices (incl.
+  AskUserQuestion) dropped while another alert was up — now queued;
+  `taskId`/`Agent` field renames breaking task tracking and subagent
+  handling; "Thinking…" stuck after an idle `/compact`, an interrupt or
+  an API error (`StopFailure`); statusline/display payloads flooding the
+  log at info; helper binaries missing from the launchd PATH; launchd
+  restarting a deliberately quit daemon; soft-key assignments the
+  firmware can't store.
+- **Background work on the device.** The Stop hook's `background_tasks`
+  (shells, monitors, agents, workflows) marks an idle session's tab as
+  `TAB_STATE_BACKGROUND` (ring + dot on firmware ≥ 2.4) and its task line
+  reads "Waiting · 3 shells · 1 monitor".
 - **Hardening batch from the full-project review** (`COMPLETE_REVIEW.md`).
   Browser lockdown: the wide-open CORS layer is gone and every route
   (including both WS upgrade paths) now refuses requests whose `Origin`
@@ -325,6 +354,35 @@ The daemon hosts every user-facing surface:
 
 ## Open backlog
 
+- **Deferred from the 2026-09 review** (confirmed, not yet fixed):
+  - *`--ssh` tunnel exposes the whole API on the remote host.* `ssh -R`
+    binds the daemon port on the remote loopback, where any local user
+    can reach it — including `/ws` WrapperWrite (keystrokes into the
+    active Claude). Needs a hooks-only listener for the tunnel or a
+    per-install token.
+  - *Parallel same-tool prompts.* PreToolUse of a sibling call cancels
+    the first call's device prompt (matched by tool name only). The fix
+    hinges on what Claude Code does with a parked PermissionRequest when
+    the user answers in the terminal; match on `tool_input` once known.
+  - *Mode-report echo race.* A state report carrying an older mode (fast
+    knob turns, periodic ping) reads as a mode-button tap and injects
+    Shift+Tab. Needs the firmware to flag tap-originated reports.
+  - *Wrapper focus reporting.* The stripper swallows `ESC[I/O` even when
+    claude (or remote vim/tmux) enabled 1004 itself; a child `?1004l`
+    disables our tracking for the rest of the session.
+  - *Wrapper reconnect.* Last focus/title aren't re-sent after a
+    reconnect; `--ssh` duplicate-host registration can still orphan the
+    first wrapper; nested `claude` inherits `COREDECK_WRAPPER_ID` and
+    rebinds the wrapper.
+  - *Smaller:* presets file not written atomically (corrupt → presets
+    lost); single-client WS lock race; Origin check vs non-loopback
+    `--listen`; iro.js loaded without SRI; systemd `ExecStart` / plist
+    paths not quoted/escaped; keycode labels that don't round-trip
+    (`-`, `,`, right-hand mods); `--ssh` with `--` or a non-POSIX remote
+    shell; macOS hotplug init failure unnoticed; keymap drops Alt/Ctrl
+    on Enter/Esc/Tab and misreads keycodes ≥ 0x2000; kitty/tmux raise
+    adapters (`--to`, `select-window`); raise helpers not killed on
+    timeout; `wrapper_state` writes not atomic.
 - **JetBrains: disambiguate multi-window same-IDE.** Two IntelliJ
   project windows share a bundle id, so the frontmost-app watcher
   promotes whichever wrapper it finds first. Process-tree walk

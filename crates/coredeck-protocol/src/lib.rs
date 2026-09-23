@@ -105,6 +105,10 @@ pub struct DisplayUpdate {
 pub const TAB_STATE_INACTIVE: u8 = 0;
 pub const TAB_STATE_STARTED: u8 = 1;
 pub const TAB_STATE_WORKING: u8 = 2;
+/// Idle, but background work (shells, monitors, agents, workflows) is still
+/// in flight and will wake the session. Firmware before 2.4 draws it like
+/// `TAB_STATE_STARTED`.
+pub const TAB_STATE_BACKGROUND: u8 = 3;
 
 /// Soft key type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,7 +502,10 @@ pub enum HostTerminalKind {
     /// the daemon suppresses idle alerts for sessions hosted in them
     /// (the user has no way to clear those alerts beyond F20).
     JetBrains,
+    /// Also what an older daemon decodes a newer wrapper's unrecognised
+    /// kind as (`serde(other)`), rather than rejecting its Register frame.
     #[default]
+    #[serde(other)]
     Unknown,
 }
 
@@ -667,7 +674,7 @@ pub struct WrapperTab {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     /// Firmware tab-state value for this row — one of `TAB_STATE_INACTIVE`,
-    /// `TAB_STATE_STARTED`, `TAB_STATE_WORKING`. Computed by the daemon from
+    /// `TAB_STATE_STARTED`, `TAB_STATE_WORKING`, `TAB_STATE_BACKGROUND`. Computed by the daemon from
     /// (a) whether a live `SessionState` backs this wrapper and (b) the
     /// session's `active` flag. Replaces the prior `active: bool` field —
     /// the bool collapsed INACTIVE and STARTED, leaving stale tabs on the

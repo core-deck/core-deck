@@ -345,7 +345,7 @@ fn shell_quote(s: &str) -> String {
 /// and `\` need escaping. The caller wraps the result in surrounding
 /// double quotes themselves.
 #[cfg(target_os = "macos")]
-fn applescript_quote(s: &str) -> String {
+pub(crate) fn applescript_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {

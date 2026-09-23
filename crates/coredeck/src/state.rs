@@ -69,6 +69,16 @@ pub struct SessionState {
     pub permission_mode: Option<String>,
     /// True between UserPromptSubmit and Stop — Claude is doing something.
     pub active: bool,
+    /// Whether a turn was running when compaction started (PreCompact).
+    /// SessionStart(compact) resumes "Thinking…" only then; a manual
+    /// `/compact` or a tail-of-turn auto-compact ends idle, since no
+    /// further hook would clear it.
+    pub active_before_compact: bool,
+    /// `type` of each in-flight background task ("shell", "monitor",
+    /// "subagent", "workflow", …) as of the last Stop hook, which is the
+    /// only one that reports them. Kept across turns: finishing work
+    /// wakes the session, and that turn's Stop brings the new list.
+    pub background_tasks: Vec<String>,
     pub context_window_percent: Option<f64>,
     pub cost_usd: Option<f64>,
     pub model: Option<String>,

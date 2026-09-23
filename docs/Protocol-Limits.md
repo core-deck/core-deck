@@ -15,7 +15,7 @@ Text fields are stored as C strings on the firmware. Values exceeding 128 bytes 
 | Limit | Value |
 |-------|-------|
 | Max tabs | **16** |
-| Tab state values | `0` = inactive, `1` = started, `2` = working |
+| Tab state values | `0` = inactive, `1` = started, `2` = working, `3` = idle with background work in flight (firmware < 2.4 draws it like `1`) |
 
 The `tabs` array in display updates can contain at most 16 entries. The `active` index must be within the array bounds.
 
