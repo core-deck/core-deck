@@ -1,5 +1,5 @@
 cask "coredeck" do
-  version "0.3.0"
+  version "0.4.0"
   sha256 "b4bac94c88d47d7b3cbb7c9ed6ecb326130117a75d7ab1a97cfc085f9f766cfb"
 
   url "https://github.com/core-deck/core-deck/releases/download/v#{version}/CoreDeck-#{version}.dmg"
