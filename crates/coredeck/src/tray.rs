@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use coredeck_protocol::{WrapperTab, WrapperTabList, TAB_STATE_WORKING};
 use tracing::{debug, error, info};
 use tray_icon::{
-    menu::{IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
+    menu::{IconMenuItem, IsMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem},
     TrayIcon as TrayIconHandle, TrayIconBuilder,
 };
 
@@ -46,6 +46,11 @@ pub enum DaemonTrayAction {
 pub struct DaemonTrayManager {
     tray: TrayIconHandle,
     icons: TrayIcons,
+    /// Last device presence, so the icon can be re-picked when the
+    /// update badge toggles.
+    presence: DevicePresence,
+    /// An "Update available" row is showing — the icon gets an orange dot.
+    update_badge: bool,
     menu: Menu,
     /// Disabled top-of-menu items showing the connected device.
     device_name_item: MenuItem,
@@ -67,10 +72,10 @@ pub struct DaemonTrayManager {
     /// "Update available: daemon vX.Y.Z" menu item — shown when the
     /// poll task in `updates.rs` finds a newer release tag than the
     /// running binary's `CARGO_PKG_VERSION`.
-    daemon_update_item: Option<MenuItem>,
+    daemon_update_item: Option<IconMenuItem>,
     /// "Update available: firmware vX.Y.Z" menu item — same idea, but
     /// against the device-reported firmware version.
-    firmware_update_item: Option<MenuItem>,
+    firmware_update_item: Option<IconMenuItem>,
     /// MenuId → release URL for the two update rows. Read by the menu
     /// event thread so a click on either row turns into an
     /// `OpenUrl(release_page)` action.
@@ -116,7 +121,7 @@ impl DaemonTrayManager {
         let tray = TrayIconBuilder::new()
             .with_menu(Box::new(menu.clone()))
             .with_tooltip("Core Deck Daemon - Disconnected")
-            .with_icon(icons.disconnected().clone())
+            .with_icon(icons.disconnected(false).clone())
             .build()
             .context("Failed to create tray icon")?;
 
@@ -177,6 +182,8 @@ impl DaemonTrayManager {
         let manager = Self {
             tray,
             icons,
+            presence: DevicePresence::None,
+            update_badge: false,
             menu,
             device_name_item,
             device_firmware_item,
@@ -241,6 +248,20 @@ impl DaemonTrayManager {
         decorate_tab_rows(&self.menu, DYNAMIC_OFFSET, &subtitles, &actives);
     }
 
+    /// Set the tray icon for the current presence, badged with an orange
+    /// dot while an update row is showing.
+    fn refresh_icon(&self) {
+        let icon = match self.presence {
+            DevicePresence::Active | DevicePresence::Available => {
+                self.icons.connected(self.update_badge)
+            }
+            DevicePresence::None => self.icons.disconnected(self.update_badge),
+        };
+        if let Err(e) = self.tray.set_icon(Some(icon.clone())) {
+            error!("Failed to set tray icon: {}", e);
+        }
+    }
+
     /// Update tray to reflect device presence state
     pub fn set_device_status(
         &mut self,
@@ -248,11 +269,8 @@ impl DaemonTrayManager {
         device_name: Option<&str>,
         firmware: Option<&str>,
     ) {
-        let icon = match presence {
-            DevicePresence::Active => self.icons.connected(),
-            DevicePresence::Available => self.icons.connected(),
-            DevicePresence::None => self.icons.disconnected(),
-        };
+        self.presence = presence;
+        self.refresh_icon();
 
         let tooltip = match presence {
             DevicePresence::Active => {
@@ -267,9 +285,6 @@ impl DaemonTrayManager {
             DevicePresence::None => "Core Deck Daemon - No device".to_string(),
         };
 
-        if let Err(e) = self.tray.set_icon(Some(icon.clone())) {
-            error!("Failed to set tray icon: {}", e);
-        }
         if let Err(e) = self.tray.set_tooltip(Some(&tooltip)) {
             error!("Failed to set tray tooltip: {}", e);
         }
@@ -340,10 +355,13 @@ impl DaemonTrayManager {
 
         // Re-insert from the base position upward. Each successful insert
         // shifts everything below by one, so we step the position too.
+        self.update_badge = daemon.is_some() || firmware.is_some();
+        self.refresh_icon();
+
         let mut pos = self.extras_base_position();
         if let Some(info) = daemon {
             let label = format!("Update available: daemon v{}", info.latest_version);
-            let item = MenuItem::new(label, true, None);
+            let item = IconMenuItem::new(label, true, update_dot_menu_icon(), None);
             if let Ok(mut map) = self.update_dispatch.lock() {
                 map.insert(item.id().clone(), info.html_url);
             }
@@ -356,7 +374,7 @@ impl DaemonTrayManager {
         }
         if let Some(info) = firmware {
             let label = format!("Update available: firmware v{}", info.latest_version);
-            let item = MenuItem::new(label, true, None);
+            let item = IconMenuItem::new(label, true, update_dot_menu_icon(), None);
             if let Ok(mut map) = self.update_dispatch.lock() {
                 map.insert(item.id().clone(), info.html_url);
             }
@@ -585,33 +603,107 @@ struct TrayIcons {
     disconnected_dark: tray_icon::Icon,
     connected_light: tray_icon::Icon,
     disconnected_light: tray_icon::Icon,
+    /// Same four, with the orange "update available" dot.
+    connected_dark_badged: tray_icon::Icon,
+    disconnected_dark_badged: tray_icon::Icon,
+    connected_light_badged: tray_icon::Icon,
+    disconnected_light_badged: tray_icon::Icon,
 }
 
 impl TrayIcons {
     fn new() -> Result<Self> {
+        let (connected_dark, connected_dark_badged) = load_icon_pair(CONNECTED_DARK_DATA)?;
+        let (disconnected_dark, disconnected_dark_badged) = load_icon_pair(DISCONNECTED_DARK_DATA)?;
+        let (connected_light, connected_light_badged) = load_icon_pair(CONNECTED_LIGHT_DATA)?;
+        let (disconnected_light, disconnected_light_badged) =
+            load_icon_pair(DISCONNECTED_LIGHT_DATA)?;
         Ok(Self {
-            connected_dark: load_icon_from_png(CONNECTED_DARK_DATA)?,
-            disconnected_dark: load_icon_from_png(DISCONNECTED_DARK_DATA)?,
-            connected_light: load_icon_from_png(CONNECTED_LIGHT_DATA)?,
-            disconnected_light: load_icon_from_png(DISCONNECTED_LIGHT_DATA)?,
+            connected_dark,
+            disconnected_dark,
+            connected_light,
+            disconnected_light,
+            connected_dark_badged,
+            disconnected_dark_badged,
+            connected_light_badged,
+            disconnected_light_badged,
         })
     }
 
-    fn connected(&self) -> &tray_icon::Icon {
-        if is_dark_mode() {
-            &self.connected_dark
-        } else {
-            &self.connected_light
+    fn connected(&self, badged: bool) -> &tray_icon::Icon {
+        match (is_dark_mode(), badged) {
+            (true, false) => &self.connected_dark,
+            (true, true) => &self.connected_dark_badged,
+            (false, false) => &self.connected_light,
+            (false, true) => &self.connected_light_badged,
         }
     }
 
-    fn disconnected(&self) -> &tray_icon::Icon {
-        if is_dark_mode() {
-            &self.disconnected_dark
-        } else {
-            &self.disconnected_light
+    fn disconnected(&self, badged: bool) -> &tray_icon::Icon {
+        match (is_dark_mode(), badged) {
+            (true, false) => &self.disconnected_dark,
+            (true, true) => &self.disconnected_dark_badged,
+            (false, false) => &self.disconnected_light,
+            (false, true) => &self.disconnected_light_badged,
         }
     }
+}
+
+/// Core Deck orange (the Agent button, `#FF6600`).
+const UPDATE_DOT_RGB: [u8; 3] = [0xFF, 0x66, 0x00];
+
+/// Paint a filled `UPDATE_DOT_RGB` circle into an RGBA buffer, with an
+/// optional transparent ring around it (`gap`) so it separates from
+/// whatever it overlaps. Edges are anti-aliased by pixel coverage.
+fn paint_dot(rgba: &mut [u8], width: u32, cx: f32, cy: f32, radius: f32, gap: f32) {
+    let height = rgba.len() as u32 / 4 / width;
+    for y in 0..height {
+        for x in 0..width {
+            let d = ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt();
+            let i = ((y * width + x) * 4) as usize;
+            let dot = (radius + 0.5 - d).clamp(0.0, 1.0);
+            if dot > 0.0 {
+                let a = rgba[i + 3] as f32 / 255.0;
+                for c in 0..3 {
+                    let under = rgba[i + c] as f32;
+                    rgba[i + c] = (UPDATE_DOT_RGB[c] as f32 * dot + under * (1.0 - dot)) as u8;
+                }
+                rgba[i + 3] = ((dot + a * (1.0 - dot)) * 255.0) as u8;
+            } else if gap > 0.0 {
+                // Knock the glyph out in a thin ring around the dot.
+                let clear = (radius + gap + 0.5 - d).clamp(0.0, 1.0);
+                rgba[i + 3] = (rgba[i + 3] as f32 * (1.0 - clear)) as u8;
+            }
+        }
+    }
+}
+
+/// Add the update dot to a tray icon: top-right corner, ~30% of the icon
+/// across, with a thin knocked-out ring so it reads over the glyph.
+fn badge_rgba(rgba: &mut [u8], width: u32) {
+    let r = width as f32 * 0.15;
+    let edge = width as f32 - r - 1.0;
+    paint_dot(rgba, width, edge, r + 1.0, r, width as f32 * 0.06);
+}
+
+/// Plain and orange-dot-badged versions of a tray icon PNG.
+fn load_icon_pair(data: &[u8]) -> Result<(tray_icon::Icon, tray_icon::Icon)> {
+    let (rgba, width, height) = decode_png_rgba(data)?;
+    let mut badged = rgba.clone();
+    badge_rgba(&mut badged, width);
+    let icon = |buf| {
+        tray_icon::Icon::from_rgba(buf, width, height)
+            .map_err(|e| anyhow::anyhow!("Failed to create icon: {}", e))
+    };
+    Ok((icon(rgba)?, icon(badged)?))
+}
+
+/// The orange dot shown on "Update available" menu rows.
+fn update_dot_menu_icon() -> Option<tray_icon::menu::Icon> {
+    const SIZE: u32 = 32;
+    let mut rgba = vec![0u8; (SIZE * SIZE * 4) as usize];
+    let c = SIZE as f32 / 2.0;
+    paint_dot(&mut rgba, SIZE, c, c, SIZE as f32 * 0.22, 0.0);
+    tray_icon::menu::Icon::from_rgba(rgba, SIZE, SIZE).ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -644,7 +736,7 @@ fn is_dark_mode() -> bool {
     true
 }
 
-fn load_icon_from_png(data: &[u8]) -> Result<tray_icon::Icon> {
+fn decode_png_rgba(data: &[u8]) -> Result<(Vec<u8>, u32, u32)> {
     let decoder = png::Decoder::new(std::io::Cursor::new(data));
     let mut reader = decoder.read_info()?;
     let mut buf = vec![0; reader.output_buffer_size()];
@@ -680,6 +772,26 @@ fn load_icon_from_png(data: &[u8]) -> Result<tray_icon::Icon> {
         }
     };
 
-    tray_icon::Icon::from_rgba(rgba_data, info.width, info.height)
-        .map_err(|e| anyhow::anyhow!("Failed to create icon: {}", e))
+    Ok((rgba_data, info.width, info.height))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn badge_is_an_orange_dot_in_the_top_right_corner() {
+        let (plain, width, _) = decode_png_rgba(CONNECTED_DARK_DATA).unwrap();
+        let mut badged = plain.clone();
+        badge_rgba(&mut badged, width);
+        let px = |buf: &[u8], x: u32, y: u32| {
+            let i = ((y * width + x) * 4) as usize;
+            [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
+        };
+        let r = width as f32 * 0.15;
+        let (cx, cy) = ((width as f32 - r - 1.0) as u32, (r + 1.0) as u32);
+        assert_eq!(px(&badged, cx, cy), [0xFF, 0x66, 0x00, 0xFF]);
+        // Away from the corner the icon is untouched.
+        assert_eq!(px(&badged, 2, width - 3), px(&plain, 2, width - 3));
+    }
 }
