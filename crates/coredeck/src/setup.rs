@@ -419,6 +419,7 @@ fn tilde(path: &Path) -> String {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
