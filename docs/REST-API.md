@@ -429,7 +429,7 @@ Setup status for the settings page's Setup section.
 
 - `cli.state` — `"linked"` (symlinks made by `POST /api/setup/cli`), `"installed"` (provided by Homebrew or the Linux `install.sh`), or `"missing"`.
 - `alias` — the line to add to the shell rc and whether `rc_file` already mentions `coredeck-claude` (a heuristic; it doesn't count toward `complete`).
-- `complete` — hooks, command-line tools and start-at-login are all in place; the tray shows "⚠ Finish setup…" (opening `/settings#setup`) while it's false.
+- `complete` — hooks, command-line tools and start-at-login are all in place; the tray shows "⚠ Finish setup…" (opening `/settings#setup`) while it's false. The daemon re-checks every 30 s; this request also updates the tray row, and the `coredeck setup` / `hooks` / `install` / `uninstall` commands send it to a running daemon so the row follows at once.
 
 ---
 

@@ -41,6 +41,13 @@ The daemon hosts every user-facing surface:
 
 ## Done (recent highlights)
 
+- **0.4.3 tray fixes.** "Finish setup…" follows changes made outside the
+  settings page (periodic re-check; `coredeck setup` nudges the running
+  daemon) — after a brew upgrade it stayed until restart. Setup rows show
+  only the actions that apply. Session rows update in place, so the
+  1 Hz tick no longer steals the menu highlight. The duplicate startup
+  DeviceAvailable no longer downgrades the tray to "(idle)" /
+  "Firmware —".
 - **Setup from the settings page (0.4.2).** The Hooks section became
   Setup: hooks, command-line tools (links into `~/.local/bin` when
   Homebrew/install.sh didn't provide them), the shell alias line with a
