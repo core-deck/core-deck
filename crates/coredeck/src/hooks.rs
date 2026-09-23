@@ -1527,6 +1527,7 @@ async fn handle_session_end(state: &DaemonState, event: &HookEvent) {
     let mut claude = state.claude_state.write().await;
     claude.sessions.remove(sid);
     claude.pending_permissions.remove(sid);
+    claude.recent_sessions.retain(|s| s != sid);
     if claude.active_session_id.as_deref() == Some(sid.as_str()) {
         claude.active_session_id = None;
     }

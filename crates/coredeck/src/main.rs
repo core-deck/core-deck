@@ -771,6 +771,19 @@ async fn run_async(
                     });
                     continue;
                 }
+                // Claude-button double-tap (firmware emits KC_F23 /
+                // 0x0072) — swap to the previously active session and
+                // raise its terminal. Also ahead of the alert dispatcher:
+                // it's navigation, so it must not resolve or clear alerts.
+                if *keycode == keymap::KEYCODE_SWAP_SESSION {
+                    if let Some(sid) = wrapper::swap_to_previous_session(&state_for_events).await {
+                        let st = Arc::clone(&state_for_events);
+                        tokio::spawn(async move {
+                            raise::raise_for_session(&st, &sid).await;
+                        });
+                    }
+                    continue;
+                }
             }
 
             if matches!(

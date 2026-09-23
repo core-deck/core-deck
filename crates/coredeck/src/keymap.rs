@@ -222,6 +222,11 @@ pub const KEYCODE_F20: u16 = 0x006F;
 /// currently-focused session's cwd."
 pub const KEYCODE_FRESH_SESSION: u16 = 0x0073;
 
+/// QMK keycode for F23. The firmware emits this instead of F20 when the
+/// Claude button is double-tapped — the daemon treats it as "swap to
+/// the previously active session" (toggles between the two most recent).
+pub const KEYCODE_SWAP_SESSION: u16 = 0x0072;
+
 /// Knob press+rotate clockwise → cycle to NEXT wrapper.
 /// Firmware encoder Layer 1 (encoder held) CW rotation emits `LCTL(KC_TAB)`.
 /// Daemon special-cases this so it doesn't fall through to the wrapper PTY

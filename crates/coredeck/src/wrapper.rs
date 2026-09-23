@@ -206,6 +206,7 @@ async fn handle_wrapper_ws(socket: WebSocket, state: Arc<DaemonState>) {
         match msg {
             Ok(Message::Text(t)) => match serde_json::from_str::<WrapperToDaemon>(t.as_str()) {
                 Ok(WrapperToDaemon::FocusChanged { focused, .. }) => {
+                    debug!(wrapper = %wrapper_id, focused, "wrapper focus changed");
                     {
                         let mut wrappers = state.wrappers.write().await;
                         if let Some(w) = wrappers.get_mut(&wrapper_id) {
@@ -1129,6 +1130,39 @@ pub async fn cycle_active(state: &Arc<DaemonState>, step: i32) {
     }
 }
 
+/// Make the most recently active *other* session active again, so
+/// repeated calls toggle between the two most recent sessions (Claude
+/// button double-tap). Walks `ClaudeState::recent_sessions`, skipping
+/// the current session and any session no wrapper is bound to anymore.
+/// Returns the session switched to, so the caller can raise its
+/// terminal; `None` when there is nothing to switch to.
+pub async fn swap_to_previous_session(state: &Arc<DaemonState>) -> Option<String> {
+    let (target, current, recent) = {
+        let wrappers = state.wrappers.read().await;
+        let claude = state.claude_state.read().await;
+        let target = claude.previous_session(|sid| {
+            wrappers
+                .values()
+                .any(|w| w.session_id.as_deref() == Some(sid))
+        });
+        (
+            target,
+            claude.active_session_id.clone(),
+            claude.recent_sessions.clone(),
+        )
+    };
+    let Some(sid) = target else {
+        debug!(
+            ?current,
+            ?recent,
+            "swap_to_previous_session: no previous live session"
+        );
+        return None;
+    };
+    info!(from = ?current, to = %sid, ?recent, "swapping to previous session");
+    set_active_for_session(state, &sid).await.then_some(sid)
+}
+
 /// Mark `wrapper_id`'s bound session as active (if any) and emit a tab list update.
 pub async fn set_active_wrapper(state: &Arc<DaemonState>, wrapper_id: &str) -> Result<(), String> {
     let session_id = {
@@ -1139,6 +1173,7 @@ pub async fn set_active_wrapper(state: &Arc<DaemonState>, wrapper_id: &str) -> R
         }
     };
     if let Some(sid) = session_id {
+        debug!(session = %sid, wrapper = %wrapper_id, "active session set");
         let mut claude = state.claude_state.write().await;
         claude.set_active_session(&sid);
     } else {

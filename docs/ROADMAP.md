@@ -239,6 +239,15 @@ The daemon hosts every user-facing surface:
   derived from `current_exe()`'s sibling so dev builds running out
   of `target/debug/` spawn the same binary that started the daemon
   rather than whatever's on `PATH`.
+- **Claude-button double-tap swaps to the previous session.**
+  Firmware emits `KC_F23` instead of F20 when the second tap lands
+  within 400 ms (a lone tap's F20 is held back for that window, so a
+  double-tap never also raises/focuses). `ClaudeState` keeps an MRU
+  list (`recent_sessions`, updated by `set_active_session`, pruned on
+  SessionEnd); the daemon activates the first live non-current entry
+  and raises its terminal, so repeated double-taps toggle between the
+  two most recent sessions. Handled ahead of the alert dispatcher —
+  navigation never resolves or clears an alert.
 - **JetBrains terminal support** (IntelliJ, Android Studio, PyCharm,
   GoLand, …). Wrapper detects the embedded JediTerm via
   `$TERMINAL_EMULATOR=JetBrains-JediTerm` and stuffs

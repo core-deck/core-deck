@@ -140,10 +140,18 @@ pub struct SubagentRow {
 pub struct ClaudeState {
     pub sessions: std::collections::HashMap<String, SessionState>,
     pub active_session_id: Option<String>,
+    /// Session ids in most-recently-activated order, front = latest.
+    /// Maintained by `set_active_session`; the Claude-button double-tap
+    /// swaps to the first entry that isn't the current session and still
+    /// has a live wrapper. Ended sessions are pruned on SessionEnd.
+    pub recent_sessions: Vec<String>,
     /// Pending permission request details, keyed by Claude session_id.
     /// Stored on PermissionRequest, consumed on Notification(permission_prompt).
     pub pending_permissions: std::collections::HashMap<String, PendingPermission>,
 }
+
+/// Cap on `ClaudeState::recent_sessions` — matches the device's tab limit.
+const RECENT_SESSIONS_MAX: usize = 16;
 
 impl ClaudeState {
     /// Get-or-insert a session entry and bump its recency timestamp.
@@ -171,6 +179,20 @@ impl ClaudeState {
     /// warranted (focus event, manual selection).
     pub fn set_active_session(&mut self, session_id: &str) {
         self.active_session_id = Some(session_id.to_string());
+        self.recent_sessions.retain(|s| s != session_id);
+        self.recent_sessions.insert(0, session_id.to_string());
+        self.recent_sessions.truncate(RECENT_SESSIONS_MAX);
+    }
+
+    /// Most recently active session other than the current one for which
+    /// `is_live` holds (i.e. a wrapper is still bound to it) — the target
+    /// of the Claude-button double-tap swap.
+    pub fn previous_session(&self, is_live: impl Fn(&str) -> bool) -> Option<String> {
+        let current = self.active_session_id.as_deref();
+        self.recent_sessions
+            .iter()
+            .find(|sid| Some(sid.as_str()) != current && is_live(sid))
+            .cloned()
     }
 }
 
@@ -260,4 +282,71 @@ pub enum TrayUpdate {
 pub struct UpdateInfo {
     pub latest_version: String,
     pub html_url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ClaudeState, RECENT_SESSIONS_MAX};
+
+    #[test]
+    fn set_active_session_keeps_mru_order() {
+        let mut claude = ClaudeState::default();
+        claude.set_active_session("a");
+        claude.set_active_session("b");
+        claude.set_active_session("c");
+        assert_eq!(claude.recent_sessions, ["c", "b", "a"]);
+
+        // Re-activating moves to the front without duplicating.
+        claude.set_active_session("a");
+        assert_eq!(claude.recent_sessions, ["a", "c", "b"]);
+        claude.set_active_session("a");
+        assert_eq!(claude.recent_sessions, ["a", "c", "b"]);
+        assert_eq!(claude.active_session_id.as_deref(), Some("a"));
+    }
+
+    /// Simulates what `swap_to_previous_session` does on every double-tap.
+    fn swap(claude: &mut ClaudeState, live: &[&str]) -> Option<String> {
+        let target = claude.previous_session(|sid| live.contains(&sid))?;
+        claude.set_active_session(&target);
+        Some(target)
+    }
+
+    #[test]
+    fn repeated_swaps_toggle_between_two_latest() {
+        let mut claude = ClaudeState::default();
+        let live = ["a", "b", "c"];
+        claude.set_active_session("a");
+        claude.set_active_session("b");
+        claude.set_active_session("c");
+        for _ in 0..3 {
+            assert_eq!(swap(&mut claude, &live).as_deref(), Some("b"));
+            assert_eq!(swap(&mut claude, &live).as_deref(), Some("c"));
+        }
+    }
+
+    #[test]
+    fn swap_skips_dead_sessions_and_needs_a_second_one() {
+        let mut claude = ClaudeState::default();
+        claude.set_active_session("a");
+        assert_eq!(swap(&mut claude, &["a"]), None);
+
+        claude.set_active_session("gone");
+        claude.set_active_session("b");
+        // "gone" has no wrapper anymore → skipped in favour of "a".
+        assert_eq!(swap(&mut claude, &["a", "b"]).as_deref(), Some("a"));
+        assert_eq!(swap(&mut claude, &["a", "b"]).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn recent_sessions_is_capped() {
+        let mut claude = ClaudeState::default();
+        for i in 0..RECENT_SESSIONS_MAX + 4 {
+            claude.set_active_session(&i.to_string());
+        }
+        assert_eq!(claude.recent_sessions.len(), RECENT_SESSIONS_MAX);
+        assert_eq!(
+            claude.recent_sessions[0],
+            (RECENT_SESSIONS_MAX + 3).to_string()
+        );
+    }
 }
