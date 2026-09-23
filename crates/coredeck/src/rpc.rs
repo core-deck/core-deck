@@ -278,11 +278,10 @@ pub async fn get_version(State(state): State<Arc<DaemonState>>) -> impl IntoResp
 }
 
 /// Re-evaluate setup and update the tray's "Finish setup…" row.
-async fn refresh_setup_row(state: &Arc<DaemonState>) {
-    let complete = tokio::task::spawn_blocking(|| crate::setup::status().complete)
-        .await
-        .unwrap_or(false);
-    state.send_tray_update(crate::state::TrayUpdate::SetupComplete(complete));
+pub(crate) async fn refresh_setup_row(state: &Arc<DaemonState>) {
+    if let Ok(complete) = tokio::task::spawn_blocking(|| crate::setup::status().complete).await {
+        state.send_tray_update(crate::state::TrayUpdate::SetupComplete(complete));
+    }
 }
 
 /// Run one setup step off the async runtime (file writes, `launchctl`),
@@ -303,9 +302,14 @@ where
 
 /// GET /api/setup — hooks, command-line tools, shell alias and
 /// start-at-login status for the settings page's Setup section.
-pub async fn get_setup_status() -> impl IntoResponse {
+pub async fn get_setup_status(State(state): State<Arc<DaemonState>>) -> impl IntoResponse {
     match tokio::task::spawn_blocking(crate::setup::status).await {
-        Ok(status) => Json(status).into_response(),
+        Ok(status) => {
+            // Opening the page (or `coredeck setup` nudging us) also
+            // corrects the tray row.
+            state.send_tray_update(crate::state::TrayUpdate::SetupComplete(status.complete));
+            Json(status).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError {

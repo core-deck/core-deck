@@ -175,10 +175,12 @@ fn main() {
     match cli.command {
         Some(Commands::Install) => {
             install_launchd(&cli.listen);
+            nudge_daemon_setup(&cli.listen);
             return;
         }
         Some(Commands::Uninstall) => {
             uninstall_launchd();
+            nudge_daemon_setup(&cli.listen);
             return;
         }
         Some(Commands::Hooks { action }) => {
@@ -186,12 +188,16 @@ fn main() {
                 HooksAction::Install => hooks::install_claude_hooks(&cli.listen),
                 HooksAction::Uninstall => hooks::uninstall_claude_hooks(),
             }
+            nudge_daemon_setup(&cli.listen);
             return;
         }
         Some(Commands::Setup { remote }) => {
             match remote {
                 Some(host) => run_remote_setup(&host, &cli.listen),
-                None => run_setup(&cli.listen),
+                None => {
+                    run_setup(&cli.listen);
+                    nudge_daemon_setup(&cli.listen);
+                }
             }
             return;
         }
@@ -621,6 +627,18 @@ async fn run_async(
         updates::run_update_checker(updates_state).await;
     });
 
+    // Re-check setup periodically so changes made outside the settings
+    // page — `coredeck setup`, or `brew upgrade` removing the launch
+    // agent — reach the tray's "Finish setup…" row.
+    let setup_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            rpc::refresh_setup_row(&setup_state).await;
+        }
+    });
+
     // macOS-only: poll the frontmost app and promote the matching
     // JetBrains wrapper. JediTerm doesn't emit OSC 1004, so without
     // this the device's active tab can't follow the user when they
@@ -695,13 +713,25 @@ async fn run_async(
                     updates::reevaluate(&state_for_events).await;
                 }
                 DaemonEvent::DeviceAvailable { device_name } => {
+                    // At startup the device is announced twice (the initial
+                    // enumeration and IOKit's arrival notification for an
+                    // already-present device), and wrappers reconnecting can
+                    // open it before either is handled. Once it's open,
+                    // HidConnected has set the tray; announcing "available"
+                    // again would downgrade the row to "(idle)" and blank the
+                    // firmware version.
+                    let already_open = state_for_events.hid.lock().await.is_connected();
                     {
                         let mut status = state_for_events.device_status.write().await;
                         status.available = true;
-                        status.device_name = Some(device_name.clone());
+                        if !already_open {
+                            status.device_name = Some(device_name.clone());
+                        }
                     }
-                    state_for_events
-                        .send_tray_update(TrayUpdate::DeviceAvailable(device_name.clone()));
+                    if !already_open {
+                        state_for_events
+                            .send_tray_update(TrayUpdate::DeviceAvailable(device_name.clone()));
+                    }
                     // Open HID immediately and keep it open for the
                     // daemon's lifetime — no GUI app means there's
                     // nothing to hand it off to, and the open/close
@@ -1137,24 +1167,31 @@ fn claim_listen_addr(addr: &str) -> std::net::TcpListener {
 
 /// True if a CoreDeck daemon answers `GET /api/status` on `addr`.
 fn coredeck_daemon_answers(addr: &str) -> bool {
+    daemon_get(addr, "/api/status").is_some_and(|r| r.contains("\"daemon_version\""))
+}
+
+/// Setup changed from the command line: have a running daemon re-check
+/// it (GET /api/setup refreshes the tray) so its "Finish setup…" row
+/// updates now rather than on the next periodic check. Best effort.
+fn nudge_daemon_setup(addr: &str) {
+    let _ = daemon_get(addr, "/api/setup");
+}
+
+/// Minimal blocking HTTP GET against `addr`, returning the raw response
+/// (headers and body), or `None` when nothing answers.
+fn daemon_get(addr: &str, path: &str) -> Option<String> {
     use std::io::{Read, Write};
     use std::net::ToSocketAddrs;
     let timeout = std::time::Duration::from_secs(1);
-    let Some(sock) = addr.to_socket_addrs().ok().and_then(|mut a| a.next()) else {
-        return false;
-    };
-    let Ok(mut stream) = std::net::TcpStream::connect_timeout(&sock, timeout) else {
-        return false;
-    };
+    let sock = addr.to_socket_addrs().ok()?.next()?;
+    let mut stream = std::net::TcpStream::connect_timeout(&sock, timeout).ok()?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(timeout));
-    let request = format!("GET /api/status HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-    if stream.write_all(request.as_bytes()).is_err() {
-        return false;
-    }
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
     let mut response = String::new();
     let _ = stream.take(64 * 1024).read_to_string(&mut response);
-    response.contains("\"daemon_version\"")
+    Some(response)
 }
 
 /// launchd and Finder start the daemon with a minimal PATH

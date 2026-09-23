@@ -56,9 +56,13 @@ pub struct DaemonTrayManager {
     /// Disabled top-of-menu items showing the connected device.
     device_name_item: MenuItem,
     device_firmware_item: MenuItem,
-    /// Dynamic per-wrapper tab entries — replaced on every `set_tabs` call.
+    /// Dynamic per-wrapper tab entries — rebuilt when the session list
+    /// changes, updated in place otherwise.
     /// Kept owned here so their menu IDs stay valid for click dispatch.
     tab_items: Vec<MenuItem>,
+    /// What each entry of `tab_items` currently shows, so ticks that
+    /// change only text update the rows in place.
+    tab_rows: Vec<TabRow>,
     /// Disabled placeholder shown when no wrappers are connected.
     empty_placeholder: Option<MenuItem>,
     /// MenuId → wrapper_id, used by the event thread to translate clicks
@@ -189,6 +193,7 @@ impl DaemonTrayManager {
             device_name_item,
             device_firmware_item,
             tab_items: Vec::new(),
+            tab_rows: Vec::new(),
             empty_placeholder: Some(empty),
             tab_dispatch,
             setup_item: None,
@@ -201,13 +206,57 @@ impl DaemonTrayManager {
         Ok((manager, action_rx))
     }
 
-    /// Replace the dynamic tab section with entries from `list`. The
-    /// active wrapper is marked with a leading "● ". When the list is
-    /// empty, restore a disabled "No Claude sessions" placeholder.
+    /// Show `list` in the dynamic tab section, the active wrapper marked
+    /// with a dot. When the list is empty, restore a disabled "No Claude
+    /// sessions" placeholder.
     pub fn set_tabs(&mut self, list: &WrapperTabList) {
         // Insert below the device-info section:
         // [about, name, firmware, separator, ...].
         const DYNAMIC_OFFSET: usize = 4;
+
+        let rows: Vec<TabRow> = list
+            .tabs
+            .iter()
+            .map(|tab| {
+                let (title, subtitle, active) =
+                    format_tab_menu_label(tab, list.active_wrapper_id.as_deref());
+                TabRow {
+                    wrapper_id: tab.wrapper_id.clone(),
+                    title,
+                    subtitle,
+                    active,
+                }
+            })
+            .collect();
+
+        if rows.is_empty() && self.tab_rows.is_empty() && self.empty_placeholder.is_some() {
+            return;
+        }
+
+        // Same sessions in the same order: update the rows in place. The
+        // 1 Hz ticker refreshes elapsed times while the menu may be open,
+        // and removing/re-inserting items there makes AppKit move the
+        // highlight off the hovered item onto a session row, misdrawn.
+        let same_sessions = !rows.is_empty()
+            && rows.len() == self.tab_rows.len()
+            && rows
+                .iter()
+                .zip(&self.tab_rows)
+                .all(|(new, old)| new.wrapper_id == old.wrapper_id);
+        if same_sessions {
+            let mut changed = Vec::new();
+            for (i, (new, old)) in rows.iter().zip(&self.tab_rows).enumerate() {
+                if new.title != old.title {
+                    self.tab_items[i].set_text(&new.title);
+                }
+                if new.subtitle != old.subtitle || new.active != old.active {
+                    changed.push((DYNAMIC_OFFSET + i, new.subtitle.as_deref(), new.active));
+                }
+            }
+            decorate_tab_rows(&self.menu, &changed);
+            self.tab_rows = rows;
+            return;
+        }
 
         // Remove existing dynamic items (placeholder or previous tabs).
         if let Some(item) = self.empty_placeholder.take() {
@@ -216,12 +265,13 @@ impl DaemonTrayManager {
         for item in self.tab_items.drain(..) {
             let _ = self.menu.remove(&item as &dyn IsMenuItem);
         }
+        self.tab_rows.clear();
         if let Ok(mut map) = self.tab_dispatch.lock() {
             map.clear();
         }
 
         // Rebuild from scratch.
-        if list.tabs.is_empty() {
+        if rows.is_empty() {
             let placeholder = MenuItem::new("No Claude sessions", false, None);
             if let Err(e) = self.menu.insert(&placeholder, DYNAMIC_OFFSET) {
                 error!("Failed to insert placeholder: {}", e);
@@ -230,23 +280,20 @@ impl DaemonTrayManager {
             return;
         }
 
-        let mut subtitles: Vec<Option<String>> = Vec::with_capacity(list.tabs.len());
-        let mut actives: Vec<bool> = Vec::with_capacity(list.tabs.len());
-        for (idx, tab) in list.tabs.iter().enumerate() {
-            let (title, subtitle, is_active) =
-                format_tab_menu_label(tab, list.active_wrapper_id.as_deref());
-            let item = MenuItem::new(title, true, None);
+        let mut decorations = Vec::with_capacity(rows.len());
+        for (idx, row) in rows.iter().enumerate() {
+            let item = MenuItem::new(&row.title, true, None);
             if let Ok(mut map) = self.tab_dispatch.lock() {
-                map.insert(item.id().clone(), tab.wrapper_id.clone());
+                map.insert(item.id().clone(), row.wrapper_id.clone());
             }
             if let Err(e) = self.menu.insert(&item, DYNAMIC_OFFSET + idx) {
                 error!("Failed to insert tab item {}: {}", idx, e);
             }
             self.tab_items.push(item);
-            subtitles.push(subtitle);
-            actives.push(is_active);
+            decorations.push((DYNAMIC_OFFSET + idx, row.subtitle.as_deref(), row.active));
         }
-        decorate_tab_rows(&self.menu, DYNAMIC_OFFSET, &subtitles, &actives);
+        decorate_tab_rows(&self.menu, &decorations);
+        self.tab_rows = rows;
     }
 
     /// Set the tray icon for the current presence, badged with an orange
@@ -416,6 +463,14 @@ impl DaemonTrayManager {
     }
 }
 
+/// One session row as shown in the menu.
+struct TabRow {
+    wrapper_id: String,
+    title: String,
+    subtitle: Option<String>,
+    active: bool,
+}
+
 /// Build the (title, subtitle, is_active) tuple for a single tab row.
 /// The title is just the session name — alignment between rows comes
 /// from NSMenuItem's built-in state column (a checkmark for the active
@@ -440,9 +495,9 @@ fn format_tab_menu_label(
     (name, subtitle, is_active)
 }
 
-/// Decorate each tab row's NSMenuItem with a subtitle (macOS 14.4+'s
-/// `setSubtitle:`) and a state checkmark (`setState:` for the active
-/// row). The state column gives consistent left-alignment across rows
+/// Decorate tab rows' NSMenuItems — `(menu index, subtitle, active)`
+/// each — with a subtitle (macOS 14.4+'s `setSubtitle:`) and a state
+/// indicator (`setState:` for the active row). The state column gives consistent left-alignment across rows
 /// without needing a leading bullet character in the title — important
 /// because proportional menu fonts mean a literal "● " vs. "  " prefix
 /// don't line up to the same x. Walks the underlying NSMenu via
@@ -450,7 +505,7 @@ fn format_tab_menu_label(
 /// supported, the subtitle is dropped but the state column still
 /// works. No-op on non-macOS.
 #[cfg(target_os = "macos")]
-fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], actives: &[bool]) {
+fn decorate_tab_rows(menu: &Menu, rows: &[(usize, Option<&str>, bool)]) {
     use cocoa::base::{id, nil};
     use cocoa::foundation::{NSPoint, NSRect, NSSize, NSString};
     use objc::{class, msg_send, sel, sel_impl};
@@ -459,6 +514,9 @@ fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], a
     // is required even though we never name `ContextMenu` itself.
     use tray_icon::menu::ContextMenu;
 
+    if rows.is_empty() {
+        return;
+    }
     let ptr = menu.ns_menu();
     if ptr.is_null() {
         return;
@@ -489,8 +547,9 @@ fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], a
         //   - `tall`: 14×32 with the dot biased toward the top, used
         //     for two-line rows (title + subtitle). AppKit centers the
         //     state image vertically in the row; the upward bias inside
-        //     the canvas lands the dot at the title's baseline rather
-        //     than between the lines.
+        //     the canvas lands the dot on the title line (centered on
+        //     its lowercase letters, like a bullet) rather than between
+        //     the lines.
         //   - `short`: 14×14 with the dot centered, used for one-line
         //     rows. AppKit centers it; we just want a centered dot.
         // Without the split, single-line rows would inherit the
@@ -499,8 +558,7 @@ fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], a
         let tall = make_active_indicator_image(IndicatorVariant::TwoLine);
         let short = make_active_indicator_image(IndicatorVariant::OneLine);
 
-        for (i, (sub, on)) in subtitles.iter().zip(actives.iter()).enumerate() {
-            let idx = offset + i;
+        for &(idx, sub, on) in rows {
             if idx >= count {
                 break;
             }
@@ -508,17 +566,16 @@ fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], a
             if item == nil {
                 continue;
             }
-            let state: i64 = if *on { STATE_ON } else { STATE_OFF };
+            let state: i64 = if on { STATE_ON } else { STATE_OFF };
             let _: () = msg_send![item, setState: state];
-            let has_subtitle = sub.as_deref().map(|s| !s.is_empty()).unwrap_or(false);
+            let has_subtitle = sub.is_some_and(|s| !s.is_empty());
             let on_image = if has_subtitle && subtitle_supported {
                 tall
             } else {
                 short
             };
-            // Setting the on-state image on every row (not just active
-            // ones) so subsequent state flips reuse the same indicator
-            // without another round through this function.
+            // Set on inactive rows too: which variant fits depends on
+            // the subtitle, not on the state.
             let _: () = msg_send![item, setOnStateImage: on_image];
 
             if subtitle_supported {
@@ -526,6 +583,8 @@ fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], a
                     Some(s) if !s.is_empty() => {
                         let ns: id = NSString::alloc(nil).init_str(s);
                         let _: () = msg_send![item, setSubtitle: ns];
+                        // `subtitle` is a copy property; drop our +1.
+                        let _: () = msg_send![ns, release];
                     }
                     _ => {
                         let _: () = msg_send![item, setSubtitle: nil];
@@ -554,11 +613,12 @@ fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], a
         let image: id = msg_send![nsimage_class, alloc];
 
         // Image coords are non-flipped (Y-up). For TwoLine we use a
-        // tall canvas (32) and bias the dot near the top so AppKit's
-        // vertical centering lands it at the title's baseline; for
-        // OneLine we use a square 14×14 canvas with the dot centered.
+        // tall canvas (32) and bias the dot 6pt above center so AppKit's
+        // vertical centering lands it on the title line (8pt put it at
+        // cap height, visibly above the lowercase text); for OneLine we
+        // use a square 14×14 canvas with the dot centered.
         let (size, circle_origin) = match variant {
-            IndicatorVariant::TwoLine => (NSSize::new(14.0, 32.0), NSPoint::new(3.0, 20.0)),
+            IndicatorVariant::TwoLine => (NSSize::new(14.0, 32.0), NSPoint::new(3.0, 18.0)),
             IndicatorVariant::OneLine => (NSSize::new(14.0, 14.0), NSPoint::new(3.0, 3.0)),
         };
         let image: id = msg_send![image, initWithSize: size];
@@ -583,13 +643,7 @@ fn decorate_tab_rows(menu: &Menu, offset: usize, subtitles: &[Option<String>], a
 }
 
 #[cfg(not(target_os = "macos"))]
-fn decorate_tab_rows(
-    _menu: &Menu,
-    _offset: usize,
-    _subtitles: &[Option<String>],
-    _actives: &[bool],
-) {
-}
+fn decorate_tab_rows(_menu: &Menu, _rows: &[(usize, Option<&str>, bool)]) {}
 
 // ── Tray icons ─────────────────────────────────────────────────────
 

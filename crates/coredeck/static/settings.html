@@ -313,14 +313,14 @@
     <div class="row">
       <label>Claude Code hooks</label>
       <span class="value setup-state" id="hooks-status"><span class="pill warn">checking…</span></span>
-      <button id="hooks-install" class="primary">Install</button>
-      <button id="hooks-uninstall" class="danger">Uninstall</button>
+      <button id="hooks-install" class="primary" hidden>Install</button>
+      <button id="hooks-uninstall" class="danger" hidden>Uninstall</button>
     </div>
     <div class="row">
       <label>Command-line tools</label>
       <span class="value setup-state" id="cli-status"></span>
-      <button id="cli-install" class="primary">Install</button>
-      <button id="cli-uninstall" class="danger">Uninstall</button>
+      <button id="cli-install" class="primary" hidden>Install</button>
+      <button id="cli-uninstall" class="danger" hidden>Uninstall</button>
     </div>
     <div class="row">
       <label>Shell alias</label>
@@ -334,8 +334,8 @@
     <div class="row">
       <label>Start at login</label>
       <span class="value setup-state" id="autostart-status"></span>
-      <button id="autostart-install" class="primary">Enable</button>
-      <button id="autostart-uninstall" class="danger">Disable</button>
+      <button id="autostart-install" class="primary" hidden>Enable</button>
+      <button id="autostart-uninstall" class="danger" hidden>Disable</button>
     </div>
     <div class="row">
       <span style="color:var(--muted);font-size:12px">
@@ -536,18 +536,25 @@ function setupPill(kind, text) {
 async function refreshSetup() {
   try {
     const s = await api('GET', '/api/setup');
+    // Each row offers only the actions that apply to its current state.
     $('#hooks-status').innerHTML = s.hooks
       ? setupPill('ok', 'installed')
       : setupPill('warn', 'not installed');
-    $('#hooks-uninstall').disabled = !s.hooks;
+    const hooksInstall = $('#hooks-install');
+    hooksInstall.hidden = false;
+    hooksInstall.textContent = s.hooks ? 'Reinstall' : 'Install';
+    hooksInstall.classList.toggle('primary', !s.hooks);
+    $('#hooks-uninstall').hidden = !s.hooks;
 
     const cli = s.cli;
     $('#cli-status').innerHTML =
       cli.state === 'linked' ? setupPill('ok', `linked in ${cli.link_dir}`)
       : cli.state === 'installed' ? setupPill('ok', `installed · ${cli.path}`)
       : setupPill('warn', 'not installed');
-    $('#cli-install').disabled = cli.state !== 'missing';
-    $('#cli-uninstall').disabled = cli.state !== 'linked';
+    // "installed" means Homebrew or install.sh put the tools on PATH —
+    // nothing for this page to add or remove.
+    $('#cli-install').hidden = cli.state !== 'missing';
+    $('#cli-uninstall').hidden = cli.state !== 'linked';
 
     $('#alias-line').textContent = s.alias.line;
     $('#alias-status').textContent = s.alias.found
@@ -557,8 +564,8 @@ async function refreshSetup() {
     $('#autostart-status').innerHTML = s.autostart.installed
       ? setupPill('ok', 'enabled')
       : setupPill('warn', 'off');
-    $('#autostart-install').disabled = s.autostart.installed;
-    $('#autostart-uninstall').disabled = !s.autostart.installed;
+    $('#autostart-install').hidden = s.autostart.installed;
+    $('#autostart-uninstall').hidden = !s.autostart.installed;
   } catch (e) {
     $('#hooks-status').innerHTML = setupPill('bad', e.message);
   }
@@ -573,8 +580,9 @@ async function setupAction(method, path, done, confirmText) {
   }
   refreshSetup();
 }
-$('#hooks-install').addEventListener('click', () =>
-  setupAction('POST', '/api/hooks/install', 'hooks installed'));
+$('#hooks-install').addEventListener('click', e =>
+  setupAction('POST', '/api/hooks/install',
+    e.currentTarget.textContent === 'Reinstall' ? 'hooks reinstalled' : 'hooks installed'));
 $('#hooks-uninstall').addEventListener('click', () =>
   setupAction('POST', '/api/hooks/uninstall', 'hooks removed',
     'Remove CoreDeck entries from ~/.claude/settings.json?'));
