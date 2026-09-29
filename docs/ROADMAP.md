@@ -41,7 +41,7 @@ The daemon hosts every user-facing surface:
 
 ## Done (recent highlights)
 
-- **Background kinds match Claude Code's footer.** Artifact watches
+- **Background kinds match Claude Code's footer (0.4.4).** Artifact watches
   (reported by the Stop hook as "monitor") show as "artifact" and don't
   alone mark a session Background; Monitor-tool commands (reported as
   "shell") count as monitors, by the task id their PostToolUse returned.
