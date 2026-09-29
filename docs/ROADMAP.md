@@ -41,6 +41,10 @@ The daemon hosts every user-facing surface:
 
 ## Done (recent highlights)
 
+- **Background kinds match Claude Code's footer.** Artifact watches
+  (reported by the Stop hook as "monitor") show as "artifact" and don't
+  alone mark a session Background; Monitor-tool commands (reported as
+  "shell") count as monitors, by the task id their PostToolUse returned.
 - **0.4.3 tray fixes.** "Finish setup…" follows changes made outside the
   settings page (periodic re-check; `coredeck setup` nudges the running
   daemon) — after a brew upgrade it stayed until restart. Setup rows show

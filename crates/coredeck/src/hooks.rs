@@ -41,6 +41,9 @@ struct HookEvent {
     /// Tool input (arbitrary JSON)
     #[serde(default)]
     tool_input: Option<serde_json::Value>,
+    /// PostToolUse: the tool's result (arbitrary JSON).
+    #[serde(default)]
+    tool_response: Option<serde_json::Value>,
     /// TaskCreated / TaskCompleted: identifier of the task.
     #[serde(default)]
     task_id: Option<String>,
@@ -84,11 +87,51 @@ struct HookEvent {
     background_tasks: Option<Vec<BackgroundTask>>,
 }
 
-/// One `background_tasks` entry; only the kind matters to the device.
+/// One `background_tasks` entry. `type` is Claude Code's friendly label
+/// ("shell", "monitor", "subagent", "workflow", …).
 #[derive(Debug, Deserialize)]
 struct BackgroundTask {
+    #[serde(default)]
+    id: String,
     #[serde(rename = "type", default)]
     kind: String,
+    #[serde(default)]
+    description: String,
+}
+
+/// How Claude Code describes an artifact watch — the WebSocket monitor
+/// kept for a published or opened Artifact's new versions and comments
+/// ("live updates for artifact <url> (…)").
+const ARTIFACT_WATCH_PREFIX: &str = "live updates for artifact ";
+
+/// Monitor task ids remembered per session (see `device_kind`).
+const MONITOR_IDS_CAP: usize = 32;
+
+impl BackgroundTask {
+    /// The kind to show on the device, matching Claude Code's footer. The
+    /// hook labels an artifact watch "monitor", and a Monitor tool
+    /// command "shell" (it runs as a background shell); the footer shows
+    /// the artifact on its own and counts the command as a monitor.
+    fn device_kind(&self, monitor_ids: &[String]) -> String {
+        if monitor_ids.contains(&self.id) {
+            "monitor".to_string()
+        } else if self.kind == "monitor" && self.description.starts_with(ARTIFACT_WATCH_PREFIX) {
+            "artifact".to_string()
+        } else {
+            self.kind.clone()
+        }
+    }
+}
+
+/// The task id a Monitor tool call returned (`{"taskId": …}`).
+fn monitor_task_id(response: Option<&serde_json::Value>) -> Option<String> {
+    let response = response?;
+    response
+        .get("taskId")
+        .or_else(|| response.get("task_id"))?
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
 }
 
 /// Statusline data from Claude Code (snake_case fields).
@@ -1098,6 +1141,17 @@ async fn handle_post_tool_use(state: &DaemonState, event: &HookEvent) {
         if is_task {
             s.subagents.clear();
         }
+
+        if event.tool_name.as_deref() == Some("Monitor") {
+            if let Some(id) = monitor_task_id(event.tool_response.as_ref()) {
+                if !s.monitor_task_ids.contains(&id) {
+                    if s.monitor_task_ids.len() >= MONITOR_IDS_CAP {
+                        s.monitor_task_ids.remove(0);
+                    }
+                    s.monitor_task_ids.push(id);
+                }
+            }
+        }
     }
 
     // PostToolUse(AskUserQuestion) means the user just answered — drop
@@ -1509,7 +1563,13 @@ async fn handle_stop(state: &DaemonState, event: &HookEvent) {
         let s = claude.touch_session(sid);
         settle_idle(s);
         if let Some(tasks) = &event.background_tasks {
-            s.background_tasks = tasks.iter().map(|t| t.kind.clone()).collect();
+            s.background_tasks = tasks
+                .iter()
+                .map(|t| t.device_kind(&s.monitor_task_ids))
+                .collect();
+            // Monitors that have finished won't be reported again.
+            s.monitor_task_ids
+                .retain(|id| tasks.iter().any(|t| t.id == *id));
         }
         claude.pending_permissions.remove(sid);
     }
@@ -2367,6 +2427,42 @@ fn write_script(path: std::path::PathBuf, contents: &str) -> Result<std::path::P
 #[cfg(test)]
 mod hook_tests {
     use super::*;
+
+    #[test]
+    fn background_tasks_relabelled_like_claude_code_footer() {
+        let tasks: Vec<BackgroundTask> = serde_json::from_value(serde_json::json!([
+            {"id": "b1", "type": "shell", "status": "running", "description": "cargo test", "command": "cargo test"},
+            {"id": "b2", "type": "shell", "status": "running", "description": "errors in app.log", "command": "tail -F app.log"},
+            {"id": "s1", "type": "monitor", "status": "running",
+             "description": "live updates for artifact https://claude.ai/code/artifact/x (watching)"},
+            {"id": "s2", "type": "monitor", "status": "running", "description": "deploy events"},
+            {"id": "m1", "type": "monitor", "status": "running", "description": "", "server": "ci", "tool": "watch"},
+        ]))
+        .unwrap();
+        let monitor_ids = vec!["b2".to_string()];
+        let kinds: Vec<String> = tasks.iter().map(|t| t.device_kind(&monitor_ids)).collect();
+        assert_eq!(
+            kinds,
+            ["shell", "monitor", "artifact", "monitor", "monitor"]
+        );
+    }
+
+    #[test]
+    fn monitor_task_id_from_tool_response() {
+        let resp =
+            serde_json::json!({"taskId": "bx1sibnib", "timeoutMs": 300000, "persistent": false});
+        assert_eq!(monitor_task_id(Some(&resp)).as_deref(), Some("bx1sibnib"));
+        assert_eq!(
+            monitor_task_id(Some(&serde_json::json!({"task_id": "b9"}))).as_deref(),
+            Some("b9")
+        );
+        assert_eq!(monitor_task_id(Some(&serde_json::json!("started"))), None);
+        assert_eq!(
+            monitor_task_id(Some(&serde_json::json!({"taskId": ""}))),
+            None
+        );
+        assert_eq!(monitor_task_id(None), None);
+    }
 
     #[test]
     fn shell_single_quote_escapes() {

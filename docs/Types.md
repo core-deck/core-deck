@@ -283,7 +283,7 @@ Constants for the tab state values used in `tabs` arrays:
 | 0 | Inactive | Tab exists but no active process |
 | 1 | Started | Process started, waiting |
 | 2 | Working | Process actively running |
-| 3 | Background | Idle, but background work (shells, monitors, agents, workflows) is still in flight — from the Stop hook's `background_tasks`. The tab's `current_task` reads e.g. "Waiting · 3 shells · 1 monitor". Firmware before 2.4 draws it like Started. |
+| 3 | Background | Idle, but background work (shells, monitors, agents, workflows) is still in flight — from the Stop hook's `background_tasks`. The tab's `current_task` reads e.g. "Waiting · 3 shells · 1 monitor · 1 artifact". Kinds follow Claude Code's footer: Monitor-tool commands count as monitors (the hook reports them as shells), and artifact watches as artifacts (the hook reports them as monitors) — which alone don't make a session Background. Firmware before 2.4 draws it like Started. |
 
 ## WrapperTabList
 

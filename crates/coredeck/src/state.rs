@@ -74,11 +74,15 @@ pub struct SessionState {
     /// `/compact` or a tail-of-turn auto-compact ends idle, since no
     /// further hook would clear it.
     pub active_before_compact: bool,
-    /// `type` of each in-flight background task ("shell", "monitor",
-    /// "subagent", "workflow", …) as of the last Stop hook, which is the
-    /// only one that reports them. Kept across turns: finishing work
-    /// wakes the session, and that turn's Stop brings the new list.
+    /// Kind of each in-flight background task ("shell", "monitor",
+    /// "subagent", "workflow", "artifact", …) as of the last Stop hook,
+    /// which is the only one that reports them. Kept across turns:
+    /// finishing work wakes the session, and that turn's Stop brings the
+    /// new list.
     pub background_tasks: Vec<String>,
+    /// Task ids the Monitor tool returned, so Stop can count those
+    /// background shells as monitors.
+    pub monitor_task_ids: Vec<String>,
     pub context_window_percent: Option<f64>,
     pub cost_usd: Option<f64>,
     pub model: Option<String>,

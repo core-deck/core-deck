@@ -753,15 +753,23 @@ unsafe fn frontmost_bundle_id() -> Option<String> {
     )
 }
 
+/// Whether an idle session is still waiting on background work. An
+/// artifact watch alone doesn't count: it only relays new versions and
+/// comments, and Claude Code treats such a session as settled too.
+fn has_background_work(kinds: &[String]) -> bool {
+    kinds.iter().any(|k| k != "artifact")
+}
+
 /// "Waiting · 3 shells · 1 monitor" — what an idle session with background
 /// work is waiting on. Known kinds first in a fixed order, then any others
 /// as reported.
 fn background_summary(kinds: &[String]) -> String {
-    const KNOWN: [(&str, &str, &str); 4] = [
+    const KNOWN: [(&str, &str, &str); 5] = [
         ("shell", "shell", "shells"),
         ("monitor", "monitor", "monitors"),
         ("subagent", "agent", "agents"),
         ("workflow", "workflow", "workflows"),
+        ("artifact", "artifact", "artifacts"),
     ];
     let count = |kind: &str| kinds.iter().filter(|k| k.as_str() == kind).count();
     let mut parts: Vec<String> = KNOWN
@@ -811,7 +819,7 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
                 current_task: session.and_then(|s| {
                     // Idle with work in flight: say so instead of the
                     // "No active task" placeholder.
-                    if !s.active && !s.background_tasks.is_empty() {
+                    if !s.active && has_background_work(&s.background_tasks) {
                         Some(background_summary(&s.background_tasks))
                     } else {
                         decorate_task(s)
@@ -822,7 +830,7 @@ async fn build_tab_list(state: &Arc<DaemonState>) -> WrapperTabList {
                 tab_state: match session {
                     None => TAB_STATE_INACTIVE,
                     Some(s) if s.active => TAB_STATE_WORKING,
-                    Some(s) if !s.background_tasks.is_empty() => TAB_STATE_BACKGROUND,
+                    Some(s) if has_background_work(&s.background_tasks) => TAB_STATE_BACKGROUND,
                     Some(_) => TAB_STATE_STARTED,
                 },
                 context_percent: session.and_then(|s| s.context_window_percent),
@@ -1301,6 +1309,18 @@ mod tests {
             super::background_summary(&kinds(&["mcp task"])),
             "Waiting · 1 mcp task"
         );
+        assert_eq!(
+            super::background_summary(&kinds(&["artifact", "shell", "shell"])),
+            "Waiting · 2 shells · 1 artifact"
+        );
+    }
+
+    #[test]
+    fn artifact_watch_alone_is_not_background_work() {
+        let kinds = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(!super::has_background_work(&kinds(&[])));
+        assert!(!super::has_background_work(&kinds(&["artifact"])));
+        assert!(super::has_background_work(&kinds(&["artifact", "monitor"])));
     }
 
     use super::{map_permission_mode, session_label};
