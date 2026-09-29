@@ -512,6 +512,14 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
     } else {
         active.last_tool_summary.clone().unwrap_or_default()
     };
+    // Background: "Waiting" on line 1, the counts on line 2 — they're the
+    // point of this state, so they win over the todo there.
+    let split = if active.tab_state == TAB_STATE_BACKGROUND && active.subagent_label.is_none() {
+        split_background_summary(&task)
+    } else {
+        None
+    };
+    let (task, task2) = split.unwrap_or((task, task2));
     let tabs_state: Vec<u8> = snapshot.tabs.iter().map(|t| t.tab_state).collect();
 
     let update = DisplayUpdate {
@@ -751,6 +759,29 @@ unsafe fn frontmost_bundle_id() -> Option<String> {
             .to_string_lossy()
             .into_owned(),
     )
+}
+
+/// Lay out a background summary ("Waiting · 2 shells · 1 monitor") on the
+/// device's two task lines: "Waiting" on line 1, the counts on line 2.
+/// Counts that don't fit on one line move up to line 1, leading ones
+/// first, only as far as needed.
+fn split_background_summary(summary: &str) -> Option<(String, String)> {
+    const SEP: &str = " · ";
+    let max = crate::hooks::MAX_TASK_LINE_CHARS;
+    let mut parts = summary.split(SEP);
+    let head = parts.next()?;
+    let counts: Vec<&str> = parts.collect();
+    if counts.is_empty() {
+        return None;
+    }
+    let fits = |c: &[&str]| c.join(SEP).chars().count() <= max;
+    let k = (0..counts.len())
+        .find(|&k| fits(&counts[k..]))
+        .unwrap_or(counts.len() - 1);
+    let line1: Vec<&str> = std::iter::once(head)
+        .chain(counts[..k].iter().copied())
+        .collect();
+    Some((line1.join(SEP), counts[k..].join(SEP)))
 }
 
 /// Whether an idle session is still waiting on background work. An
@@ -1313,6 +1344,27 @@ mod tests {
             super::background_summary(&kinds(&["artifact", "shell", "shell"])),
             "Waiting · 2 shells · 1 artifact"
         );
+    }
+
+    #[test]
+    fn background_summary_splits_waiting_from_counts() {
+        use super::split_background_summary as split;
+        let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
+        assert_eq!(split("Waiting · 1 shell"), pair("Waiting", "1 shell"));
+        assert_eq!(
+            split("Waiting · 2 shells · 1 monitor"),
+            pair("Waiting", "2 shells · 1 monitor")
+        );
+        // 33 chars of counts: the first moves up.
+        assert_eq!(
+            split("Waiting · 2 shells · 1 monitor · 1 artifact"),
+            pair("Waiting · 2 shells", "1 monitor · 1 artifact")
+        );
+        assert_eq!(
+            split("Waiting · 3 shells · 2 monitors · 4 agents · 1 workflow"),
+            pair("Waiting · 3 shells · 2 monitors", "4 agents · 1 workflow")
+        );
+        assert_eq!(split("Waiting"), None);
     }
 
     #[test]

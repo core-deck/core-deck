@@ -648,7 +648,7 @@ fn now_unix() -> u64 {
 /// device's TFT row fits 30 glyphs at the current font; the firmware's
 /// 128-byte field is a separate, looser cap. We budget the whole
 /// "{name}: {detail}" string against this so the prefix is accounted for.
-const MAX_TASK_LINE_CHARS: usize = 30;
+pub(crate) const MAX_TASK_LINE_CHARS: usize = 30;
 
 /// Tool-specific glyph prefix for the device. Some tools have long
 /// names that would steal too many of the 30 task-line characters
