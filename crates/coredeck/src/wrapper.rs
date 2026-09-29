@@ -621,7 +621,7 @@ fn decorate_task(s: &crate::state::SessionState) -> Option<String> {
     let raw = s.current_task.as_ref()?;
     let base = if raw == "Thinking…" {
         match (s.effort_level.as_deref(), s.thinking_enabled) {
-            (Some(level), _) => format!("Thinking ({level})…"),
+            (Some(level), _) => format!("Thinking ({level})"),
             (None, true) => "Thinking deeply…".to_string(),
             (None, false) => "Thinking…".to_string(),
         }
