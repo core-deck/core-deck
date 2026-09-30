@@ -512,8 +512,8 @@ async fn push_to_device(state: &Arc<DaemonState>, snapshot: &WrapperTabList) {
     } else {
         active.last_tool_summary.clone().unwrap_or_default()
     };
-    // Background: "Waiting" on line 1, the counts on line 2 — they're the
-    // point of this state, so they win over the todo there.
+    // Background: a summary too long for line 1 continues on line 2 —
+    // the counts are the point of this state, so they win over the todo.
     let split = if active.tab_state == TAB_STATE_BACKGROUND && active.subagent_label.is_none() {
         split_background_summary(&task)
     } else {
@@ -762,12 +762,15 @@ unsafe fn frontmost_bundle_id() -> Option<String> {
 }
 
 /// Lay out a background summary ("Waiting · 2 shells · 1 monitor") on the
-/// device's two task lines: "Waiting" on line 1, the counts on line 2.
-/// Counts that don't fit on one line move up to line 1, leading ones
-/// first, only as far as needed.
+/// device's two task lines. `None` while it fits on one line; otherwise
+/// "Waiting" on line 1 and the counts on line 2, and counts that still
+/// don't fit move up to line 1, leading ones first, only as far as needed.
 fn split_background_summary(summary: &str) -> Option<(String, String)> {
     const SEP: &str = " · ";
     let max = crate::hooks::MAX_TASK_LINE_CHARS;
+    if summary.chars().count() <= max {
+        return None;
+    }
     let mut parts = summary.split(SEP);
     let head = parts.next()?;
     let counts: Vec<&str> = parts.collect();
@@ -1350,10 +1353,13 @@ mod tests {
     fn background_summary_splits_waiting_from_counts() {
         use super::split_background_summary as split;
         let pair = |a: &str, b: &str| Some((a.to_string(), b.to_string()));
-        assert_eq!(split("Waiting · 1 shell"), pair("Waiting", "1 shell"));
+        // Fits one line (30 glyphs): left alone.
+        assert_eq!(split("Waiting · 1 shell"), None);
+        assert_eq!(split("Waiting · 2 shells · 1 monitor"), None);
+        // Too long for one line, counts fit the second.
         assert_eq!(
-            split("Waiting · 2 shells · 1 monitor"),
-            pair("Waiting", "2 shells · 1 monitor")
+            split("Waiting · 2 shells · 1 monitor · 1 agent"),
+            pair("Waiting", "2 shells · 1 monitor · 1 agent")
         );
         // 33 chars of counts: the first moves up.
         assert_eq!(

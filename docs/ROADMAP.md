@@ -45,7 +45,8 @@ The daemon hosts every user-facing surface:
   (reported by the Stop hook as "monitor") show as "artifact" and don't
   alone mark a session Background; Monitor-tool commands (reported as
   "shell") count as monitors, by the task id their PostToolUse returned.
-  On the device, "Waiting" sits on line 1 and the counts on line 2.
+  On the device, a summary too long for one line splits into "Waiting"
+  and the counts on line 2.
 - **0.4.3 tray fixes.** "Finish setup…" follows changes made outside the
   settings page (periodic re-check; `coredeck setup` nudges the running
   daemon) — after a brew upgrade it stayed until restart. Setup rows show
